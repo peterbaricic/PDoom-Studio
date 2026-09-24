@@ -11,6 +11,7 @@
   .p5Canvas { display: none !important; }
   .bar { display: flex; gap: 10px; align-items: center; max-width: 1280px; }
   #scrub { flex: 1; }
+  #play { min-width: 64px; padding: 4px 10px; font: inherit; }
   #tt { font-variant-numeric: tabular-nums; min-width: 190px; }
 </style>
 <script src="node_modules/p5/lib/p5.min.js"></script>
@@ -19,7 +20,8 @@
 <body>
 <main>
   <canvas id="out" width="1920" height="1080"></canvas>
-  <div class="bar"><input id="scrub" type="range" min="0" max="156.6" step="0.0417" value="0"><span id="tt">loading…</span></div>
+  <div class="bar"><button id="play">Play</button><input id="scrub" type="range" min="0" max="156.6" step="0.0417" value="0"><span id="tt">loading…</span></div>
+  <audio id="song" src="assets/pdoom.mp3" preload="auto"></audio>
 </main>
 <script src="src/core.js"></script>
 <script src="src/clawd.js"></script>

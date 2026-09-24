@@ -186,7 +186,10 @@ async function setup() {
   outC = document.getElementById('out'); outX = outC.getContext('2d');
   await Promise.all([document.fonts.load('100px "Permanent Marker"'), document.fonts.load('800 50px "Shantell Sans"')]);
   window.ready = true;
-  if (!location.search.includes('render')) devUI();
+  // p5 ignores redraw() until setup() has returned, so the page modes start on the next task.
+  const q = new URLSearchParams(location.search);
+  if (q.has('worker')) setTimeout(() => workerMode(q.get('parent')));
+  else if (!q.has('render')) setTimeout(devUI);
 }
 function draw() {
   if (!window.ready) return;
@@ -206,7 +209,8 @@ function composite(t) {
   c.globalCompositeOperation = 'source-over';
   drawKaraokeText(c);
 }
-window.renderAt = async (t, type = 'image/png', q = .92) => { T = t; await redraw(); composite(t); return outC.toDataURL(type, q); };
+window.paintAt = async t => { T = t; await redraw(); composite(t); };
+window.renderAt = async (t, type = 'image/png', q = .92) => { await window.paintAt(t); return outC.toDataURL(type, q); };
 // Contact sheet of several times, for quick visual checks: returns { url, ms[] }.
 window.renderSheet = async (times, cols = 3, w = 640) => {
   const h = Math.round(w * 9 / 16), rows = Math.ceil(times.length / cols), sc = document.createElement('canvas');
@@ -220,10 +224,44 @@ window.renderSheet = async (times, cols = 3, w = 640) => {
 };
 window.gpuInfo = () => { const gl = drawingContext, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };
 
+// Background renderer for watch.html: the player (at origin `parent`) posts { i, t, w, h, q } and gets back the frame as
+// a JPEG Blob plus how long painting it took.
+function workerMode(parent) {
+  const small = document.createElement('canvas'), sx = small.getContext('2d');
+  addEventListener('message', async e => {
+    if (e.source !== window.parent || e.origin !== parent) return;
+    const { i, t, w, h, q } = e.data, t0 = performance.now();
+    await window.paintAt(t);
+    if (small.width !== w) { small.width = w; small.height = h; }
+    sx.drawImage(outC, 0, 0, w, h);
+    // Encode synchronously: the async encoders (toBlob, convertToBlob) wait for the hidden frame's throttled refresh.
+    const url = small.toDataURL('image/jpeg', q), bin = atob(url.slice(url.indexOf(',') + 1)), bytes = new Uint8Array(bin.length);
+    for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+    window.parent.postMessage({ type: 'frame', i, blob: new Blob([bytes], { type: 'image/jpeg' }), ms: performance.now() - t0 }, parent);
+  });
+  window.parent.postMessage({ type: 'ready' }, parent);
+}
+
+// Scrubber plus live playback: while the song plays, each frame paints whatever time the audio has reached, so
+// picture and music stay in sync and frames are skipped when painting is slower than 24 fps.
 function devUI() {
-  const s = document.getElementById('scrub'), lab = document.getElementById('tt');
+  const s = document.getElementById('scrub'), lab = document.getElementById('tt'), btn = document.getElementById('play'), song = document.getElementById('song');
   let busy = false, want = null;
-  const go = async () => { if (busy) return; busy = true; while (want != null) { const t = want; want = null; const t0 = performance.now(); await window.renderAt(t); lab.textContent = `${t.toFixed(2)}s  ·  ${Math.round(performance.now() - t0)} ms/frame`; } busy = false; };
-  s.addEventListener('input', () => { want = +s.value; go(); });
+  const go = async () => {
+    if (busy) return; busy = true;
+    while (want != null) {
+      const t = want; want = null; const t0 = performance.now(); await window.paintAt(t);
+      const ms = Math.round(performance.now() - t0);
+      lab.textContent = `${t.toFixed(2)}s  ·  ${ms} ms/frame` + (song.paused ? '' : `  ·  ${(1000 / ms).toFixed(1)} fps`);
+      if (!song.paused) { s.value = song.currentTime; want = song.currentTime; await new Promise(requestAnimationFrame); }
+    }
+    busy = false;
+  };
+  const toggle = () => { if (song.paused) { if (song.ended || +s.value >= DUR) s.value = 0; song.currentTime = +s.value; song.play(); } else song.pause(); };
+  song.addEventListener('play', () => { btn.textContent = 'Pause'; want = song.currentTime; go(); });
+  song.addEventListener('pause', () => { btn.textContent = 'Play'; });
+  btn.addEventListener('click', toggle);
+  addEventListener('keydown', e => { if (e.code === 'Space' && e.target.tagName !== 'BUTTON') { e.preventDefault(); toggle(); } });
+  s.addEventListener('input', () => { if (!song.paused) song.currentTime = +s.value; want = +s.value; go(); });
   want = +(new URLSearchParams(location.search).get('t') || 0); s.value = want; go();
 }

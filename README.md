@@ -39,15 +39,34 @@ The video took two generations, both in Claude Code:
 |---|---|
 | [`src/ch/`](src/ch/) | The video's nine chapters, one file each |
 | [`src/`](src/) | Shared code: Clawd, the guest characters, props, lyrics and the timeline |
-| [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush |
-| [`render.mjs`](render.mjs) | Renders frames in headless Chrome and encodes the MP4 with ffmpeg |
+| [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush (also a scrubber) |
+| [`watch.html`](watch.html) | Player that renders in the background and plays once it can't stutter |
+| [`render.mjs`](render.mjs) | Renders frames in headless Chromium and encodes the MP4 with ffmpeg |
+| [`serve.mjs`](serve.mjs) | Local server for the player and the scrubber |
 | [`STORYBOARD.md`](STORYBOARD.md) | Opus's shot-by-shot plan |
 | [`ANIMATION_GUIDE.md`](ANIMATION_GUIDE.md) | Opus's style and code guide for its subagents |
 | [`legacy/`](legacy/) | The first generation |
 
+## Watching it live in a browser
+
+This needs no ffmpeg and no files written to disk.
+
+```bash
+npm install
+node serve.mjs          # then open http://localhost:8080/
+```
+
+The player renders frames in the background (720p, kept in memory, about 450 MB for the whole song). A bar shows which frames are done. The status line tells you when it's **safe to play**: every frame from the playhead to the end is rendered, so playback can't stutter or stop. Press **Play** (or Space) before then and it starts by itself at that moment. The button shows the countdown, and clicking it again cancels. **Play now** plays whatever is already rendered from the playhead. If it reaches frames that aren't rendered yet, it stops there once and continues by itself when the rest can play to the end. Rendering pauses while the song plays and resumes when you pause. Click or drag the bar to seek.
+
+Rendering first draws one frame per second of the song to measure how heavy each scene is, then estimates the wait. Expect roughly 3–4 frames/s, or about 15–18 minutes for the whole song on an Apple M4 Pro. Starting later in the song means a shorter wait.
+
+Background renderers load from `w0.localhost`, `w1.localhost`, and so on, so the browser gives each its own process. This was tested in Chrome. Browsers that don't resolve `*.localhost` fall back to a single renderer. Add `?workers=N` to change the number of renderers, and `?t=42` to start at 0:42.
+
+For a quick, choppy preview with no waiting, open http://localhost:8080/studio.html. It paints frames live (roughly 3–10 fps) in sync with the song.
+
 ## Rendering
 
-You need Node.js, Google Chrome and ffmpeg. The song is included at `assets/pdoom.mp3`.
+You need Node.js, ffmpeg and a Chromium-based browser. The song is included at `assets/pdoom.mp3`.
 
 ```bash
 npm install
@@ -55,4 +74,4 @@ node render.mjs --frames=0:156.6 --workers=4   # paint every frame into out/fram
 node render.mjs --encode --out=out/pdoom.mp4   # join the frames and the song into an MP4
 ```
 
-If Chrome isn't installed at the default Windows path, add `--chrome=<path to chrome>`.
+On macOS, Windows and Linux, the renderer finds Chrome, Chromium, Edge or Brave on its own. If none of these is installed, run `npm run get-browser` to download a standalone headless Chromium (about 100 MB) into `.browsers/`. To use a specific browser, pass `--chrome=<path>` or set `CHROME_PATH`. The GPU backend defaults to Metal on macOS and D3D11 on Windows; override it with `--angle=<backend>`.

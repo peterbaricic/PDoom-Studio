@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "watch": "node serve.mjs",
+    "frames": "node render.mjs --frames=0:156.6 --workers=4",
+    "encode": "node render.mjs --encode --out=out/pdoom.mp4",
+    "get-browser": "npx @puppeteer/browsers install chrome-headless-shell@stable --path .browsers"
   },
   "keywords": [],
   "author": "",

@@ -1,4 +1,4 @@
-// render.mjs: drive studio.html in headless Chrome.
+// render.mjs: drive studio.html in headless Chrome (or any Chromium: Edge, Brave, chrome-headless-shell; see findBrowser).
 //   node render.mjs --sheet=23,23.5,24 [--cols=3] [--w=640] --out=out/check.jpg   contact sheet (fast visual check)
 //   node render.mjs --stills=0.8,3,23.8 --out=out/test                          full-res PNG stills
 //   node render.mjs --clip=0:6 --fps=24 --out=out/test.mp4                      short clip with audio
@@ -9,12 +9,44 @@
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, join } from 'node:path';
+import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
-const CHROME = args.chrome || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const DUR = 156.6, fps = +(args.fps || 24);
+
+// Any Chromium-based browser works. Order: --chrome=<path>, $CHROME_PATH, an installed browser, then a standalone
+// chrome-headless-shell (`npm run get-browser` puts one in .browsers/; Puppeteer's and Playwright's caches are checked too).
+function findBrowser() {
+  if (args.chrome) return args.chrome;
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const pf = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean);
+  const installed = {
+    darwin: ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Google Chrome Canary']
+      .flatMap(n => [`/Applications/${n}.app/Contents/MacOS/${n}`, join(homedir(), `Applications/${n}.app/Contents/MacOS/${n}`)]),
+    win32: ['Google/Chrome/Application/chrome.exe', 'Chromium/Application/chrome.exe', 'Microsoft/Edge/Application/msedge.exe',
+      'BraveSoftware/Brave-Browser/Application/brave.exe'].flatMap(p => pf.map(d => join(d, p))),
+    linux: ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+      '/snap/bin/chromium', '/usr/bin/microsoft-edge', '/usr/bin/brave-browser'],
+  }[process.platform] || [];
+  const found = installed.find(p => existsSync(p));
+  if (found) return found;
+  const names = new Set(['chrome-headless-shell', 'chrome-headless-shell.exe', 'headless_shell', 'headless_shell.exe']);
+  const search = (dir, depth) => {
+    if (depth < 0 || !existsSync(dir)) return [];
+    return readdirSync(dir, { withFileTypes: true }).sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }))
+      .flatMap(e => e.isDirectory() ? search(join(dir, e.name), depth - 1) : names.has(e.name) ? [join(dir, e.name)] : []);
+  };
+  const caches = ['.browsers', join(homedir(), '.cache/puppeteer'), join(homedir(), 'Library/Caches/ms-playwright'),
+    join(homedir(), '.cache/ms-playwright'), process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ms-playwright')].filter(Boolean);
+  for (const c of caches) { const [hit] = search(c, 4); if (hit) return hit; }
+  console.error('No Chromium-based browser found. Either run `npm run get-browser` (downloads a standalone headless Chromium\n' +
+    'into .browsers/, ~100 MB, no Chrome install needed) or pass --chrome=<path to a Chrome/Edge/Brave/Chromium binary>.');
+  process.exit(1);
+}
+// GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere. Override with --angle=<name>.
+const ANGLE = args.angle || { darwin: 'metal', win32: 'd3d11' }[process.platform];
 const FRAMES_DIR = 'out/frames';
 
 const run = (cmd, a) => new Promise((ok, bad) => { const p = spawn(cmd, a, { stdio: 'inherit' }); p.on('close', c => c ? bad(new Error(cmd + ' exited ' + c)) : ok()); });
@@ -29,9 +61,11 @@ if (args.encode) {
   process.exit(0);
 }
 
+const CHROME = findBrowser();
+console.log('browser:', CHROME);
 const browser = await puppeteer.launch({
   executablePath: CHROME, headless: true, protocolTimeout: 0,
-  args: ['--allow-file-access-from-files', '--ignore-gpu-blocklist', '--use-angle=d3d11', '--enable-gpu-rasterization', '--window-size=1920,1080', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']
+  args: ['--allow-file-access-from-files', '--ignore-gpu-blocklist', ...(ANGLE ? ['--use-angle=' + ANGLE] : []), '--enable-gpu-rasterization', '--window-size=1920,1080', '--disable-renderer-backgrounding', '--disable-background-timer-throttling']
 });
 async function openPage(tag = '') {
   const page = await browser.newPage();

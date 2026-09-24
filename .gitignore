@@ -1,3 +1,5 @@
 node_modules/
 out/
 assets/source.mp4
+.browsers/
+.superpowers/
