@@ -10,11 +10,18 @@ export function buildManifest(version, files) {
   const paths = [...files.keys()].filter(isValidPath).sort();
   const chapters = paths.filter(p => p.startsWith('ch/'));
   const scripts = [...(files.has('shared.js') ? ['shared.js'] : []), ...chapters];
+  // The walkthrough comes from the storyboard's own Walkthrough lines when it parses clean. walkthrough.json only
+  // stands in for a storyboard that doesn't: the Original's, written before the studio's format. (A remix of the
+  // Original carries that walkthrough.json along, so it must not win over the remix's own new storyboard.)
+  const sb = files.has('STORYBOARD.md') ? parseStoryboard(files.get('STORYBOARD.md')) : null;
+  const fromStoryboard = () => sb.chapters.map(c => ({ n: c.n, name: c.name, start: c.start, end: c.end, text: c.walkthrough }));
   let walkthrough = [];
-  if (files.has('walkthrough.json')) {
+  if (sb && !sb.errors.length) {
+    walkthrough = fromStoryboard();
+  } else if (files.has('walkthrough.json')) {
     walkthrough = JSON.parse(files.get('walkthrough.json')).map(c => ({ n: c.n, name: c.name, start: CHAPTER_WINDOWS[c.n - 1][0], end: CHAPTER_WINDOWS[c.n - 1][1], text: c.text }));
-  } else if (files.has('STORYBOARD.md')) {
-    walkthrough = parseStoryboard(files.get('STORYBOARD.md')).chapters.map(c => ({ n: c.n, name: c.name, start: c.start, end: c.end, text: c.walkthrough }));
+  } else if (sb) {
+    walkthrough = fromStoryboard();
   }
   return { id: version.id, title: version.title || '', logline: version.logline || '', status: version.status || 'concept',
     example: !!version.example, options: { ...DEFAULT_OPTIONS, ...version.options }, files: paths, scripts, walkthrough };

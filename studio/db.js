@@ -159,16 +159,19 @@ class StudioDb {
     return this.writeFiles(r.version_id, [{ path: r.path, content: r.content }], { source: 'restore', note: `restored revision ${id}` })[0] ?? null;
   }
 
-  // Copies fromId's current files and metadata into user.db as a new version (never an example, whatever fromId is).
-  // Its revisions are source 'remix'; its status is 'ready' once it already has all 9 chapters, else fromId's status.
+  // Copies fromId's current files and metadata into user.db as a new version (never an example, whatever fromId is),
+  // all in one transaction: a remix that fails part way leaves nothing behind. Its revisions are source 'remix'; its
+  // status is 'ready' once it already has all 9 chapters, else fromId's status.
   remixVersion(fromId, { id, title }) {
     const src = this.getVersion(fromId);
     if (!src) throw new Error(`no such version: ${fromId}`);
-    this.createVersion({ id, title: title ?? src.title, logline: src.logline, concept: src.concept, options: src.options });
-    const files = this.listFiles(fromId).map(f => this.getFile(fromId, f.path));
-    this.writeFiles(id, files, { source: 'remix', note: `remixed from ${fromId}` });
-    const chapters = files.filter(f => f.path.startsWith('ch/')).length;
-    return this.updateVersion(id, { status: chapters >= 9 ? 'ready' : src.status });
+    return this.db.transaction(() => {
+      this.createVersion({ id, title: title ?? src.title, logline: src.logline, concept: src.concept, options: src.options });
+      const files = this.listFiles(fromId).map(f => this.getFile(fromId, f.path));
+      this.writeFiles(id, files, { source: 'remix', note: `remixed from ${fromId}` });
+      const chapters = files.filter(f => f.path.startsWith('ch/')).length;
+      return this.updateVersion(id, { status: chapters >= 9 ? 'ready' : src.status });
+    })();
   }
 
   // Moves a user version into default.db: its metadata, current files and one revision per file (source 'promote',

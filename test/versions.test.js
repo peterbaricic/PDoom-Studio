@@ -18,10 +18,25 @@ test('manifest orders shared.js before chapters and reads walkthrough from the s
   expect(m.walkthrough[0]).toEqual({ n: 1, name: 'Chapter 1', start: 0, end: 23, text: 'What happens in chapter 1.' });
 });
 
-test('walkthrough.json wins over the storyboard', () => {
+test('a storyboard that parses clean wins over walkthrough.json; walkthrough.json stands in for one that does not', () => {
+  // e.g. a remix of the Original (which carries its legacy walkthrough.json along) given a new storyboard
   const wt = JSON.stringify([{ n: 1, name: 'Lab', text: 'Night lab.' }]);
-  const m = buildManifest({ id: 'a', options: {} }, new Map([['walkthrough.json', wt], ['STORYBOARD.md', goodStoryboard()]]));
-  expect(m.walkthrough).toEqual([{ n: 1, name: 'Lab', start: 0, end: 23, text: 'Night lab.' }]);
+  const clean = buildManifest({ id: 'a', options: {} }, new Map([['walkthrough.json', wt], ['STORYBOARD.md', goodStoryboard()]]));
+  expect(clean.walkthrough).toHaveLength(9);
+  expect(clean.walkthrough[0]).toEqual({ n: 1, name: 'Chapter 1', start: 0, end: 23, text: 'What happens in chapter 1.' });
+  const legacy = buildManifest({ id: 'a', options: {} }, new Map([['walkthrough.json', wt], ['STORYBOARD.md', '# an older, freer format']]));
+  expect(legacy.walkthrough).toEqual([{ n: 1, name: 'Lab', start: 0, end: 23, text: 'Night lab.' }]);
+  expect(buildManifest({ id: 'a', options: {} }, new Map([['walkthrough.json', wt]])).walkthrough).toEqual(legacy.walkthrough);
+});
+
+test('a remix of the Original shows its own storyboard\'s walkthrough once it has one', () => {
+  const udb = openDb(':memory:', { defaultPath: tempDefaultDb() });
+  udb.remixVersion('original', { id: 'mine', title: 'Mine' });
+  expect(udb.getFile('mine', 'walkthrough.json')).not.toBeNull();
+  expect(versionManifest(udb, 'mine').walkthrough).toEqual(versionManifest(udb, 'original').walkthrough);
+  udb.writeFiles('mine', [{ path: 'STORYBOARD.md', content: goodStoryboard() }], { source: 'manual' });
+  expect(versionManifest(udb, 'mine').walkthrough.map(c => c.text)).toEqual(Array.from({ length: 9 }, (_, i) => `What happens in chapter ${i + 1}.`));
+  udb.close();
 });
 
 test('versionManifest reads from the database', () => {
@@ -46,6 +61,7 @@ test('versionManifest reads the Original example from the attached default datab
   expect(m.status).toBe('ready');
   expect(m.example).toBe(true);
   expect(m.walkthrough).toHaveLength(9);
+  expect(m.walkthrough[0]).toMatchObject({ n: 1, name: 'The Lab', start: 0, end: 23 });   // from its walkthrough.json
   expect(udb.history('original', 'ch/c01_lab.js')[0].source).toBe('import');
   udb.close();
 });

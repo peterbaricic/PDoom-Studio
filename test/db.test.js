@@ -142,6 +142,17 @@ test('remixVersion carries over the source status when not all chapters exist ye
   udb.close();
 });
 
+test('remixVersion is all or nothing', () => {
+  const udb = openDb(tempDbPath('user-'), { defaultPath: freshDefaultPath() });
+  const revisions = () => udb.db.query('SELECT COUNT(*) AS n FROM revisions').get().n;
+  udb.updateVersion = () => { throw new Error('boom'); };   // its last step fails
+  expect(() => udb.remixVersion('original', { id: 'half', title: 'Half' })).toThrow('boom');
+  expect(udb.getVersion('half')).toBeNull();
+  expect(udb.listFiles('half')).toEqual([]);
+  expect(revisions()).toBe(0);
+  udb.close();
+});
+
 test('remixVersion copies an example into user.db; promoteVersion moves it back', () => {
   const defaultPath = freshDefaultPath();
   const udb = openDb(tempDbPath('user-'), { defaultPath });
