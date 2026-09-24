@@ -43,6 +43,11 @@ const parseVersion = r => r && { ...r, options: JSON.parse(r.options), example: 
 const parseJob = r => r && { ...r, params: JSON.parse(r.params) };
 const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids) };
 
+// SQLite reads the attached name as a URI (for its ?mode=ro), so a %, ? or # in the path itself is percent-encoded:
+// otherwise it would be taken as an escape, the query or a fragment, and SQLite would quietly open (and create)
+// some other file instead.
+const readOnlyUri = path => `file:${path.replace(/[%?#]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}?mode=ro`;
+
 // path = user.db. { defaultPath } = studio/default.db: attached read-only as schema "def" when given and present.
 // Without defaultPath (or when the file doesn't exist yet), behavior is exactly the single-database store this was.
 export function openDb(path = 'studio.db', { defaultPath } = {}) {
@@ -50,7 +55,7 @@ export function openDb(path = 'studio.db', { defaultPath } = {}) {
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
   const hasDef = !!(defaultPath && existsSync(defaultPath));
-  if (hasDef) db.query('ATTACH DATABASE ? AS def').run(`file:${defaultPath}?mode=ro`);
+  if (hasDef) db.query('ATTACH DATABASE ? AS def').run(readOnlyUri(defaultPath));
   return new StudioDb(db, { defaultPath, hasDef });
 }
 

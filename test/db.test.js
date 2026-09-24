@@ -1,5 +1,5 @@
 import { test, expect, beforeEach } from 'bun:test';
-import { mkdtempSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, isValidPath, EXAMPLE_REVISION_FLOOR } from '../studio/db.js';
@@ -188,6 +188,21 @@ test('example revision ids are >= EXAMPLE_REVISION_FLOOR and getRevision resolve
   const sample = revs[0];
   expect(udb.getRevision(sample.id)).toMatchObject({ id: sample.id, version_id: 'original', path: sample.path });
   udb.close();
+});
+
+test('a default.db path with URI-special characters (#, ?, %) is attached as is, read-only', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'uri-')), dir = join(parent, 'a#b?c%41d'), defaultPath = join(dir, 'default.db');
+  mkdirSync(dir);
+  cpSync(join(root, 'studio/default.db'), defaultPath);
+  const bytes = readFileSync(defaultPath);
+  const udb = openDb(join(parent, 'user.db'), { defaultPath });
+  expect(udb.getVersion('original')).toMatchObject({ id: 'original', example: true });
+  expect(udb.listFiles('original').map(f => f.path)).toContain('STORYBOARD.md');
+  udb.close();
+  // no stray file at a truncated path (e.g. "a" for "a#b…"), and the examples database itself untouched
+  expect(readdirSync(parent).filter(n => !n.startsWith('user.db'))).toEqual(['a#b?c%41d']);
+  expect(readdirSync(dir)).toEqual(['default.db']);
+  expect(readFileSync(defaultPath).equals(bytes)).toBe(true);
 });
 
 test('opening with defaultPath never modifies studio/default.db, and creates no -wal/-shm', () => {
