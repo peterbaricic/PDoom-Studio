@@ -109,6 +109,11 @@ test('version responses carry storyboard errors, and the whole history', async (
   expect(hist[0].content).toBeUndefined();
 });
 
+test('the legacy-format Original never shows storyboard errors', async () => {
+  importOriginal(db, root);
+  expect((await (await get('/api/versions/original')).json()).storyboardErrors).toEqual([]);
+});
+
 test('work folders are served while a job runs', async () => {
   db.createVersion({ id: 'a' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });

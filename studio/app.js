@@ -49,8 +49,10 @@ export function createApp({ db, root, token, queue, events, port = 8080, claudeB
       const m = versionManifest(db, id);
       if (!m) return error(404, 'no such version');
       const sb = db.getFile(id, 'STORYBOARD.md');
+      // walkthrough.json only exists on versions imported in the legacy format (currently just Original), whose
+      // STORYBOARD.md predates the studio's stricter format and will never parse clean; don't flag it as broken.
       return json({ ...m, concept: db.getVersion(id).concept, fileRevisions: Object.fromEntries(db.listFiles(id).map(f => [f.path, f.revision_id])),
-        storyboardErrors: sb ? parseStoryboard(sb.content).errors : [] });
+        storyboardErrors: sb && !m.files.includes('walkthrough.json') ? parseStoryboard(sb.content).errors : [] });
     }],
     ['GET', /^\/api\/versions\/([a-z0-9-]+)\/history$/, (req, [, id]) => json(db.history(id, null).map(({ content, ...r }) => r))],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)$/, async (req, [, id]) => {

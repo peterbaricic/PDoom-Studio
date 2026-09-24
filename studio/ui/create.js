@@ -55,10 +55,11 @@ async function drawVersion(main, id) {
   // 1 · concept
   const conceptText = h('textarea#concept-text', { rows: 4 }), cModel = modelSelect();
   const redraft = h('button#draft-storyboard.needs-claude', { onclick: async () => {
+    redraft.disabled = true;
     try {
       await api('PUT', `/api/versions/${id}`, { concept: conceptText.value });
       await api('POST', '/api/jobs', { kind: 'storyboard', versionId: id, model: cModel.value || null });
-    } catch (e) { fail(e); }
+    } catch (e) { fail(e); } finally { redraft.disabled = false; }
   } }, 'Draft storyboard');
   // Engine options: the brush wipes between chapters and the corner P(doom) meter.
   const optToggle = (key, text) => {
@@ -81,8 +82,9 @@ async function drawVersion(main, id) {
   } }, 'Approve and build chapters');
   const ask = h('button.needs-claude', { onclick: async () => {
     if (!feedback.value.trim()) return;
+    ask.disabled = true;
     try { await api('POST', '/api/jobs', { kind: 'storyboard', versionId: id, params: { feedback: feedback.value.trim() }, model: sModel.value || null }); feedback.value = ''; }
-    catch (e) { fail(e); }
+    catch (e) { fail(e); } finally { ask.disabled = false; }
   } }, 'Ask for changes');
   // 3 · chapters
   const tiles = h('div.tiles'), detail = h('div.detail');
