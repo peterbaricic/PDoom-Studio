@@ -61,7 +61,7 @@ bun run studio          # then open http://localhost:8080/
 **Create**: describe a concept and Claude drafts a storyboard (the plan for the nine chapters). Review it, edit it or
 ask for changes, then approve it and Claude builds the chapters, three at a time, checking each one with real renders.
 Preview any chapter, give feedback to revise it, or restore an earlier revision. When you're happy, press
-**Final render** to paint the 1080p MP4 (about 15 minutes).
+**Final render** to paint the 1080p MP4 (about 20 minutes).
 
 **Play**: every finished render, with the video beside a walkthrough that follows playback, and how it was made.
 

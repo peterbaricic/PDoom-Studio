@@ -87,13 +87,15 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
   const code = await proc.exited;
   clearTimeout(timer); if (escalateTimer) clearTimeout(escalateTimer);
   ctx.signal.removeEventListener('abort', kill);
-  if (ctx.signal.aborted) throw new Error('cancelled');
-  if (timedOut) throw new Error(`Claude did not finish within ${Math.round(timeoutMs / 60000)} minutes`);
+  // A failed run can still have cost something: the error carries it, so the job's cost includes it.
+  const cost = result?.total_cost_usd || 0, fail = message => Object.assign(new Error(message), { cost });
+  if (ctx.signal.aborted) throw fail('cancelled');
+  if (timedOut) throw fail(`Claude did not finish within ${Math.round(timeoutMs / 60000)} minutes`);
   if (code !== 0 || !result || result.is_error) {
     const tail = (await stderr).trim().split('\n').slice(-3).join(' ');
-    throw new Error(result?.result || tail || `claude exited with code ${code}`);
+    throw fail(result?.result || tail || `claude exited with code ${code}`);
   }
-  return { cost: result.total_cost_usd || 0 };
+  return { cost };
 }
 
 export function createClaudeRunner({ db, root, data = root, baseUrl, events = null, claudeCmd = (process.env.CLAUDE_BIN || 'claude').split(' '),
@@ -122,8 +124,9 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       // A previous attempt could have planted its own .claude/settings.json; remove it before every attempt so a
       // fix attempt can't load permissions Claude wrote for itself (--setting-sources project reads the cwd).
       rmSync(join(dir, '.claude'), { recursive: true, force: true });
-      const r = await runClaude({ cmd: claudeCmd, prompt, dir, settings, root, model: job.model, env, ctx, timeoutMs });
-      spent += r.cost; ctx.cost(spent);
+      try { spent += (await runClaude({ cmd: claudeCmd, prompt, dir, settings, root, model: job.model, env, ctx, timeoutMs })).cost; }
+      catch (e) { spent += e.cost || 0; throw e; }
+      finally { ctx.cost(spent); }
     };
     const revertOthers = () => {
       const now = readWorkFiles(dir), reverted = [];

@@ -1,5 +1,5 @@
 import { test, expect, beforeEach } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { importOriginal } from '../studio/versions.js';
@@ -156,6 +156,42 @@ test('job lists leave the logs out; a single job comes with its log', async () =
   }
   expect(await (await get(`/api/jobs/${jid}`)).json()).toMatchObject({ id: jid, kind: 'storyboard', params: {}, log: 'hello log' });
   expect((await get('/api/jobs/999')).status).toBe(404);
+});
+
+test('a final render needs all nine chapters, and one render of a version at a time', async () => {
+  db.createVersion({ id: 'a' });
+  const chapter = n => ({ path: `ch/c0${n}.js`, content: `// ${n}` });
+  db.writeFiles('a', [1, 2, 3, 4, 5, 6, 7, 8].map(chapter), { source: 'manual' });
+  const render = () => send('POST', '/api/jobs', { kind: 'render', versionId: 'a' });
+  let res = await render();
+  expect([res.status, (await res.json()).error]).toEqual([409, 'a final render needs all nine chapters (8 of 9 are written)']);
+  db.writeFiles('a', [chapter(9)], { source: 'manual' });
+  expect((await render()).status).toBe(201);
+  const jid = db.addJob({ kind: 'render', versionId: 'a' });
+  for (const status of ['queued', 'running']) {
+    db.updateJob(jid, { status });
+    res = await render();
+    expect([res.status, (await res.json()).error]).toEqual([409, `a render of this version is already ${status}`]);
+  }
+  db.updateJob(jid, { status: 'done' });
+  expect((await render()).status).toBe(201);
+});
+
+test('health reports the tools, and whether the Claude CLI is signed in', async () => {
+  const dir = tempDir('cli-'), calls = join(dir, 'calls');
+  const cli = (name, body) => { writeFileSync(join(dir, name), body); return `bun ${join(dir, name)}`; };
+  const health = async claudeBin => {
+    app = createApp({ db, root, data, token: 'tok', queue: {}, events: createEvents(), port: 8080, claudeBin, authTimeoutMs: 500 });
+    return (await get('/api/health')).json();
+  };
+  expect(await health(`bun ${join(root, 'test/fake-claude.js')}`)).toMatchObject({ claude: true, claudeSignedIn: true });
+  const out = cli('out.js', `require('fs').appendFileSync(${JSON.stringify(calls)}, 'x'); console.log(JSON.stringify({ loggedIn: false })); process.exit(1);`);
+  expect(await health(out)).toMatchObject({ claude: true, claudeSignedIn: false });
+  await get('/api/health');                                   // cached for a minute: no second `claude auth status`
+  expect(readFileSync(calls, 'utf8')).toBe('x');
+  expect(await health(cli('hang.js', 'await Bun.sleep(5000);'))).toMatchObject({ claudeSignedIn: null });
+  expect(await health(cli('junk.js', 'console.log("not json")'))).toMatchObject({ claudeSignedIn: null });
+  expect(await health('no-such-claude-cli')).toMatchObject({ claude: false, claudeSignedIn: null });
 });
 
 test('jobs are handed to the queue', async () => {

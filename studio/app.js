@@ -25,7 +25,7 @@ const studioCsp = port => ["default-src 'self'", "script-src 'self' 'unsafe-inli
   `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`].join('; ');
 const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
-export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude' }) {
+export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000 }) {
   const app = { port };
   const guard = makeGuard({ port: () => app.port, token });
   const dirs = { ui: join(root, 'studio/ui'), work: join(data, '.studio/work'), library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
@@ -35,6 +35,22 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     return p ? serveFile(req, p, headers) : error(404, 'not found');
   };
   const needVersion = id => db.getVersion(id) ? null : error(404, 'no such version');
+
+  // Whether the Claude CLI is signed in (`claude auth status` prints JSON with loggedIn): true, false, or null when
+  // that can't be told (no CLI, no answer within the timeout, unexpected output). Asked at most once a minute.
+  let signedIn = { at: -Infinity, value: null, pending: null };
+  const claudeSignedIn = () => {
+    if (Date.now() - signedIn.at < 60000) return signedIn.value;
+    signedIn.pending ??= (async () => {
+      let p;
+      try { p = Bun.spawn([...claudeBin.split(' '), 'auth', 'status'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' }); } catch { return null; }
+      const timer = setTimeout(() => p.kill(9), authTimeoutMs);
+      const out = await new Response(p.stdout).text();
+      clearTimeout(timer);
+      try { const { loggedIn } = JSON.parse(out); return typeof loggedIn === 'boolean' ? loggedIn : null; } catch { return null; }
+    })().then(value => { signedIn = { at: Date.now(), value, pending: null }; return value; });
+    return signedIn.pending;
+  };
 
   const routes = [
     ['GET', /^\/$/, req => onRenderer(req) ? error(404, 'not found')
@@ -51,7 +67,10 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     ['GET', /^\/library\/(.+)$/, (req, [, p]) => file(req, dirs.library, p)],
     ['GET', /^\/thumbs\/(.+)$/, (req, [, p]) => file(req, dirs.thumbs, p, NO_STORE)],
 
-    ['GET', /^\/api\/health$/, () => json({ claude: !!Bun.which(claudeBin.split(' ')[0]), ffmpeg: !!Bun.which('ffmpeg') })],
+    ['GET', /^\/api\/health$/, async () => {
+      const claude = !!Bun.which(claudeBin.split(' ')[0]);
+      return json({ claude, claudeSignedIn: claude ? await claudeSignedIn() : null, ffmpeg: !!Bun.which('ffmpeg') });
+    }],
     ['GET', /^\/api\/events$/, req => events.stream(req)],
 
     ['GET', /^\/api\/versions$/, () => json(db.listVersions().map(v => ({ ...v, chapters: db.listFiles(v.id).filter(f => f.path.startsWith('ch/')).length })))],
@@ -117,6 +136,12 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const b = await body(req);
       if (!JOB_KINDS.includes(b.kind)) return error(400, `kind must be one of ${JOB_KINDS.join(', ')}`);
       const missing = needVersion(b.versionId); if (missing) return missing;
+      if (b.kind === 'render') {
+        const chapters = new Set(db.listFiles(b.versionId).map(f => /^ch\/c0(\d)/.exec(f.path)?.[1]).filter(Boolean)).size;
+        if (chapters < 9) return error(409, `a final render needs all nine chapters (${chapters} of 9 are written)`);
+        const [busy] = db.findJobs({ versionId: b.versionId, kinds: ['render'], statuses: ['queued', 'running'] });
+        if (busy) return error(409, `a render of this version is already ${busy.status}`);
+      }
       return json({ id: queue.enqueue({ kind: b.kind, versionId: b.versionId, params: b.params || {}, model: b.model || null }) }, 201);
     }],
     ['POST', /^\/api\/jobs\/(\d+)\/cancel$/, (req, [, jid]) => json({ ok: queue.cancel(+jid) })],

@@ -6,6 +6,9 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync, appendFileSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+// `claude auth status` (the studio's health check) answers signed in, and touches nothing.
+if (process.argv[2] === 'auth' && process.argv[3] === 'status') { console.log(JSON.stringify({ loggedIn: true })); process.exit(0); }
+
 const plan = JSON.parse(process.env.FAKE_CLAUDE_PLAN || '{"runs":[{}]}');
 const n = existsSync('.fake-runs') ? +readFileSync('.fake-runs', 'utf8') : 0;
 writeFileSync('.fake-runs', String(n + 1));

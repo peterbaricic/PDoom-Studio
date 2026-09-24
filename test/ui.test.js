@@ -81,3 +81,17 @@ test('play a finished render with a synced walkthrough', async () => {
   await page.waitForFunction(() => document.querySelector('.walkthrough li.current')?.textContent.includes('Chapter 2'));
   expect(await page.$eval('.made', e => e.textContent)).toContain('A test concept.');
 }, { timeout: 60000 });
+
+test('after a server restart, a page with a stale token asks for a reload', async () => {
+  const stale = await browser.newPage();
+  await stale.setRequestInterception(true);
+  stale.on('request', async r => {
+    if (new URL(r.url()).pathname !== '/') return r.continue();
+    const html = await (await fetch(r.url())).text();
+    r.respond({ status: 200, contentType: 'text/html', body: html.replace(/name="studio-token" content="[0-9a-f]+"/, 'name="studio-token" content="stale"') });
+  });
+  await stale.goto(`${url}/#/create`);
+  const message = await stale.evaluate(() => import('/ui/app.js').then(m => m.api('POST', '/api/versions', { id: 'stale-token' })).then(() => 'created', e => e.message));
+  expect(message).toBe('The studio server restarted — reload this page.');
+  await stale.close();
+}, { timeout: 60000 });

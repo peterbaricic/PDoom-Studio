@@ -139,3 +139,52 @@ test("sandbox: the command Claude may run ignores a bunfig.toml and .env planted
   expect(r.code).toBe(0);
   expect(statSync(join(dir, 'sheet.jpg')).size).toBeGreaterThan(10000);
 }, T);
+
+test('frames: a chapter that fails to load fails the render instead of painting it as missing', async () => {
+  const data = tempDir(), db = openDb(join(data, 'studio.db')), frames = join(data, 'frames');
+  db.createVersion({ id: 'broken' });
+  db.writeFiles('broken', [{ path: 'ch/c01.js', content: "throw new Error('boom');" }], { source: 'manual' });
+  db.close();
+  const r = await spawn(['bun', 'render.mjs', '--v=broken', '--frames=1:1.5', '--workers=1', `--frames-dir=${frames}`], { env: isolatedEnv(data) });
+  expect(r.code).not.toBe(0);
+  expect(r.err).toContain('boom');
+  expect(existsSync(frames) ? readdirSync(frames).filter(n => n.endsWith('.jpg')) : []).toEqual([]);
+}, T);
+
+// The direct children of a process (pgrep exits 1 when there are none).
+const children = pid => (Bun.spawnSync(['pgrep', '-P', String(pid)]).stdout.toString().match(/\d+/g) || []).map(Number);
+const gone = async (pid, ms = 5000) => {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await Bun.sleep(50)) { try { process.kill(pid, 0); } catch { return true; } }
+  return false;
+};
+async function startUntil(argv, env, line) {
+  const p = Bun.spawn(argv, { env, stdout: 'pipe', stderr: 'pipe' }), reader = p.stdout.getReader(), dec = new TextDecoder();
+  let out = '';
+  while (!out.includes(line)) { const { value, done } = await reader.read(); if (done) throw new Error('exited early: ' + out); out += dec.decode(value); }
+  reader.releaseLock();
+  return p;
+}
+
+test('SIGTERM during encoding stops ffmpeg too', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'enc-'));
+  // A minute of 1080p frames: encoding them takes ffmpeg several seconds even on a fast machine.
+  Bun.spawnSync(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=24', '-frames:v', '1440', '-q:v', '31',
+    '-start_number', '0', join(dir, 'f%05d.jpg')]);
+  const p = await startUntil(['bun', 'render.mjs', '--encode', `--frames-dir=${dir}`, `--out=${join(dir, 'out.mp4')}`], isolatedEnv(), 'encoding');
+  let kids = [];
+  for (let i = 0; i < 50 && !kids.length; i++) { kids = children(p.pid); if (!kids.length) await Bun.sleep(100); }
+  expect(kids).toHaveLength(1);
+  p.kill('SIGTERM');
+  expect(await p.exited).not.toBe(0);
+  expect(await gone(kids[0], 1500)).toBe(true);
+}, T);
+
+test('SIGTERM while painting frames closes the browser and exits', async () => {
+  const frames = mkdtempSync(join(tmpdir(), 'frames-'));
+  const p = await startUntil(['bun', 'render.mjs', '--frames=0:156.6', '--workers=1', `--frames-dir=${frames}`], isolatedEnv(), 'frames to render');
+  const kids = children(p.pid);
+  expect(kids.length).toBeGreaterThan(0);
+  p.kill('SIGTERM');
+  expect(await p.exited).not.toBe(0);
+  for (const pid of kids) expect(await gone(pid)).toBe(true);
+}, T);

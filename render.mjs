@@ -61,7 +61,25 @@ const DUR = 156.6, fps = +(args.fps || 24);
 const FRAMES_DIR = args['frames-dir'] ? resolve(CWD, args['frames-dir']) : resolve(HERE, 'out/frames');
 const times = s => String(s).split(',').map(Number);
 
-const run = (cmd, a) => new Promise((ok, bad) => { const p = spawn(cmd, a, { stdio: 'inherit' }); p.on('close', c => c ? bad(new Error(cmd + ' exited ' + c)) : ok()); });
+// Stopped with SIGTERM or SIGINT (e.g. a cancelled studio job), stop ffmpeg and the browser too, so nothing keeps
+// running after this process.
+const kids = new Set();
+let browser = null, stopping = false;
+const stop = async code => {
+  if (stopping) return;
+  stopping = true;
+  for (const k of kids) k.kill('SIGKILL');
+  await Promise.race([browser?.close(), Bun.sleep(5000)]).catch(() => {});
+  process.exit(code);
+};
+process.on('SIGTERM', () => stop(143));
+process.on('SIGINT', () => stop(130));
+const child = (cmd, a, opts) => { const p = spawn(cmd, a, opts); kids.add(p); p.on('close', () => kids.delete(p)); return p; };
+
+const run = (cmd, a) => new Promise((ok, bad) => {
+  const p = child(cmd, a, { stdio: 'inherit' });
+  p.on('close', (c, sig) => c || sig ? bad(new Error(`${cmd} exited ${c ?? sig}`)) : ok());
+});
 
 if (args.encode) {
   const out = outPath('out/pdoom.mp4'), start = +(args.start || 0), n = readdirSync(FRAMES_DIR).filter(f => f.endsWith('.jpg')).length;
@@ -89,20 +107,30 @@ if (!base) {
 const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
 const PAGE = `${pageOrigin.origin}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
-const browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
+browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
 let exitCode = 0;
-async function openPage(tag = '', errors = null) {
+// errors: collect load and page errors there instead of logging them (--check). strict: an error while the page loads
+// (a chapter that throws, a script that can't load) is fatal instead of logged, so it can't be painted as missing.
+async function openPage(tag = '', errors = null, { strict = false } = {}) {
+  const loadErrors = [];
+  let loading = true;
   const page = await browser.newPage();
   page.on('console', m => {
     if (!['error', 'warn'].includes(m.type())) return;
     if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
     else console.log(`[page${tag}]`, m.text());
   });
-  page.on('pageerror', e => errors ? errors.push(e.message) : console.log(`[page error${tag}]`, e.message));
+  page.on('pageerror', e => {
+    if (errors) return errors.push(e.message);
+    console.log(`[page error${tag}]`, e.message);
+    if (loading) loadErrors.push(e.message);
+  });
   await page.goto(PAGE, { waitUntil: 'networkidle0' });
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
   const loadError = await page.evaluate(() => window.loadError || null);
   if (loadError) { if (errors) errors.push(loadError); else throw new Error(loadError); }
+  loading = false;
+  if (strict && loadErrors.length) throw new Error(`the page did not load cleanly: ${loadErrors.join('; ')}`);
   if (args.loop) await page.evaluate(name => { window.LOOP = LOOPS[name]; }, args.loop);
   return page;
 }
@@ -169,7 +197,7 @@ if (args.check) {
   console.log(`${todo.length} frames to render (${last - first + 1 - todo.length} already done), ${workers} workers`);
   let next = 0, done = 0; const start = Date.now();
   const work = async w => {
-    const page = await openPage('#' + w);
+    const page = await openPage('#' + w, null, { strict: true });
     while (next < todo.length) {
       const i = todo[next++], f = `${FRAMES_DIR}/f${String(i).padStart(5, '0')}.jpg`;
       const buf = await frameOf(page, i / fps, 'image/jpeg', .94);
@@ -180,12 +208,13 @@ if (args.check) {
       }
     }
   };
-  await Promise.all(Array.from({ length: workers }, (_, w) => work(w)));
+  try { await Promise.all(Array.from({ length: workers }, (_, w) => work(w))); }
+  catch (e) { console.error(`render failed: ${e.message}`); exitCode = 1; }
 } else {
   const page = await openPage();
   const [a, b] = args.clip ? String(args.clip).split(':').map(Number) : [0, DUR];
   const out = outPath('out/clip.mp4'); mkdirSync(dirname(out), { recursive: true });
-  const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
+  const ff = child('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
     '-ss', String(a), '-t', String(b - a), '-i', 'assets/pdoom.mp3',
     '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', out],
     { stdio: ['pipe', 'inherit', 'inherit'] });

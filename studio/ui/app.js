@@ -9,6 +9,8 @@ export async function api(method, path, body) {
   const res = await fetch(path, { method, headers: { 'content-type': 'application/json', 'x-studio-token': token },
     body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
+  // Every server start makes a new token, so a page left open across a restart has a stale one.
+  if (res.status === 403 && data.error === 'missing or wrong token') throw new Error('The studio server restarted — reload this page.');
   if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
   return data;
 }
@@ -39,8 +41,10 @@ for (const type of ['job', 'log', 'version', 'library']) es.addEventListener(typ
 });
 
 export const health = get('/api/health').then(hl => {
-  if (!hl.claude) { document.body.dataset.noclaude = ''; document.getElementById('health').textContent = 'Claude Code CLI not found: creating is disabled'; }
-  else if (!hl.ffmpeg) document.getElementById('health').textContent = 'ffmpeg not found: final renders will fail';
+  const say = text => { document.getElementById('health').textContent = text; };
+  if (!hl.claude) { document.body.dataset.noclaude = ''; say('Claude Code CLI not found: creating is disabled'); }
+  else if (hl.claudeSignedIn === false) say('Claude CLI is signed out — run `claude auth login` in a terminal');
+  else if (!hl.ffmpeg) say('ffmpeg not found: final renders will fail');
   return hl;
 });
 

@@ -39,3 +39,13 @@ test('release does not delete a lock now held by another pid', () => {
   release();
   expect(existsSync(`${db}.lock`)).toBe(true);
 });
+
+test('an empty or corrupt lock file is stale', () => {
+  for (const content of ['', '{"pid":', 'null', '{"port":1}']) {
+    const db = dbPath();
+    writeFileSync(`${db}.lock`, content);
+    const release = acquireLock(db, 4323);
+    expect(JSON.parse(readFileSync(`${db}.lock`, 'utf8'))).toEqual({ pid: process.pid, port: 4323 });
+    release();
+  }
+});

@@ -109,6 +109,13 @@ test('an invalid storyboard is sent back for a fix', async () => {
   expect(db.getFile('v', 'STORYBOARD.md').content).toBe(goodStoryboard());
 });
 
+test("a failed attempt's cost counts too", async () => {
+  const j = job('chapter', { chapter: 1 });
+  await expect(runner([{ files: { 'ch/c01.js': 'broken' }, cost: .1 }, { isError: true, result: 'Overloaded', exit: 1, cost: .25 }],
+    async () => ['still broken'])(j, ctx())).rejects.toThrow('Overloaded');
+  expect(costs.at(-1)).toBeCloseTo(.35);
+});
+
 test('a CLI error fails the job with its message', async () => {
   await expect(runner([{ isError: true, result: 'Not logged in', exit: 1 }])(job('storyboard'), ctx())).rejects.toThrow('Not logged in');
 });
