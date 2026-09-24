@@ -63,3 +63,11 @@ test('an unknown version sets loadError', async () => {
   expect(await page.evaluate(() => window.loadError)).toContain('no such version');
   await page.close();
 }, T);
+
+test('the player renders the requested version in its workers', async () => {
+  const page = await browser.newPage();
+  await page.goto(`${srv.url}/watch.html?v=mini&workers=1`);
+  await page.waitForFunction('workers.length === 1 && workers[0].ready', { timeout: 60000 });
+  expect(await page.evaluate(() => workers[0].el.src)).toContain('v=mini');
+  await page.close();
+}, T);

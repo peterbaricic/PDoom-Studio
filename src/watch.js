@@ -39,7 +39,7 @@ function startWorkers(sameOrigin) {
   for (let k = 0; k < (sameOrigin ? 1 : WORKERS); k++) {
     const origin = sameOrigin ? location.origin : `${location.protocol}//w${k}.localhost:${location.port}`;
     const el = document.createElement('iframe');
-    el.src = `${origin}/studio.html?worker&parent=${encodeURIComponent(location.origin)}`;
+    el.src = `${origin}/studio.html?worker&v=${encodeURIComponent(q.get('v') || 'original')}&parent=${encodeURIComponent(location.origin)}`;
     $('workers').append(el);
     workers.push({ el, origin, ready: false, job: null });
   }
