@@ -26,7 +26,8 @@ const data = process.env.STUDIO_DATA ? resolve(process.env.STUDIO_DATA) : root;
 // Refuse to start rather than silently running with no examples: a missing default.db almost certainly means a
 // misconfigured DEFAULT_DB, not an intentionally examples-free studio.
 if (!existsSync(defaultPath)) {
-  console.error(`no examples database at ${defaultPath} (set DEFAULT_DB, or build one with studio/build-default.js --from <source.db>)`);
+  console.error(`no examples database at ${defaultPath} — restore the committed one (git checkout studio/default.db), or set `
+    + 'DEFAULT_DB to another (bun studio/build-default.js --from studio/default.db <out.db> makes a copy)');
   process.exit(1);
 }
 
