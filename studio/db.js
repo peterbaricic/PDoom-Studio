@@ -1,8 +1,14 @@
 // db.js: the studio's SQLite store. Versions and their files (current content plus every past revision), jobs, and
-// the library of finished renders. One file, studio.db, next to the project.
+// the library of finished renders.
+//
+// Two databases: user.db (git-ignored, read-write) holds the user's own versions plus all jobs, logs and renders.
+// studio/default.db (tracked in git, read-only) holds example versions — at first just the Original. openDb attaches
+// it, when given and present, as the read-only schema "def"; StudioDb then reads across both and keeps every write
+// (other than Promote) on user.db, refusing to touch an example.
 import { Database } from 'bun:sqlite';
+import { existsSync } from 'node:fs';
 
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS versions (
   id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', logline TEXT NOT NULL DEFAULT '', concept TEXT NOT NULL DEFAULT '',
   options TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'concept', created_at INTEGER, updated_at INTEGER);
@@ -26,18 +32,26 @@ const PATH_RE = /^(STORYBOARD\.md|shared\.js|walkthrough\.json|ch\/c0[1-9](_[a-z
 export const isValidPath = p => PATH_RE.test(p);
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
 
+// Example revisions (built by build-default.js, or written by promoteVersion) use ids from here up, so a revision id
+// alone says which database it lives in and GET /api/revisions/<id> and restore are never ambiguous.
+export const EXAMPLE_REVISION_FLOOR = 1_000_000_000;
+
 // Job lists leave out the log, which can be long; getJob has it.
 const JOB_LIST_COLUMNS = 'id, kind, version_id, params, status, progress, cost_usd, model, error, created_at, started_at, finished_at';
 
-const parseVersion = r => r && { ...r, options: JSON.parse(r.options) };
+const parseVersion = r => r && { ...r, options: JSON.parse(r.options), example: !!r.example };
 const parseJob = r => r && { ...r, params: JSON.parse(r.params) };
 const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids) };
 
-export function openDb(path = 'studio.db') {
+// path = user.db. { defaultPath } = studio/default.db: attached read-only as schema "def" when given and present.
+// Without defaultPath (or when the file doesn't exist yet), behavior is exactly the single-database store this was.
+export function openDb(path = 'studio.db', { defaultPath } = {}) {
   const db = new Database(path, { create: true, strict: true });
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
-  return new StudioDb(db);
+  const hasDef = !!(defaultPath && existsSync(defaultPath));
+  if (hasDef) db.query('ATTACH DATABASE ? AS def').run(`file:${defaultPath}?mode=ro`);
+  return new StudioDb(db, { defaultPath, hasDef });
 }
 
 // Builds "a = $a, b = $b" from the allowed keys present in patch; objects are stored as JSON.
@@ -49,20 +63,40 @@ function setClause(patch, allowed) {
 }
 
 class StudioDb {
-  constructor(db) { this.db = db; }
+  constructor(db, { defaultPath = null, hasDef = false } = {}) { this.db = db; this.defaultPath = defaultPath; this.hasDef = hasDef; }
   close() { this.db.close(); }
+
+  // Whether versionId names an example (lives in def, not user.db). False whenever def isn't attached.
+  _isExample(versionId) {
+    return this.hasDef && !!this.db.query('SELECT 1 FROM def.versions WHERE id = $id').get({ id: versionId });
+  }
+  // '' for a user version (or one that doesn't exist), 'def.' for an example: which schema holds versionId's rows.
+  _schema(versionId) { return this._isExample(versionId) ? 'def.' : ''; }
 
   // ---------- versions ----------
   createVersion({ id, title = '', logline = '', concept = '', options = {} }) {
     if (!ID_RE.test(id)) throw new Error(`bad version id: ${id}`);
+    if (this.getVersion(id)) throw new Error(`version id already exists: ${id}`);
     const t = Date.now();
     this.db.query(`INSERT INTO versions (id, title, logline, concept, options, status, created_at, updated_at)
       VALUES ($id, $title, $logline, $concept, $options, 'concept', $t, $t)`).run({ id, title, logline, concept, options: JSON.stringify(options), t });
     return this.getVersion(id);
   }
-  getVersion(id) { return parseVersion(this.db.query('SELECT * FROM versions WHERE id = $id').get({ id })); }
-  listVersions() { return this.db.query('SELECT * FROM versions ORDER BY created_at, id').all().map(parseVersion); }
+  getVersion(id) {
+    const own = parseVersion(this.db.query('SELECT *, 0 AS example FROM versions WHERE id = $id').get({ id }));
+    if (own) return own;
+    if (!this.hasDef) return own;
+    return parseVersion(this.db.query('SELECT *, 1 AS example FROM def.versions WHERE id = $id').get({ id }));
+  }
+  // Examples first (there's normally just a handful), then the user's own versions by created_at.
+  listVersions() {
+    const q = this.hasDef
+      ? `SELECT *, 1 AS example FROM def.versions UNION ALL SELECT *, 0 AS example FROM versions ORDER BY example DESC, created_at, id`
+      : `SELECT *, 0 AS example FROM versions ORDER BY created_at, id`;
+    return this.db.query(q).all().map(parseVersion);
+  }
   updateVersion(id, patch) {
+    if (this._isExample(id)) throw new Error('examples are read-only');
     const { sql, values } = setClause(patch, ['title', 'logline', 'concept', 'status', 'options']);
     this.db.query(`UPDATE versions SET ${sql}, updated_at = $t WHERE id = $id`).run({ ...values, t: Date.now(), id });
     return this.getVersion(id);
@@ -70,6 +104,7 @@ class StudioDb {
 
   // ---------- files and revisions ----------
   writeFiles(versionId, files, { source, note = '', jobId = null }) {
+    if (this._isExample(versionId)) throw new Error('examples are read-only');
     const ids = [];
     this.db.transaction(() => {
       for (const { path, content } of files) {
@@ -87,21 +122,84 @@ class StudioDb {
     return ids;
   }
   getFile(versionId, path) {
-    return this.db.query('SELECT path, content, revision_id FROM files WHERE version_id = $versionId AND path = $path').get({ versionId, path }) ?? null;
+    const schema = this._schema(versionId);
+    return this.db.query(`SELECT path, content, revision_id FROM ${schema}files WHERE version_id = $versionId AND path = $path`).get({ versionId, path }) ?? null;
   }
   listFiles(versionId) {
-    return this.db.query('SELECT path, revision_id FROM files WHERE version_id = $versionId ORDER BY path').all({ versionId });
+    const schema = this._schema(versionId);
+    return this.db.query(`SELECT path, revision_id FROM ${schema}files WHERE version_id = $versionId ORDER BY path`).all({ versionId });
   }
   history(versionId, path) {
+    const schema = this._schema(versionId);
     return path == null
-      ? this.db.query('SELECT * FROM revisions WHERE version_id = $versionId ORDER BY id DESC').all({ versionId })
-      : this.db.query('SELECT * FROM revisions WHERE version_id = $versionId AND path = $path ORDER BY id DESC').all({ versionId, path });
+      ? this.db.query(`SELECT * FROM ${schema}revisions WHERE version_id = $versionId ORDER BY id DESC`).all({ versionId })
+      : this.db.query(`SELECT * FROM ${schema}revisions WHERE version_id = $versionId AND path = $path ORDER BY id DESC`).all({ versionId, path });
   }
-  getRevision(id) { return this.db.query('SELECT * FROM revisions WHERE id = $id').get({ id }) ?? null; }
+  getRevision(id) {
+    const schema = id >= EXAMPLE_REVISION_FLOOR ? 'def.' : '';
+    if (schema && !this.hasDef) return null;
+    return this.db.query(`SELECT * FROM ${schema}revisions WHERE id = $id`).get({ id }) ?? null;
+  }
   restore(id) {
     const r = this.getRevision(id);
     if (!r) throw new Error(`no revision ${id}`);
     return this.writeFiles(r.version_id, [{ path: r.path, content: r.content }], { source: 'restore', note: `restored revision ${id}` })[0] ?? null;
+  }
+
+  // Copies fromId's current files and metadata into user.db as a new version (never an example, whatever fromId is).
+  // Its revisions are source 'remix'; its status is 'ready' once it already has all 9 chapters, else fromId's status.
+  remixVersion(fromId, { id, title }) {
+    const src = this.getVersion(fromId);
+    if (!src) throw new Error(`no such version: ${fromId}`);
+    this.createVersion({ id, title: title ?? src.title, logline: src.logline, concept: src.concept, options: src.options });
+    const files = this.listFiles(fromId).map(f => this.getFile(fromId, f.path));
+    this.writeFiles(id, files, { source: 'remix', note: `remixed from ${fromId}` });
+    const chapters = files.filter(f => f.path.startsWith('ch/')).length;
+    return this.updateVersion(id, { status: chapters >= 9 ? 'ready' : src.status });
+  }
+
+  // Moves a user version into default.db: its metadata, current files and one revision per file (source 'promote',
+  // ids >= EXAMPLE_REVISION_FLOOR), in one transaction on a separate writable connection. Then deletes the version
+  // (and its files and revisions) from user.db, in one transaction. Jobs and renders keep their version_id: it now
+  // resolves to the example.
+  promoteVersion(id) {
+    const v = this.getVersion(id);
+    if (!v) throw new Error(`no such version: ${id}`);
+    if (v.example) throw new Error(`already an example: ${id}`);
+    if (!this.defaultPath || !existsSync(this.defaultPath)) throw new Error('default.db does not exist');
+
+    const files = this.listFiles(id).map(f => this.getFile(id, f.path));
+
+    const defDb = new Database(this.defaultPath, { strict: true });
+    defDb.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    try {
+      defDb.transaction(() => {
+        defDb.query(`INSERT INTO versions (id, title, logline, concept, options, status, created_at, updated_at)
+          VALUES ($id, $title, $logline, $concept, $options, $status, $createdAt, $updatedAt)`).run({
+          id: v.id, title: v.title, logline: v.logline, concept: v.concept, options: JSON.stringify(v.options),
+          status: v.status, createdAt: v.created_at, updatedAt: Date.now(),
+        });
+        let rid = defDb.query(`SELECT COALESCE(MAX(id) + 1, ${EXAMPLE_REVISION_FLOOR}) AS n FROM revisions`).get().n;
+        if (rid < EXAMPLE_REVISION_FLOOR) rid = EXAMPLE_REVISION_FLOOR;
+        for (const f of files) {
+          defDb.query(`INSERT INTO revisions (id, version_id, path, content, job_id, source, note, created_at)
+            VALUES ($id, $versionId, $path, $content, NULL, 'promote', '', $t)`).run({ id: rid, versionId: v.id, path: f.path, content: f.content, t: Date.now() });
+          defDb.query(`INSERT INTO files (version_id, path, content, revision_id) VALUES ($versionId, $path, $content, $rid)`)
+            .run({ versionId: v.id, path: f.path, content: f.content, rid });
+          rid++;
+        }
+      })();
+    } finally {
+      defDb.close();
+    }
+
+    this.db.transaction(() => {
+      this.db.query('DELETE FROM files WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM revisions WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM versions WHERE id = $id').run({ id });
+    })();
+
+    return this.getVersion(id);
   }
 
   // ---------- jobs ----------
@@ -148,7 +246,8 @@ class StudioDb {
     return Number(lastInsertRowid);
   }
   listRenders() {
-    return this.db.query(`SELECT r.*, v.title, v.logline FROM renders r JOIN versions v ON v.id = r.version_id
+    const versions = this.hasDef ? '(SELECT * FROM versions UNION ALL SELECT * FROM def.versions)' : 'versions';
+    return this.db.query(`SELECT r.*, v.title, v.logline FROM renders r JOIN ${versions} v ON v.id = r.version_id
       ORDER BY r.created_at DESC, r.id DESC`).all().map(parseRender);
   }
   getRender(id) { return parseRender(this.db.query('SELECT * FROM renders WHERE id = $id').get({ id })); }

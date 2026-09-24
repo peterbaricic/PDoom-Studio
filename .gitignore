@@ -4,5 +4,7 @@ assets/source.mp4
 .browsers/
 .superpowers/
 studio.db*
+user.db*
+studio/default.db-*
 library/
 .studio/

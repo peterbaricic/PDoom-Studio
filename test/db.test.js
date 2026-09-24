@@ -1,5 +1,11 @@
 import { test, expect, beforeEach } from 'bun:test';
-import { openDb, isValidPath } from '../studio/db.js';
+import { mkdtempSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openDb, isValidPath, EXAMPLE_REVISION_FLOOR } from '../studio/db.js';
+import { buildDefault } from '../studio/build-default.js';
+
+const root = process.cwd();
 
 let db;
 beforeEach(() => { db = openDb(':memory:'); });
@@ -77,4 +83,135 @@ test('renders: add, list with version info, delete', () => {
   expect(db.listRenders()[0]).toMatchObject({ id, version_id: 'a', title: 'A', logline: 'L', revision_ids: [1, 2] });
   db.deleteRender(id);
   expect(db.listRenders()).toEqual([]);
+});
+
+test('a plain database (no defaultPath) marks every version as not an example', () => {
+  db.createVersion({ id: 'a' });
+  expect(db.getVersion('a').example).toBe(false);
+  expect(db.listVersions()[0].example).toBe(false);
+});
+
+// ---------- two databases: user.db + studio/default.db attached read-only as "def" ----------
+
+const tempDbPath = prefix => join(mkdtempSync(join(tmpdir(), prefix)), 'db.sqlite');
+// A fresh default.db (built from the repo's real source files, same as the committed studio/default.db) that this
+// test is free to mutate (e.g. via promoteVersion) without touching the repo's own copy.
+const freshDefaultPath = () => { const p = tempDbPath('default-'); buildDefault(root, p); return p; };
+
+test('openDb with defaultPath lists examples first, then the user\'s own versions', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  udb.createVersion({ id: 'mine', title: 'Mine' });
+  const list = udb.listVersions();
+  expect(list.map(v => v.id)).toEqual(['original', 'mine']);
+  expect(list.map(v => v.example)).toEqual([true, false]);
+  expect(udb.getVersion('original')).toMatchObject({ id: 'original', example: true, status: 'ready' });
+  expect(udb.getVersion('mine')).toMatchObject({ id: 'mine', example: false });
+  expect(udb.listFiles('original').map(f => f.path)).toContain('STORYBOARD.md');
+  udb.close();
+});
+
+test('examples are read-only: writeFiles, updateVersion and restore all refuse', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  expect(() => udb.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'x' }], { source: 'manual' })).toThrow('examples are read-only');
+  expect(() => udb.updateVersion('original', { title: 'x' })).toThrow('examples are read-only');
+  const [rev] = udb.history('original', 'STORYBOARD.md');
+  expect(() => udb.restore(rev.id)).toThrow('examples are read-only');
+  udb.close();
+});
+
+test('createVersion refuses an id that exists in either database', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  expect(() => udb.createVersion({ id: 'original' })).toThrow('version id already exists: original');
+  udb.createVersion({ id: 'mine' });
+  expect(() => udb.createVersion({ id: 'mine' })).toThrow('version id already exists: mine');
+  udb.close();
+});
+
+test('remixVersion carries over the source status when not all chapters exist yet', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  udb.createVersion({ id: 'partial' });
+  udb.writeFiles('partial', [{ path: 'ch/c01.js', content: '1' }], { source: 'claude' });
+  udb.updateVersion('partial', { status: 'chapters' });
+  const remix = udb.remixVersion('partial', { id: 'partial-remix', title: 'Partial Remix' });
+  expect(remix).toMatchObject({ status: 'chapters', example: false });
+  udb.close();
+});
+
+test('remixVersion copies an example into user.db; promoteVersion moves it back', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+
+  const remix = udb.remixVersion('original', { id: 'my-remix', title: 'My Remix' });
+  expect(remix).toMatchObject({ id: 'my-remix', title: 'My Remix', example: false, status: 'ready' });
+  expect(udb.listFiles('my-remix').map(f => f.path)).toEqual(udb.listFiles('original').map(f => f.path));
+  const [rev] = udb.history('my-remix', 'STORYBOARD.md');
+  expect(rev).toMatchObject({ source: 'remix', note: 'remixed from original' });
+  expect(rev.id).toBeLessThan(EXAMPLE_REVISION_FLOOR);
+
+  const promoted = udb.promoteVersion('my-remix');
+  expect(promoted).toMatchObject({ id: 'my-remix', title: 'My Remix', example: true });
+  expect(udb.listVersions().map(v => v.id).sort()).toEqual(['my-remix', 'original']);
+  expect(udb.getFile('my-remix', 'STORYBOARD.md')).not.toBeNull();
+
+  const [promotedRev] = udb.history('my-remix', 'STORYBOARD.md');
+  expect(promotedRev.id).toBeGreaterThanOrEqual(EXAMPLE_REVISION_FLOOR);
+  expect(promotedRev.source).toBe('promote');
+  expect(udb.getRevision(promotedRev.id)).toMatchObject({ source: 'promote', version_id: 'my-remix' });
+
+  // it's an example now: read-only, same as any other
+  expect(() => udb.writeFiles('my-remix', [{ path: 'STORYBOARD.md', content: 'x' }], { source: 'manual' })).toThrow('examples are read-only');
+  udb.close();
+});
+
+test('promoteVersion refuses examples, and refuses when there is no default.db', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  expect(() => udb.promoteVersion('original')).toThrow('already an example');
+  udb.close();
+
+  const plain = openDb(tempDbPath('user-'));
+  plain.createVersion({ id: 'solo' });
+  expect(() => plain.promoteVersion('solo')).toThrow('default.db does not exist');
+  plain.close();
+});
+
+test('example revision ids are >= EXAMPLE_REVISION_FLOOR and getRevision resolves them', () => {
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  const revs = udb.history('original', null);
+  expect(revs.length).toBeGreaterThan(0);
+  for (const r of revs) expect(r.id).toBeGreaterThanOrEqual(EXAMPLE_REVISION_FLOOR);
+  const sample = revs[0];
+  expect(udb.getRevision(sample.id)).toMatchObject({ id: sample.id, version_id: 'original', path: sample.path });
+  udb.close();
+});
+
+test('opening with defaultPath never modifies studio/default.db, and creates no -wal/-shm', () => {
+  const defaultPath = join(root, 'studio/default.db');
+  const before = statSync(defaultPath);
+  const beforeBytes = readFileSync(defaultPath);
+
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  // exercise every read path that touches "def"
+  udb.listVersions();
+  udb.getVersion('original');
+  udb.getFile('original', 'STORYBOARD.md');
+  udb.listFiles('original');
+  udb.history('original', null);
+  const [rev] = udb.history('original', 'STORYBOARD.md');
+  udb.getRevision(rev.id);
+  udb.listRenders();
+  udb.close();
+
+  const after = statSync(defaultPath);
+  const afterBytes = readFileSync(defaultPath);
+  expect(afterBytes.equals(beforeBytes)).toBe(true);
+  expect(after.mtimeMs).toBe(before.mtimeMs);
+  expect(existsSync(`${defaultPath}-wal`)).toBe(false);
+  expect(existsSync(`${defaultPath}-shm`)).toBe(false);
+  expect(existsSync(`${defaultPath}-journal`)).toBe(false);
 });
