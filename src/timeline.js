@@ -37,8 +37,8 @@ function drawWorld(t) {
     CAM = null;
   }
   flushLetters();
-  if (!METER_SHOWN) { cornerMeter(t); flushLetters(); }
-  WIPES.forEach((b, j) => { if (Math.abs(t - b) < WIPE_TR) wipe((t - (b - WIPE_TR)) / (2 * WIPE_TR), j); });
+  if (!METER_SHOWN && ENGINE.cornerMeter) { cornerMeter(t); flushLetters(); }
+  if (ENGINE.wipes) WIPES.forEach((b, j) => { if (Math.abs(t - b) < WIPE_TR) wipe((t - (b - WIPE_TR)) / (2 * WIPE_TR), j); });
   karaoke(t);
 }
 

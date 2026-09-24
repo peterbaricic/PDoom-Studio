@@ -185,6 +185,10 @@ async function setup() {
   paperG = makePaper(); grainC = makeGrain(); letG = createGraphics(W, H); letG.pixelDensity(1);
   outC = document.getElementById('out'); outX = outC.getContext('2d');
   await Promise.all([document.fonts.load('100px "Permanent Marker"'), document.fonts.load('800 50px "Shantell Sans"')]);
+  // The version's chapters arrive from the server; a failure is reported, not hidden, but the page still becomes ready.
+  // Re-applying the manifest to window.VERSION here (rather than trusting loader.js's early assignment) matters:
+  // p5's global-mode init runs right before setup() and reassigns its own `VERSION` global, clobbering ours.
+  try { window.VERSION = await window.versionLoaded; } catch (e) { window.loadError = e.message; console.error(e); }
   window.ready = true;
   // p5 ignores redraw() until setup() has returned, so the page modes start on the next task.
   const q = new URLSearchParams(location.search);
