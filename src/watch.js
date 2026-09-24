@@ -235,5 +235,5 @@ function tick() {
   if (mode !== 'playing') drawSeek();
   buttons();
 }
-if (location.protocol === 'file:') stateEl.textContent = 'Run `node serve.mjs` and open http://localhost:8080/ instead of opening this file directly.';
+if (location.protocol === 'file:') stateEl.textContent = 'Run `bun run studio` and open it from there instead of opening this file directly.';
 else { startWorkers(false); setInterval(tick, 250); addEventListener('resize', drawSeek); drawSeek(); }
