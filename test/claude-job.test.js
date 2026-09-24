@@ -66,6 +66,49 @@ test('a chapter job imports only its own file', async () => {
   expect(db.getVersion('v').status).toBe('chapters');
 });
 
+test('the work folder gets a read-only reference/original/ copy of the Original\'s storyboard and chapters', async () => {
+  db.createVersion({ id: 'original', title: 'Original' });
+  db.writeFiles('original', [
+    { path: 'STORYBOARD.md', content: '# original storyboard' },
+    { path: 'ch/c01_lab.js', content: '// original chapter 1' },
+    { path: 'walkthrough.json', content: '[]' },
+  ], { source: 'import' });
+  const j = job('chapter', { chapter: 3 });
+  let seen;
+  await runner([{ files: { 'ch/c03.js': '// three' } }], async () => {
+    const dir = join(data, '.studio/work', String(j.id));
+    seen = {
+      storyboard: readFileSync(join(dir, 'reference/original/STORYBOARD.md'), 'utf8'),
+      ch1: readFileSync(join(dir, 'reference/original/ch/c01_lab.js'), 'utf8'),
+      walkthrough: existsSync(join(dir, 'reference/original/walkthrough.json')),
+    };
+    return [];
+  })(j, ctx());
+  expect(seen).toEqual({ storyboard: '# original storyboard', ch1: '// original chapter 1', walkthrough: false });
+});
+
+test('no reference/ folder is written when there is no Original version', async () => {
+  const j = job('chapter', { chapter: 1 });
+  let hadReference;
+  await runner([{ files: { 'ch/c01.js': '// one' } }], async () => {
+    hadReference = existsSync(join(data, '.studio/work', String(j.id), 'reference'));
+    return [];
+  })(j, ctx());
+  expect(hadReference).toBe(false);
+});
+
+test('editing a reference file leaves no trace: not reverted, not logged, not imported', async () => {
+  db.createVersion({ id: 'original', title: 'Original' });
+  db.writeFiles('original', [{ path: 'ch/c01_lab.js', content: '// original chapter 1' }], { source: 'import' });
+  const j = job('chapter', { chapter: 3 });
+  await runner([{ files: { 'ch/c03.js': '// three', 'reference/original/ch/c01_lab.js': '// sneaky edit' } }])(j, ctx());
+  expect(db.getFile('v', 'ch/c03.js').content).toBe('// three');
+  expect(db.listFiles('v').some(f => f.path.includes('reference'))).toBe(false);
+  // The reference/ edit is invisible to readWorkFiles, so it's never a candidate for reverting or importing: it
+  // doesn't show up in the "Reverted changes outside ..." line (unlike ch/c04.js or shared.js in the test above).
+  expect(logs.join('')).not.toContain('Reverted changes');
+});
+
 test('the check sees exactly what will be imported: other files are put back first', async () => {
   db.writeFiles('v', [{ path: 'shared.js', content: 'const SET = { real: 1 };' }, { path: 'ch/c01.js', content: '// one' }], { source: 'manual' });
   const j = job('chapter', { chapter: 3 }), dir = join(data, '.studio/work', String(j.id)), seen = [];

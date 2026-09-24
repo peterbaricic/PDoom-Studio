@@ -16,9 +16,9 @@ Read these before you start (they are read-only for you):
 - \`${root}/ANIMATION_GUIDE.md\`: the painting API, the characters, the style rules and the chapter contract. Follow it.
 - \`${root}/src/\`: the shared engine (core.js, clawd.js, cast.js, props.js, timeline.js, lyrics.js). Never edit these.
 - \`${root}/src/lyrics.js\`: every lyric line with its start and end time.
-- \`${root}/src/ch/\` and \`${root}/STORYBOARD.md\`: the original version, as a reference for quality and detail.
+- \`reference/original/STORYBOARD.md\` and \`reference/original/ch/\` (in this folder): the original version's storyboard and chapters. Read-only reference material for quality and detail — it is not part of this version, don't edit or import it.
 
-You work only in the current folder. It holds this version's files: \`STORYBOARD.md\`, maybe \`shared.js\`, and \`ch/c0N.js\` chapters.
+You work only in the current folder. It holds this version's files (\`STORYBOARD.md\`, maybe \`shared.js\`, and \`ch/c0N.js\` chapters) plus the read-only \`reference/\` folder above.
 
 The song fixes nine chapter windows (seconds):
 ${CHAPTER_WINDOWS.map(([a, b], i) => `${i + 1}. ${a}–${b}`).join('\n')}

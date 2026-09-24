@@ -94,9 +94,9 @@ test('a plain database (no defaultPath) marks every version as not an example', 
 // ---------- two databases: user.db + studio/default.db attached read-only as "def" ----------
 
 const tempDbPath = prefix => join(mkdtempSync(join(tmpdir(), prefix)), 'db.sqlite');
-// A fresh default.db (built from the repo's real source files, same as the committed studio/default.db) that this
-// test is free to mutate (e.g. via promoteVersion) without touching the repo's own copy.
-const freshDefaultPath = () => { const p = tempDbPath('default-'); buildDefault(root, p); return p; };
+// A fresh default.db (copied, via buildDefault, from the repo's own committed studio/default.db) that this test is
+// free to mutate (e.g. via promoteVersion) without touching the repo's own copy.
+const freshDefaultPath = () => { const p = tempDbPath('default-'); buildDefault(join(root, 'studio/default.db'), p); return p; };
 
 test('openDb with defaultPath lists examples first, then the user\'s own versions', () => {
   const defaultPath = freshDefaultPath();

@@ -1,13 +1,13 @@
 # Animation guide (read this before painting a chapter)
 
-This project renders a 156.6 s music video, "I'm Upping My P(doom)", as painted watercolor animation with p5.brush. Frames are rendered offline in headless Chrome, so speed matters less than quality, within a budget. The shot list is in [STORYBOARD.md](STORYBOARD.md). The user's direction: **cute, cartoony, fun colors, lively animation, something happening in every shot, be brave and ambitious.** 
+This project renders a 156.6 s music video, "I'm Upping My P(doom)", as painted watercolor animation with p5.brush. Frames are rendered offline in headless Chrome, so speed matters less than quality, within a budget. The shot list for this version is in its `STORYBOARD.md`. The user's direction: **cute, cartoony, fun colors, lively animation, something happening in every shot, be brave and ambitious.** 
 
 ## How a chapter works
 
-Each chapter is one file in `src/ch/`, wrapped in an IIFE so its helpers stay private:
+Chapters live in a version, not in the repository: each chapter is one file, `ch/c0N.js`, wrapped in an IIFE so its helpers stay private. The Original version's chapters and storyboard are available read-only under `reference/original/` (`reference/original/ch/` and `reference/original/STORYBOARD.md`), as a reference for quality and detail:
 
 ```js
-// src/ch/c03_takeoff.js
+// ch/c03.js
 (() => {
   const gym = t => { ... };                       // private helpers: any names, no collisions
   function stable(t, lt, dur) { ... }             // a shot

@@ -115,6 +115,16 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       mkdirSync(dirname(join(dir, f.path)), { recursive: true });
       writeFileSync(join(dir, f.path), content);
     }
+    // reference/original/: a read-only copy of the Original's STORYBOARD.md and chapters, for quality and detail.
+    // readWorkFiles never looks inside reference/, so nothing written there can be reverted, checked or imported.
+    // Skipped silently if no "original" version exists yet, wherever it lives (default.db or user.db).
+    const original = db.getVersion('original');
+    if (original) for (const f of db.listFiles('original')) {
+      if (f.path !== 'STORYBOARD.md' && !f.path.startsWith('ch/')) continue;
+      const dest = join(dir, 'reference/original', f.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, db.getFile('original', f.path).content);
+    }
     writeFileSync(join(dir, 'TASK.md'), taskBrief({ kind, version, params, target, root, jobId: job.id, baseUrl, exists: before.has(target) }));
     mkdirSync(dirname(settings), { recursive: true });
     writeFileSync(settings, JSON.stringify(permissionSettings({ root, jobId: job.id, dir }), null, 2));
