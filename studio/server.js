@@ -33,7 +33,8 @@ if (!existsSync(defaultPath)) {
 // The legacy studio.db, if any, is looked for beside userPath, not at the fixed project root: with USER_DB left at
 // its default that's the same directory, but when USER_DB points elsewhere (as every test does, to stay off the
 // real project's files), migration stays confined there too instead of reaching for the real studio.db.
-migrateLegacyDb(dirname(userPath), { userPath });
+try { migrateLegacyDb(dirname(userPath), { userPath }); }
+catch (err) { console.error(err.message); process.exit(1); }
 
 let release;
 try { release = acquireLock(userPath, port); }

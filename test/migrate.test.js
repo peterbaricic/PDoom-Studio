@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
-import { migrateLegacyDb } from '../studio/migrate.js';
+import { migrateLegacyDb, cleanLegacyOriginal } from '../studio/migrate.js';
 
 const tempRoot = () => mkdtempSync(join(tmpdir(), 'migrate-'));
 
@@ -49,6 +49,47 @@ test('renames studio.db to user.db, drops the Original, and keeps everything els
 
   const render = migrated.getRender(rid);
   expect(render).toMatchObject({ id: rid, version_id: 'space-opera', file: 'space-opera-1.mp4' });
+  migrated.close();
+});
+
+test('an interruption between cleaning the Original out and the rename is recovered on the next call', () => {
+  // Simulates a process killed after the Original was stripped out of studio.db but before migrateLegacyDb got to
+  // rename it to user.db: studio.db is left behind, already cleaned, and user.db doesn't exist yet. The next
+  // server start (another migrateLegacyDb call) must finish the job — nothing lost, nothing duplicated — rather
+  // than treating studio.db's continued presence as untouched work still to do from scratch, or treating the
+  // half-done state as nothing to do at all.
+  const root = tempRoot(), userPath = join(root, 'user.db'), legacyPath = join(root, 'studio.db');
+
+  const legacy = openDb(legacyPath);
+  legacy.createVersion({ id: 'original', title: 'Orig' });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }], { source: 'import' });
+  legacy.createVersion({ id: 'space-opera', title: 'Space Opera' });
+  legacy.writeFiles('space-opera', [{ path: 'STORYBOARD.md', content: 'space opera storyboard' }], { source: 'manual' });
+  const jid = legacy.addJob({ kind: 'chapter', versionId: 'space-opera', params: { chapter: 1 } });
+  legacy.close();
+
+  // The crash point: cleanLegacyOriginal ran (and committed) but migrateLegacyDb never got to rename.
+  cleanLegacyOriginal(legacyPath);
+  expect(existsSync(legacyPath)).toBe(true);
+  expect(existsSync(userPath)).toBe(false);
+  const partial = openDb(legacyPath);
+  expect(partial.getVersion('original')).toBeNull();
+  expect(partial.getVersion('space-opera')).toMatchObject({ id: 'space-opera', title: 'Space Opera' });
+  partial.close();
+
+  // The next start: migrateLegacyDb sees studio.db still there (now already cleaned) and user.db still missing,
+  // and finishes the migration.
+  const result = migrateLegacyDb(root, { userPath });
+  expect(result).toBe(true);
+  expect(existsSync(userPath)).toBe(true);
+  expect(existsSync(legacyPath)).toBe(false);
+
+  const migrated = openDb(userPath);
+  expect(migrated.getVersion('original')).toBeNull();
+  expect(migrated.listVersions().filter(v => v.id === 'original')).toHaveLength(0);   // no duplicate
+  expect(migrated.getVersion('space-opera')).toMatchObject({ id: 'space-opera', title: 'Space Opera' });
+  expect(migrated.getFile('space-opera', 'STORYBOARD.md').content).toBe('space opera storyboard');
+  expect(migrated.getJob(jid)).toMatchObject({ kind: 'chapter', version_id: 'space-opera' });
   migrated.close();
 });
 
