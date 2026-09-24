@@ -25,6 +25,12 @@ test('check fails for a missing version', async () => {
   expect(r.err).toContain('no such version');
 }, T);
 
+test('check fails cleanly instead of crashing when the page cannot be reached', async () => {
+  const r = await run('--check=5', '--base=http://127.0.0.1:1');
+  expect(r.code).toBe(1);
+  expect(r.err).toContain('CHECK FAILED');
+}, T);
+
 test('renders a short range of frames and encodes it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'frames-'));
   const f = await run('--frames=40:40.5', '--workers=2', `--frames-dir=${dir}`);

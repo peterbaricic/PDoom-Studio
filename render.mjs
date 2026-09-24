@@ -81,13 +81,16 @@ if (args.check) {
   // Validation for studio jobs: the version must load without errors, and each time must be covered by a chapter and
   // paint within 20 s without throwing.
   // --check=load only loads the version (used for shared.js, which covers no time of its own).
-  const errors = [], page = await openPage('', errors), ts = times(args.check).filter(Number.isFinite);
-  for (const t of errors.length ? [] : ts) {
-    if (!await page.evaluate(t => CH.some(c => t >= c.start && t < c.end), t)) { errors.push(`no chapter covers t=${t}`); continue; }
+  const errors = [], ts = times(args.check).filter(Number.isFinite);
+  const page = await openPage('', errors).catch(e => { errors.push(e.message); return null; });
+  for (const t of (page && !errors.length) ? ts : []) {
+    const covered = await page.evaluate(t => CH.some(c => t >= c.start && t < c.end), t).catch(e => { errors.push(e.message); return null; });
+    if (covered === null) continue;
+    if (!covered) { errors.push(`no chapter covers t=${t}`); continue; }
     const slow = new Promise((_, bad) => setTimeout(() => bad(new Error(`painting t=${t} took over 20 s`)), 20000));
     await Promise.race([page.evaluate(t => window.paintAt(t), t), slow]).catch(e => errors.push(e.message));
   }
-  if (!errors.length && args.out) await writeSheet(page, ts, outPath('sheet.jpg'));
+  if (page && !errors.length && args.out) await writeSheet(page, ts, outPath('sheet.jpg'));
   if (errors.length) { console.error('CHECK FAILED\n' + errors.join('\n')); exitCode = 1; } else console.log('CHECK OK');
 } else if (args.sheet) {
   const page = await openPage(), out = outPath('out/sheet.jpg');
