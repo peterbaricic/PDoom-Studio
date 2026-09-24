@@ -20,7 +20,7 @@ const runSandboxed = (sandbox, ...a) => spawn(['bun', 'render.mjs', ...a], { env
 // A studio job as Claude's Bash tool sees it: a job in a throwaway database, its work folder holding the original's
 // files, and STUDIO_SANDBOX set to that folder.
 function sandboxJob() {
-  const data = tempDir(), db = openDb(join(data, 'studio.db'), { defaultPath: defaultDbPath });
+  const data = tempDir(), db = openDb(join(data, 'user.db'), { defaultPath: defaultDbPath });
   const jid = db.addJob({ kind: 'chapter', versionId: 'original', params: { chapter: 1 } }), dir = join(data, '.studio/work', String(jid));
   for (const f of db.listFiles('original')) {
     mkdirSync(dirname(join(dir, f.path)), { recursive: true });
@@ -157,7 +157,7 @@ test("sandbox: the command Claude may run ignores a bunfig.toml and .env planted
 }, T);
 
 test('frames: a chapter that fails to load fails the render instead of painting it as missing', async () => {
-  const data = tempDir(), db = openDb(join(data, 'studio.db')), frames = join(data, 'frames');
+  const data = tempDir(), db = openDb(join(data, 'user.db')), frames = join(data, 'frames');
   db.createVersion({ id: 'broken' });
   db.writeFiles('broken', [{ path: 'ch/c01.js', content: "throw new Error('boom');" }], { source: 'manual' });
   db.close();
@@ -174,7 +174,7 @@ test('a chapter cannot navigate away, fetch out, or pop a window to an external 
   const hits = [];
   const capture = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(req) { hits.push(req.url); return new Response('should never be reached'); } });
   const evil = `http://127.0.0.1:${capture.port}`;
-  const data = tempDir(), db = openDb(join(data, 'studio.db'));
+  const data = tempDir(), db = openDb(join(data, 'user.db'));
   db.createVersion({ id: 'escapee' });
   db.writeFiles('escapee', [{ path: 'ch/c01.js', content: [
     `location.href = ${JSON.stringify(evil + '/nav?x=1')};`,
@@ -201,7 +201,7 @@ test('a data: URI image still renders under request interception', async () => {
   // but it never actually goes over the network — abort()/continue() has no effect on it either way, and it loads
   // regardless. Verified directly against a bare interception handler before writing this; this test proves it
   // holds through the real pipeline, including the origin allow-list (a data: URI's origin is the string "null").
-  const data = tempDir(), db = openDb(join(data, 'studio.db'));
+  const data = tempDir(), db = openDb(join(data, 'user.db'));
   db.createVersion({ id: 'datauri' });
   db.writeFiles('datauri', [{ path: 'ch/c01.js', content: [
     "const img = new Image();",

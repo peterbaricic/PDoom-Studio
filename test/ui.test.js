@@ -6,7 +6,7 @@ import { launchBrowser } from '../studio/browser.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 import { goodStoryboard, tempDir, isolatedEnv } from './helpers.js';
 
-const root = process.cwd(), data = tempDir(), dbPath = join(data, 'studio.db');
+const root = process.cwd(), data = tempDir(), dbPath = join(data, 'user.db');
 const files = { 'STORYBOARD.md': goodStoryboard(), 'shared.js': 'const SET = {};' };
 CHAPTER_WINDOWS.forEach(([a, b], i) => {
   files[`ch/c0${i + 1}.js`] = `chapter('c${i + 1}', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`;
