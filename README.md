@@ -69,8 +69,9 @@ Everything lives in `studio.db` (versions, every revision, jobs) and `library/` 
 imported as the first version. The studio listens only on your machine, and Claude jobs can only write inside their
 own temporary work folder.
 
-`studio.html?v=<version>` is a scrubber for one version, and `watch.html?v=<version>` plays it while rendering in the
-background.
+`http://w0.localhost:8080/studio.html?v=<version>` is a scrubber for one version (version code only runs on the
+`w<n>.localhost` origins, so `localhost:8080/studio.html` redirects there), and `http://localhost:8080/watch.html?v=<version>`
+plays it while rendering in the background. Both need a browser that resolves `*.localhost`, such as Chrome or Firefox.
 
 ## Rendering from the command line
 

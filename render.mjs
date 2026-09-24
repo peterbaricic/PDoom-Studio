@@ -85,7 +85,9 @@ if (!base) {
   local = serve({ db, root: HERE, data, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
   base = local.url;
 }
-const PAGE = `${base}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
+// Version code runs only on a renderer origin (w0.localhost), never on the studio's own, which serves the token page.
+const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
+const PAGE = `${pageOrigin.origin}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
 const browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
 let exitCode = 0;

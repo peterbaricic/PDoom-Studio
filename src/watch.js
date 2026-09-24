@@ -33,19 +33,20 @@ let lastSafe = Infinity;                                    // latest countdown,
 const fmt = s => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 // ---------- renderers ----------
+// Version code only ever runs on the renderer origins, never on this page's (the studio's own), so there is no
+// same-origin fallback: a browser that doesn't resolve *.localhost gets a message instead.
 const workers = [];
-function startWorkers(sameOrigin) {
-  $('workers').replaceChildren(); workers.length = 0;
-  for (let k = 0; k < (sameOrigin ? 1 : WORKERS); k++) {
-    const origin = sameOrigin ? location.origin : `${location.protocol}//w${k}.localhost:${location.port}`;
+let noRenderers = false;
+function startWorkers() {
+  for (let k = 0; k < WORKERS; k++) {
+    const origin = `${location.protocol}//w${k}.localhost:${location.port}`;
     const el = document.createElement('iframe');
     el.src = `${origin}/studio.html?worker&v=${encodeURIComponent(q.get('v') || 'original')}&parent=${encodeURIComponent(location.origin)}`;
     $('workers').append(el);
     workers.push({ el, origin, ready: false, job: null });
   }
 }
-// A browser that doesn't resolve *.localhost gets one renderer on this origin instead (it shares this page's thread).
-setTimeout(() => { if (!workers.some(w => w.ready)) startWorkers(true); }, 30000);
+setTimeout(() => { if (!workers.some(w => w.ready)) noRenderers = true; }, 30000);
 
 addEventListener('message', e => {
   const w = workers.find(w => e.source === w.el.contentWindow && e.origin === w.origin);
@@ -223,6 +224,7 @@ function tick() {
     cls = 'ok';
     if (mode === 'waiting') startPlayback();
   }
+  else if (!ready && noRenderers) { s = 'Background rendering needs a browser that resolves *.localhost, such as Chrome or Firefox.'; cls = 'bad'; }
   else if (!ready) s = 'Starting renderers…';
   else if (!profiled) s = `Measuring how heavy each scene is… ${Math.round((1 - probesLeft / PROBES) * 100)}%`;
   else if (stoppedAt != null) s = `Stopped at ${fmt(stoppedAt / FPS)}, where rendering has got to. Continues by itself in about ${fmt(safe)}, ` +
@@ -236,4 +238,4 @@ function tick() {
   buttons();
 }
 if (location.protocol === 'file:') stateEl.textContent = 'Run `bun run studio` and open it from there instead of opening this file directly.';
-else { startWorkers(false); setInterval(tick, 250); addEventListener('resize', drawSeek); drawSeek(); }
+else { startWorkers(); setInterval(tick, 250); addEventListener('resize', drawSeek); drawSeek(); }

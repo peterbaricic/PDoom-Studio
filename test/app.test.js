@@ -11,6 +11,7 @@ const root = process.cwd();
 let db, app, calls, data;
 const H = { host: 'localhost:8080' }, W = { ...H, origin: 'http://localhost:8080', 'x-studio-token': 'tok', 'content-type': 'application/json' };
 const get = p => app.fetch(new Request('http://localhost:8080' + p, { headers: H }));
+const getOn = (host, p) => app.fetch(new Request(`http://${host}${p}`, { headers: { host } }));
 const send = (method, p, body, headers = W) => app.fetch(new Request('http://localhost:8080' + p, { method, headers, body: body && JSON.stringify(body) }));
 
 beforeEach(() => {
@@ -22,12 +23,49 @@ beforeEach(() => {
   app = createApp({ db, root, data, token: 'tok', queue, events: createEvents(), port: 8080 });
 });
 
-test('the shell page carries the token', async () => {
-  expect(await (await get('/')).text()).toContain('content="tok"');
+test('the shell page carries the token and may not be framed', async () => {
+  const res = await get('/');
+  expect(await res.text()).toContain('content="tok"');
+  expect(res.headers.get('x-frame-options')).toBe('DENY');
+  expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+});
+
+test('the token page and the UI are served on the studio hosts only, never where version code runs', async () => {
+  for (const host of ['localhost:8080', '127.0.0.1:8080', '[::1]:8080']) {
+    expect((await getOn(host, '/')).status).toBe(200);
+    expect((await getOn(host, '/ui/app.js')).status).toBe(200);
+  }
+  for (const host of ['w0.localhost:8080', 'w2.localhost:8080']) {
+    const page = await getOn(host, '/');
+    expect(page.status).toBe(404);
+    expect(await page.text()).not.toContain('tok');
+    expect((await getOn(host, '/ui/app.js')).status).toBe(404);
+  }
+});
+
+test('studio.html runs only on w<n>.localhost, under a content security policy', async () => {
+  for (const host of ['localhost:8080', '127.0.0.1:8080', '[::1]:8080']) {
+    const res = await getOn(host, '/studio.html?render&v=a');
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe('http://w0.localhost:8080/studio.html?render&v=a');
+  }
+  const res = await getOn('w1.localhost:8080', '/studio.html?v=a');
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain('src/loader.js');
+  const csp = Object.fromEntries(res.headers.get('content-security-policy').split(';').map(d => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
+  expect(csp['default-src']).toEqual(["'self'"]);
+  expect(csp['script-src']).toEqual(["'self'", "'unsafe-inline'"]);
+  expect(csp['style-src']).toEqual(["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']);
+  expect(csp['font-src']).toEqual(["'self'", 'https://fonts.gstatic.com']);
+  expect(csp['img-src']).toEqual(["'self'", 'data:', 'blob:']);
+  expect(csp['connect-src']).toEqual(["'self'"]);
+  expect(csp['media-src']).toEqual(["'self'"]);
+  expect(csp['frame-ancestors']).toEqual(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://*.localhost:8080']);
 });
 
 test('serves engine files but nothing private', async () => {
-  expect((await get('/studio.html')).status).toBe(200);
+  expect((await getOn('w0.localhost:8080', '/studio.html')).status).toBe(200);
+  expect((await get('/watch.html')).status).toBe(200);
   expect((await get('/src/core.js')).status).toBe(200);
   expect((await get('/node_modules/p5/lib/p5.min.js')).status).toBe(200);
   for (const p of ['/studio.db', '/.git/config', '/package.json', '/studio/db.js', '/src/../package.json']) expect((await get(p)).status).toBe(404);

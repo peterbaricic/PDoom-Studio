@@ -17,19 +17,25 @@ beforeAll(async () => {
 });
 afterAll(async () => { await browser?.close(); srv?.stop(); });
 
+// Opened on the studio's own origin, as a user would; the server sends studio.html to w0.localhost.
 async function open(query) {
-  const page = await browser.newPage(), errors = [];
+  const page = await browser.newPage(), errors = [], messages = [];
   page.on('pageerror', e => errors.push(e.message));
+  page.on('console', m => messages.push(m.text()));
   await page.goto(`${srv.url}/studio.html?render&${query}`);
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
-  return { page, errors };
+  return { page, errors, messages };
 }
 
-test('loads the original by default and renders a frame', async () => {
-  const { page, errors } = await open('');
+test('loads the original by default on w0.localhost and renders a frame, within its content security policy', async () => {
+  const { page, errors, messages } = await open('');
+  expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?render`);
   expect(await page.evaluate(() => [CH.length, VERSION.id, ENGINE.wipes])).toEqual([9, 'original', true]);
   expect(await page.evaluate(() => window.renderAt(40, 'image/jpeg', .5).then(u => u.length))).toBeGreaterThan(10000);
   expect(errors).toEqual([]);
+  expect(messages.filter(m => /Content.Security.Policy/i.test(m))).toEqual([]);
+  // The policy holds: version code can't reach any other server.
+  expect(await page.evaluate(() => fetch('https://example.com/').then(() => 'fetched', () => 'blocked'))).toBe('blocked');
   await page.close();
 }, T);
 

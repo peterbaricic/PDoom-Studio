@@ -7,11 +7,23 @@ import { versionManifest, workManifest } from './versions.js';
 import { parseStoryboard } from './storyboard.js';
 import { isValidPath } from './db.js';
 
-// Repo files anyone may load: the pages, the shared engine, the libraries and the song. Nothing else.
-const PUBLIC = [/^studio\.html$/, /^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/];
+// Repo files anyone may load: the player, the shared engine, the libraries and the song. Nothing else.
+const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/];
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
 const NO_STORE = { 'cache-control': 'no-store' };
+
+// Two kinds of origin. The studio's own (localhost, 127.0.0.1, [::1]) serves the page that carries the token and the
+// UI; version code never runs there. studio.html, which runs version code, is served only on renderer origins
+// (w0.localhost, w1.localhost, …), which have neither the token page nor the UI, and under a policy that keeps the
+// code to this server (no requests elsewhere) and lets only studio pages frame it. Chrome rejects IPv6 literals in
+// CSP source lists (and logs an error that would fail every render check), so [::1] can't be listed as a framer.
+const onRenderer = req => /^w\d+\.localhost:\d+$/.test(req.headers.get('host') || '');
+const studioCsp = port => ["default-src 'self'", "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'",
+  `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`].join('; ');
+const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
 export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude' }) {
   const app = { port };
@@ -25,9 +37,12 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   const needVersion = id => db.getVersion(id) ? null : error(404, 'no such version');
 
   const routes = [
-    ['GET', /^\/$/, () => new Response(readFileSync(join(dirs.ui, 'index.html'), 'utf8').replace('%%TOKEN%%', token),
-      { headers: { 'content-type': 'text/html; charset=utf-8', ...NO_STORE } })],
-    ['GET', /^\/ui\/(.+)$/, (req, [, p]) => file(req, dirs.ui, p, NO_STORE)],
+    ['GET', /^\/$/, req => onRenderer(req) ? error(404, 'not found')
+      : new Response(readFileSync(join(dirs.ui, 'index.html'), 'utf8').replace('%%TOKEN%%', token), { headers: TOKEN_PAGE })],
+    ['GET', /^\/ui\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, dirs.ui, p, NO_STORE)],
+    ['GET', /^\/studio\.html$/, req => onRenderer(req)
+      ? file(req, root, 'studio.html', { 'content-security-policy': studioCsp(app.port) })
+      : Response.redirect(`http://w0.localhost:${app.port}/studio.html${new URL(req.url).search}`, 302)],
     ['GET', /^\/v\/([a-z0-9-]+)\/(.+)$/, (req, [, id, p]) => {
       const f = isValidPath(p) && db.getFile(id, p);
       return f ? new Response(f.content, { headers: { 'content-type': TYPES[extname(p)], ...NO_STORE } }) : error(404, 'not found');
