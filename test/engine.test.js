@@ -2,16 +2,15 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
-import { importOriginal } from '../studio/versions.js';
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { launchBrowser } from '../studio/browser.js';
-import { tempDir } from './helpers.js';
+import { tempDir, tempDefaultDb } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
 let db, srv, browser;
 beforeAll(async () => {
-  db = openDb(':memory:'); importOriginal(db, root);
+  db = openDb(':memory:', { defaultPath: tempDefaultDb() });
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
   browser = await launchBrowser();
 });

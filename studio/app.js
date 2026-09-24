@@ -38,6 +38,8 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     return p ? serveFile(req, p, headers) : error(404, 'not found');
   };
   const needVersion = id => db.getVersion(id) ? null : error(404, 'no such version');
+  // Guards the handful of writes examples must refuse. Called after needVersion, so the version is known to exist.
+  const guardExample = id => db.getVersion(id)?.example ? error(403, 'examples are read-only — remix it first') : null;
 
   // Whether the Claude CLI is signed in (`claude auth status` prints JSON with loggedIn): true, false, or null when
   // that can't be told (no CLI, no answer within the timeout, unexpected output). Asked at most once a minute.
@@ -94,12 +96,31 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     ['GET', /^\/api\/versions\/([a-z0-9-]+)\/history$/, (req, [, id]) => json(db.history(id, null).map(({ content, ...r }) => r))],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
+      const blocked = guardExample(id); if (blocked) return blocked;
       const b = await body(req), patch = Object.fromEntries(['title', 'concept', 'options'].filter(k => k in b).map(k => [k, b[k]]));
       if (!Object.keys(patch).length) return error(400, 'nothing to update');
       const v = db.updateVersion(id, patch); events.publish('version', { id }); return json(v);
     }],
+    ['POST', /^\/api\/versions\/([a-z0-9-]+)\/remix$/, async (req, [, fromId]) => {
+      const missing = needVersion(fromId); if (missing) return missing;
+      const b = await body(req);
+      try {
+        const v = db.remixVersion(fromId, { id: b.id, title: b.title });
+        events.publish('version', { id: v.id });
+        return json(v, 201);
+      } catch (e) { return error(/already exists/.test(e.message) ? 409 : 400, e.message); }
+    }],
+    ['POST', /^\/api\/versions\/([a-z0-9-]+)\/promote$/, (req, [, id]) => {
+      const missing = needVersion(id); if (missing) return missing;
+      try {
+        const v = db.promoteVersion(id);
+        events.publish('version', { id: v.id });
+        return json(v);
+      } catch (e) { return error(409, e.message); }
+    }],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)\/files\/STORYBOARD\.md$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
+      const blocked = guardExample(id); if (blocked) return blocked;
       const b = await body(req);
       if (typeof b.content !== 'string') return error(400, 'content is required');
       const [rid] = db.writeFiles(id, [{ path: 'STORYBOARD.md', content: b.content }], { source: 'manual', note: b.note || 'edited by hand' });
@@ -116,10 +137,12 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     ['GET', /^\/api\/revisions\/(\d+)$/, (req, [, rid]) => { const r = db.getRevision(+rid); return r ? json(r) : error(404, 'no such revision'); }],
     ['POST', /^\/api\/revisions\/(\d+)\/restore$/, (req, [, rid]) => {
       const r = db.getRevision(+rid); if (!r) return error(404, 'no such revision');
+      const blocked = guardExample(r.version_id); if (blocked) return blocked;
       const revision = db.restore(+rid); events.publish('version', { id: r.version_id }); return json({ revision });
     }],
     ['POST', /^\/api\/versions\/([a-z0-9-]+)\/approve$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
+      const blocked = guardExample(id); if (blocked) return blocked;
       // Everything after this await runs synchronously up to queue.approve (which sets the status to approved), so
       // two approvals sent at once can't both get through.
       const b = await body(req), sb = db.getFile(id, 'STORYBOARD.md');
@@ -139,6 +162,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const b = await body(req);
       if (!JOB_KINDS.includes(b.kind)) return error(400, `kind must be one of ${JOB_KINDS.join(', ')}`);
       const missing = needVersion(b.versionId); if (missing) return missing;
+      if (['storyboard', 'shared', 'chapter'].includes(b.kind)) { const blocked = guardExample(b.versionId); if (blocked) return blocked; }
       if (b.kind === 'render') {
         const chapters = new Set(db.listFiles(b.versionId).map(f => /^ch\/c0(\d)/.exec(f.path)?.[1]).filter(Boolean)).size;
         if (chapters < 9) return error(409, `a final render needs all nine chapters (${chapters} of 9 are written)`);
@@ -171,7 +195,8 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     for (const [method, re, handler] of routes) {
       const m = re.exec(path);
       if (m && (req.method === method || (method === 'GET' && req.method === 'HEAD'))) {
-        try { return await handler(req, m); } catch (e) { return error(500, e.message); }
+        try { return await handler(req, m); }
+        catch (e) { return e.message === 'examples are read-only' ? error(403, 'examples are read-only — remix it first') : error(500, e.message); }
       }
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC.some(r => r.test(path.slice(1)))) return file(req, root, path.slice(1));

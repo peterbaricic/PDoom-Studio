@@ -95,10 +95,15 @@ if (args.encode) {
 
 let base = args.base, local = null;
 if (!base) {
-  const [{ openDb }, { importOriginal }, { serve }, { createEvents }] = await Promise.all(
-    ['./studio/db.js', './studio/versions.js', './studio/serve.js', './studio/events.js'].map(m => import(m)));
-  const db = openDb(process.env.STUDIO_DB ? resolve(CWD, process.env.STUDIO_DB) : resolve(HERE, 'studio.db'));
-  importOriginal(db, HERE);
+  const [{ openDb }, { serve }, { createEvents }] = await Promise.all(
+    ['./studio/db.js', './studio/serve.js', './studio/events.js'].map(m => import(m)));
+  const envUserDb = process.env.USER_DB || process.env.STUDIO_DB;
+  // No override: use the split layout's user.db, but fall back to a not-yet-migrated studio.db so this keeps
+  // working before the studio server has had a chance to run its migration.
+  const userPath = envUserDb ? resolve(CWD, envUserDb)
+    : (existsSync(resolve(HERE, 'user.db')) || !existsSync(resolve(HERE, 'studio.db')) ? resolve(HERE, 'user.db') : resolve(HERE, 'studio.db'));
+  const defaultPath = process.env.DEFAULT_DB ? resolve(CWD, process.env.DEFAULT_DB) : resolve(HERE, 'studio/default.db');
+  const db = openDb(userPath, { defaultPath });
   const data = process.env.STUDIO_DATA ? resolve(CWD, process.env.STUDIO_DATA) : HERE;
   local = serve({ db, root: HERE, data, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
   base = local.url;

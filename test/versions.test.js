@@ -3,8 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
-import { buildManifest, versionManifest, workManifest, importOriginal, DEFAULT_OPTIONS } from '../studio/versions.js';
-import { goodStoryboard } from './helpers.js';
+import { buildManifest, versionManifest, workManifest, DEFAULT_OPTIONS } from '../studio/versions.js';
+import { goodStoryboard, tempDefaultDb } from './helpers.js';
 
 let db;
 beforeEach(() => { db = openDb(':memory:'); });
@@ -38,13 +38,14 @@ test('workManifest reads allowed files from a folder and ignores the rest', () =
   expect(workManifest(dir, { id: 'a', options: {} }).files).toEqual(['ch/c03.js']);
 });
 
-test('importOriginal imports the repo chapters once', () => {
-  expect(importOriginal(db, process.cwd())).toBe(true);
-  expect(importOriginal(db, process.cwd())).toBe(false);
-  const m = versionManifest(db, 'original');
+test('versionManifest reads the Original example from the attached default database', () => {
+  const udb = openDb(':memory:', { defaultPath: tempDefaultDb() });
+  const m = versionManifest(udb, 'original');
   expect(m.scripts).toEqual(['ch/c01_lab.js', 'ch/c02_chorus1.js', 'ch/c03_takeoff.js', 'ch/c04_chorus2.js', 'ch/c05_obsolete.js',
     'ch/c06_chorus3.js', 'ch/c07_scale.js', 'ch/c08_chorus4.js', 'ch/c09_finale.js']);
   expect(m.status).toBe('ready');
+  expect(m.example).toBe(true);
   expect(m.walkthrough).toHaveLength(9);
-  expect(db.history('original', 'ch/c01_lab.js')[0].source).toBe('import');
+  expect(udb.history('original', 'ch/c01_lab.js')[0].source).toBe('import');
+  udb.close();
 });

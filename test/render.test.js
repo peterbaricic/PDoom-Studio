@@ -3,12 +3,12 @@ import { mkdtempSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSyn
 import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
-import { importOriginal } from '../studio/versions.js';
 import { permissionSettings } from '../studio/claude-job.js';
-import { isolatedEnv, tempDir } from './helpers.js';
+import { isolatedEnv, tempDir, tempDefaultDb } from './helpers.js';
 
 // Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
 const root = process.cwd(), T = { timeout: 300000 };
+const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
 const spawn = async (argv, opts) => {
   const p = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe', ...opts });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
@@ -20,8 +20,7 @@ const runSandboxed = (sandbox, ...a) => spawn(['bun', 'render.mjs', ...a], { env
 // A studio job as Claude's Bash tool sees it: a job in a throwaway database, its work folder holding the original's
 // files, and STUDIO_SANDBOX set to that folder.
 function sandboxJob() {
-  const data = tempDir(), db = openDb(join(data, 'studio.db'));
-  importOriginal(db, root);
+  const data = tempDir(), db = openDb(join(data, 'studio.db'), { defaultPath: defaultDbPath });
   const jid = db.addJob({ kind: 'chapter', versionId: 'original', params: { chapter: 1 } }), dir = join(data, '.studio/work', String(jid));
   for (const f of db.listFiles('original')) {
     mkdirSync(dirname(join(dir, f.path)), { recursive: true });

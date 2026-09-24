@@ -2,17 +2,16 @@ import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
-import { importOriginal } from '../studio/versions.js';
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { createRenderRunner } from '../studio/render-job.js';
-import { tempDir } from './helpers.js';
+import { tempDir, tempDefaultDb } from './helpers.js';
 
 const root = process.cwd(), T = { timeout: 300000 };
 let db, srv, runners, data;
 const ctx = (signal = new AbortController().signal, seen = []) => ({ signal, log: () => {}, progress: p => seen.push(p), cost: () => {} });
 beforeAll(() => {
-  db = openDb(':memory:'); importOriginal(db, root); data = tempDir();
+  db = openDb(':memory:', { defaultPath: tempDefaultDb() }); data = tempDir();
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
   runners = createRenderRunner({ db, root, data, baseUrl: srv.url });
 });

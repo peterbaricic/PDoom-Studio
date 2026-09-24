@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
@@ -14,3 +14,12 @@ export const goodStoryboard = () => [
 export const tempDir = (prefix = 'studio-data-') => mkdtempSync(join(tmpdir(), prefix));
 export const isolatedEnv = (data = tempDir(), extra = {}) =>
   ({ ...process.env, STUDIO_DATA: data, STUDIO_DB: join(data, 'studio.db'), ...extra });
+
+// A private copy of the repo's studio/default.db. Tests that need the examples database (for the Original, or as a
+// target for promoteVersion) make one of these once per file and reuse it, instead of rebuilding one from the
+// source files importOriginal used to read (which Task 4 removes) or touching the repo's own copy.
+export const tempDefaultDb = () => {
+  const p = join(tempDir('default-db-'), 'default.db');
+  cpSync(join(process.cwd(), 'studio/default.db'), p);
+  return p;
+};

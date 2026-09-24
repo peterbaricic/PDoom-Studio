@@ -2,18 +2,30 @@ import { test, expect, beforeEach } from 'bun:test';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
-import { importOriginal } from '../studio/versions.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
 import { createQueue } from '../studio/queue.js';
-import { goodStoryboard, tempDir } from './helpers.js';
+import { goodStoryboard, tempDir, tempDefaultDb } from './helpers.js';
 
 const root = process.cwd();
+const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
 let db, app, calls, data;
 const H = { host: 'localhost:8080' }, W = { ...H, origin: 'http://localhost:8080', 'x-studio-token': 'tok', 'content-type': 'application/json' };
 const get = p => app.fetch(new Request('http://localhost:8080' + p, { headers: H }));
 const getOn = (host, p) => app.fetch(new Request(`http://${host}${p}`, { headers: { host } }));
 const send = (method, p, body, headers = W) => app.fetch(new Request('http://localhost:8080' + p, { method, headers, body: body && JSON.stringify(body) }));
+
+// A second app, backed by a fresh in-memory user.db with default.db attached, so 'original' is present as an
+// example. Tests that need the Original use this instead of `app`. Shares the module-level default.db copy unless
+// given its own (promoteVersion writes to default.db, so a test that promotes needs a copy of its own).
+function withExamples(defaultPath = defaultDbPath) {
+  const db2 = openDb(':memory:', { defaultPath });
+  const queue2 = { enqueue: () => 7, approve: () => [8, 9], cancel: () => true, retry: () => 10 };
+  const app2 = createApp({ db: db2, root, data, token: 'tok', queue: queue2, events: createEvents(), port: 8080 });
+  const get2 = p => app2.fetch(new Request('http://localhost:8080' + p, { headers: H }));
+  const send2 = (method, p, body, headers = W) => app2.fetch(new Request('http://localhost:8080' + p, { method, headers, body: body && JSON.stringify(body) }));
+  return { db: db2, app: app2, get: get2, send: send2 };
+}
 
 beforeEach(() => {
   db = openDb(':memory:'); calls = []; data = tempDir();
@@ -119,11 +131,11 @@ test('manual storyboard edit updates title, logline and status, with history and
 });
 
 test('version files are served from the database', async () => {
-  importOriginal(db, root);
-  const res = await get('/v/original/ch/c01_lab.js');
+  const { get: get2 } = withExamples();
+  const res = await get2('/v/original/ch/c01_lab.js');
   expect(res.headers.get('content-type')).toContain('javascript');
   expect(await res.text()).toContain("chapter('lab'");
-  expect((await get('/v/original/../../studio.db')).status).toBe(404);
+  expect((await get2('/v/original/../../studio.db')).status).toBe(404);
 });
 
 test('approve checks the storyboard first', async () => {
@@ -244,8 +256,59 @@ test('version responses carry storyboard errors, and the whole history', async (
 });
 
 test('the legacy-format Original never shows storyboard errors', async () => {
-  importOriginal(db, root);
-  expect((await (await get('/api/versions/original')).json()).storyboardErrors).toEqual([]);
+  const { get: get2 } = withExamples();
+  expect((await (await get2('/api/versions/original')).json()).storyboardErrors).toEqual([]);
+});
+
+test('version listing and detail carry the example flag', async () => {
+  const { db: db2, get: get2 } = withExamples();
+  db2.createVersion({ id: 'mine' });
+  const list = await (await get2('/api/versions')).json();
+  expect(list.find(v => v.id === 'original').example).toBe(true);
+  expect(list.find(v => v.id === 'mine').example).toBe(false);
+  expect((await (await get2('/api/versions/original')).json()).example).toBe(true);
+});
+
+test('changing an example is refused everywhere it would write: storyboard, metadata, approve, restore, and claude jobs', async () => {
+  const { db: db2, get: get2, send: send2 } = withExamples();
+  const denied = async res => { expect(res.status).toBe(403); expect((await res.json()).error).toBe('examples are read-only — remix it first'); };
+
+  await denied(await send2('PUT', '/api/versions/original/files/STORYBOARD.md', { content: 'x' }));
+  await denied(await send2('PUT', '/api/versions/original', { title: 'x' }));
+  await denied(await send2('POST', '/api/versions/original/approve', {}));
+  for (const kind of ['storyboard', 'shared', 'chapter']) await denied(await send2('POST', '/api/jobs', { kind, versionId: 'original' }));
+
+  const [rev] = db2.history('original', 'STORYBOARD.md');
+  await denied(await send2('POST', `/api/revisions/${rev.id}/restore`));
+});
+
+test('render and thumbs jobs are allowed on examples', async () => {
+  const { send: send2 } = withExamples();
+  expect((await send2('POST', '/api/jobs', { kind: 'render', versionId: 'original' })).status).toBe(201);
+  expect((await send2('POST', '/api/jobs', { kind: 'thumbs', versionId: 'original' })).status).toBe(201);
+});
+
+test('remix copies an example into a new, writable version; a clashing id is refused', async () => {
+  const { send: send2 } = withExamples();
+  const res = await send2('POST', '/api/versions/original/remix', { id: 'my-remix', title: 'My Remix' });
+  expect(res.status).toBe(201);
+  expect(await res.json()).toMatchObject({ id: 'my-remix', title: 'My Remix', example: false, status: 'ready' });
+
+  const clash = await send2('POST', '/api/versions/original/remix', { id: 'my-remix', title: 'Again' });
+  expect(clash.status).toBe(409);
+});
+
+test('promote moves a user version into default.db, and refuses when it cannot', async () => {
+  const { db: db2, send: send2 } = withExamples(tempDefaultDb());   // its own copy: promote writes to default.db
+  db2.createVersion({ id: 'mine', title: 'Mine' });
+  db2.writeFiles('mine', [{ path: 'ch/c01.js', content: '// 1' }], { source: 'manual' });
+
+  const res = await send2('POST', '/api/versions/mine/promote');
+  expect(res.status).toBe(200);
+  expect(await res.json()).toMatchObject({ id: 'mine', example: true });
+
+  const again = await send2('POST', '/api/versions/mine/promote');
+  expect(again.status).toBe(409);
 });
 
 test('work folders are served while a job runs', async () => {
