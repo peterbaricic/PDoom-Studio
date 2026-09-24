@@ -1,7 +1,8 @@
 import { test, expect } from 'bun:test';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Database } from 'bun:sqlite';
 import { openDb } from '../studio/db.js';
 import { migrateLegacyDb, cleanLegacyOriginal } from '../studio/migrate.js';
 
@@ -90,6 +91,75 @@ test('an interruption between cleaning the Original out and the rename is recove
   expect(migrated.getVersion('space-opera')).toMatchObject({ id: 'space-opera', title: 'Space Opera' });
   expect(migrated.getFile('space-opera', 'STORYBOARD.md').content).toBe('space opera storyboard');
   expect(migrated.getJob(jid)).toMatchObject({ kind: 'chapter', version_id: 'space-opera' });
+  migrated.close();
+});
+
+test('refuses to migrate while a studio server still holds the lock on studio.db', () => {
+  // Reflects the real one-time migration: the user's old studio server may still be running against studio.db
+  // when they start the new one. Moving the database out from under it would corrupt whatever it writes next, so
+  // migration must refuse instead, the same way a second acquireLock() on the same database refuses.
+  const root = tempRoot(), legacyPath = join(root, 'studio.db'), userPath = join(root, 'user.db');
+
+  const legacy = openDb(legacyPath);
+  legacy.createVersion({ id: 'original', title: 'Orig' });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }], { source: 'import' });
+  legacy.close();
+
+  writeFileSync(`${legacyPath}.lock`, JSON.stringify({ pid: process.pid, port: 4321 }));   // this test process: alive
+
+  expect(() => migrateLegacyDb(root, { userPath }))
+    .toThrow(`stop the running studio first (pid ${process.pid}, http://localhost:4321/) — studio.db is still in use`);
+
+  // nothing touched
+  expect(existsSync(legacyPath)).toBe(true);
+  expect(existsSync(userPath)).toBe(false);
+  const untouched = openDb(legacyPath);
+  expect(untouched.getVersion('original')).toMatchObject({ id: 'original', title: 'Orig' });
+  expect(untouched.getFile('original', 'STORYBOARD.md').content).toBe('orig storyboard');
+  untouched.close();
+});
+
+test('a stale lock (a dead pid) does not block migration', async () => {
+  const root = tempRoot(), legacyPath = join(root, 'studio.db'), userPath = join(root, 'user.db');
+  openDb(legacyPath).close();
+
+  const p = Bun.spawn(['true']);
+  await p.exited;   // now definitely dead
+  writeFileSync(`${legacyPath}.lock`, JSON.stringify({ pid: p.pid, port: 4321 }));
+
+  expect(migrateLegacyDb(root, { userPath })).toBe(true);
+  expect(existsSync(userPath)).toBe(true);
+});
+
+test('an incomplete checkpoint (another connection still holding the WAL open) refuses and leaves everything alone', () => {
+  const root = tempRoot(), legacyPath = join(root, 'studio.db'), userPath = join(root, 'user.db');
+
+  const legacy = openDb(legacyPath);
+  legacy.createVersion({ id: 'original', title: 'Orig' });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }], { source: 'import' });
+  legacy.close();
+
+  // A second connection with an open read transaction pins the WAL's checkpoint boundary: wal_checkpoint(TRUNCATE)
+  // can checkpoint frames written before this transaction started, but not the ones cleanLegacyOriginal's own
+  // delete writes afterward — exactly the "busy" case a leftover reader process would also produce.
+  const reader = new Database(legacyPath, { strict: true });
+  reader.exec('BEGIN');
+  reader.query('SELECT 1 FROM versions').all();
+  try {
+    expect(() => migrateLegacyDb(root, { userPath })).toThrow(/did not fully checkpoint/);
+
+    // nothing deleted or renamed
+    expect(existsSync(legacyPath)).toBe(true);
+    expect(existsSync(userPath)).toBe(false);
+    expect(existsSync(`${legacyPath}-wal`)).toBe(true);
+  } finally {
+    reader.close();
+  }
+
+  // once the blocker is gone, a retry completes cleanly, with nothing lost
+  expect(migrateLegacyDb(root, { userPath })).toBe(true);
+  const migrated = openDb(userPath);
+  expect(migrated.getVersion('original')).toBeNull();
   migrated.close();
 });
 

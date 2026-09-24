@@ -6,6 +6,15 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const holder = lockPath => { try { const h = JSON.parse(readFileSync(lockPath, 'utf8')); return Number.isInteger(h?.pid) ? h : null; } catch { return null; } };
 
+// The live holder of dbPath's lock, if any: { pid, port } when "<dbPath>.lock" exists, is readable, and its pid is
+// still running; null otherwise — no lock file, a corrupt or unreadable one, or a stale one whose pid is gone.
+// Exactly the check acquireLock itself uses to decide whether to refuse, exported so other code (the studio.db
+// migration) can refuse the same way without duplicating the liveness logic.
+export function liveLockHolder(dbPath) {
+  const held = holder(`${dbPath}.lock`);
+  return held && alive(held.pid) ? held : null;
+}
+
 export function acquireLock(dbPath, port) {
   const lockPath = `${dbPath}.lock`, pid = process.pid;
   // Created with 'wx' (fails if the file exists), so of two servers starting at once only one gets it. A lock whose
