@@ -1,41 +1,68 @@
-// render.mjs: drive studio.html in headless Chrome (or any Chromium: Edge, Brave, chrome-headless-shell; see studio/browser.js).
-//   node render.mjs --sheet=23,23.5,24 [--cols=3] [--w=640] --out=out/check.jpg   contact sheet (fast visual check)
-//   node render.mjs --stills=0.8,3,23.8 --out=out/test                          full-res PNG stills
-//   node render.mjs --clip=0:6 --fps=24 --out=out/test.mp4                      short clip with audio
-//   node render.mjs --frames=0:156.6 --workers=4                                full-res JPEG frames → out/frames (resumable)
-//   node render.mjs --encode [--out=out/pdoom.mp4]                               frames + song → MP4
-//   node render.mjs --loop=recursion [--out=out/loop_recursion]                 one cycle of a standalone loop (PNGs)
-//   (--loop also works with --sheet, where the times are loop time)
+// render.mjs: drive studio.html in headless Chromium (Chrome, Edge, Brave or chrome-headless-shell; see studio/browser.js).
+//   bun render.mjs --sheet=23,23.5,24 [--cols=3] [--w=640] --out=out/check.jpg   contact sheet (fast visual check)
+//   bun render.mjs --stills=0.8,3,23.8 --out=out/test                          full-res PNG stills
+//   bun render.mjs --poster=78 --out=out/poster.jpg                            one JPEG frame
+//   bun render.mjs --check=1,12,22 [--out=sheet.jpg]                          load and render; exit 1 on any error
+//   bun render.mjs --clip=0:6 --fps=24 --out=out/test.mp4                      short clip with audio
+//   bun render.mjs --frames=0:156.6 --workers=4 [--frames-dir=out/frames]      full-res JPEG frames (resumable)
+//   bun render.mjs --encode [--frames-dir=out/frames] [--start=0] [--out=out/pdoom.mp4]   frames + song → MP4
+//   bun render.mjs --loop=recursion [--out=out/loop_recursion]                 one cycle of a standalone loop (PNGs)
+// Which version: --v=<id> (default: original) or --work=<jobId> (a studio job's work folder).
+// Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
+// Relative paths the caller gives are theirs; everything else is relative to the project.
+const CWD = process.cwd(), HERE = import.meta.dir;
+process.chdir(HERE);
+const outPath = def => args.out ? resolve(CWD, args.out) : resolve(HERE, def);
 const DUR = 156.6, fps = +(args.fps || 24);
-
-const FRAMES_DIR = 'out/frames';
+const FRAMES_DIR = args['frames-dir'] ? resolve(CWD, args['frames-dir']) : resolve(HERE, 'out/frames');
+const times = s => String(s).split(',').map(Number);
 
 const run = (cmd, a) => new Promise((ok, bad) => { const p = spawn(cmd, a, { stdio: 'inherit' }); p.on('close', c => c ? bad(new Error(cmd + ' exited ' + c)) : ok()); });
 
 if (args.encode) {
-  const out = args.out || 'out/pdoom.mp4', n = readdirSync(FRAMES_DIR).filter(f => f.endsWith('.jpg')).length;
+  const out = outPath('out/pdoom.mp4'), start = +(args.start || 0), n = readdirSync(FRAMES_DIR).filter(f => f.endsWith('.jpg')).length;
+  mkdirSync(dirname(out), { recursive: true });
   console.log(`encoding ${n} frames → ${out}`);
-  await run('ffmpeg', ['-y', '-loglevel', 'error', '-stats', '-framerate', String(fps), '-i', `${FRAMES_DIR}/f%05d.jpg`, '-i', 'assets/pdoom.mp3',
+  await run('ffmpeg', ['-y', '-loglevel', 'error', '-stats', '-framerate', String(fps), '-start_number', String(start), '-i', `${FRAMES_DIR}/f%05d.jpg`,
+    '-ss', String(start / fps), '-i', 'assets/pdoom.mp3',
     '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart', '-shortest', out]);
   console.log('wrote ' + out);
   process.exit(0);
 }
 
+let base = args.base, local = null;
+if (!base) {
+  const [{ openDb }, { importOriginal }, { serve }, { createEvents }] = await Promise.all(
+    ['./studio/db.js', './studio/versions.js', './studio/serve.js', './studio/events.js'].map(m => import(m)));
+  const db = openDb(resolve(HERE, 'studio.db'));
+  importOriginal(db, HERE);
+  local = serve({ db, root: HERE, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
+  base = local.url;
+}
+const PAGE = `${base}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
+
 const browser = await launchBrowser({ chrome: args.chrome, angle: args.angle });
-async function openPage(tag = '') {
+let exitCode = 0;
+async function openPage(tag = '', errors = null) {
   const page = await browser.newPage();
-  page.on('console', m => { if (['error', 'warn'].includes(m.type())) console.log(`[page${tag}]`, m.text()); });
-  page.on('pageerror', e => console.log(`[page error${tag}]`, e.message));
-  await page.goto(pathToFileURL(resolve('studio.html')).href + '?render', { waitUntil: 'networkidle0' });
+  page.on('console', m => {
+    if (!['error', 'warn'].includes(m.type())) return;
+    if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
+    else console.log(`[page${tag}]`, m.text());
+  });
+  page.on('pageerror', e => errors ? errors.push(e.message) : console.log(`[page error${tag}]`, e.message));
+  await page.goto(PAGE, { waitUntil: 'networkidle0' });
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
+  const loadError = await page.evaluate(() => window.loadError || null);
+  if (loadError) { if (errors) errors.push(loadError); else throw new Error(loadError); }
   if (args.loop) await page.evaluate(name => { window.LOOP = LOOPS[name]; }, args.loop);
   return page;
 }
@@ -43,15 +70,36 @@ const frameOf = async (page, t, type, q) => {
   const url = await page.evaluate((t, type, q) => window.renderAt(t, type, q), t, type, q);
   return Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
 };
-const times = s => String(s).split(',').map(Number);
-
-if (args.sheet) {
-  const page = await openPage(), out = args.out || 'out/sheet.jpg'; mkdirSync(dirname(out), { recursive: true });
-  const { url, ms } = await page.evaluate((ts, c, w) => window.renderSheet(ts, c, w), times(args.sheet), +(args.cols || 3), +(args.w || 640));
+const writeSheet = async (page, ts, out) => {
+  const { url, ms } = await page.evaluate((ts, c, w) => window.renderSheet(ts, c, w), ts, +(args.cols || 3), +(args.w || 640));
+  mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
+  return ms;
+};
+
+if (args.check) {
+  // Validation for studio jobs: the version must load without errors, and each time must be covered by a chapter and
+  // paint within 20 s without throwing.
+  // --check=load only loads the version (used for shared.js, which covers no time of its own).
+  const errors = [], page = await openPage('', errors), ts = times(args.check).filter(Number.isFinite);
+  for (const t of errors.length ? [] : ts) {
+    if (!await page.evaluate(t => CH.some(c => t >= c.start && t < c.end), t)) { errors.push(`no chapter covers t=${t}`); continue; }
+    const slow = new Promise((_, bad) => setTimeout(() => bad(new Error(`painting t=${t} took over 20 s`)), 20000));
+    await Promise.race([page.evaluate(t => window.paintAt(t), t), slow]).catch(e => errors.push(e.message));
+  }
+  if (!errors.length && args.out) await writeSheet(page, ts, outPath('sheet.jpg'));
+  if (errors.length) { console.error('CHECK FAILED\n' + errors.join('\n')); exitCode = 1; } else console.log('CHECK OK');
+} else if (args.sheet) {
+  const page = await openPage(), out = outPath('out/sheet.jpg');
+  const ms = await writeSheet(page, times(args.sheet), out);
   console.log(`${out}  ms/frame: ${ms.join(' ')}`);
+} else if (args.poster) {
+  const page = await openPage(), out = outPath('out/poster.jpg');
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, await frameOf(page, +args.poster, 'image/jpeg', .9));
+  console.log('wrote ' + out);
 } else if (args.stills) {
-  const page = await openPage(), out = args.out || 'out/stills'; mkdirSync(out, { recursive: true });
+  const page = await openPage(), out = outPath('out/stills'); mkdirSync(out, { recursive: true });
   console.log('GPU:', await page.evaluate(() => window.gpuInfo()));
   for (const s of times(args.stills)) {
     const t0 = Date.now(), buf = await frameOf(page, s, 'image/png');
@@ -60,7 +108,7 @@ if (args.sheet) {
   }
 } else if (args.loop) {
   // One full cycle of a standalone loop scene as PNGs (t = loop time); frame n equals frame 0, so it isn't rendered.
-  const out = args.out || `out/loop_${args.loop}`, workers = +(args.workers || 3); mkdirSync(out, { recursive: true });
+  const out = outPath(`out/loop_${args.loop}`), workers = +(args.workers || 3); mkdirSync(out, { recursive: true });
   const probe = await openPage(), len = await probe.evaluate(() => window.LOOP.len), n = Math.round(len * fps);
   await probe.close();
   let next = 0; const start = Date.now();
@@ -93,7 +141,7 @@ if (args.sheet) {
 } else {
   const page = await openPage();
   const [a, b] = args.clip ? String(args.clip).split(':').map(Number) : [0, DUR];
-  const out = args.out || 'out/clip.mp4'; mkdirSync(dirname(out), { recursive: true });
+  const out = outPath('out/clip.mp4'); mkdirSync(dirname(out), { recursive: true });
   const ff = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
     '-ss', String(a), '-t', String(b - a), '-i', 'assets/pdoom.mp3',
     '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', out],
@@ -108,3 +156,5 @@ if (args.sheet) {
   console.log(`wrote ${out}`);
 }
 await browser.close();
+local?.stop();
+process.exit(exitCode);
