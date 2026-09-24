@@ -118,6 +118,12 @@ class StudioDb {
     return this.getJob(id);
   }
   appendLog(id, text) { this.db.query('UPDATE jobs SET log = log || $text WHERE id = $id').run({ id, text }); }
+  queuedJobs() { return this.db.query(`SELECT * FROM jobs WHERE status = 'queued' ORDER BY id`).all().map(parseJob); }
+  repointDependents(oldId, newId) {
+    let n = 0;
+    for (const j of this.queuedJobs()) if (j.params.after === oldId) { this.updateJob(j.id, { params: { ...j.params, after: newId } }); n++; }
+    return n;
+  }
   markInterrupted() {
     return this.db.query(`UPDATE jobs SET status = 'interrupted', finished_at = $t WHERE status = 'running'`).run({ t: Date.now() }).changes;
   }
