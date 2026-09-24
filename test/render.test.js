@@ -2,15 +2,17 @@ import { test, expect } from 'bun:test';
 import { mkdtempSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
+import { isolatedEnv } from './helpers.js';
 
+// Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
 const T = { timeout: 300000 };
 const run = async (...a) => {
-  const p = Bun.spawn(['bun', 'render.mjs', ...a], { stdout: 'pipe', stderr: 'pipe' });
+  const p = Bun.spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv(), stdout: 'pipe', stderr: 'pipe' });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
 };
 const runSandboxed = async (sandbox, ...a) => {
-  const p = Bun.spawn(['bun', 'render.mjs', ...a], { env: { ...process.env, STUDIO_SANDBOX: sandbox }, stdout: 'pipe', stderr: 'pipe' });
+  const p = Bun.spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv(undefined, { STUDIO_SANDBOX: sandbox }), stdout: 'pipe', stderr: 'pipe' });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
 };

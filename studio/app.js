@@ -1,5 +1,5 @@
-// app.js: every URL the studio answers. Pages and the shared engine come from the repo, version code from the
-// database, work folders and thumbnails from .studio/, finished videos from library/.
+// app.js: every URL the studio answers. Pages and the shared engine come from the repo (root), version code from the
+// database, work folders and thumbnails from <data>/.studio/, finished videos from <data>/library/ (data defaults to root).
 import { readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
@@ -13,10 +13,10 @@ const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; 
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
 const NO_STORE = { 'cache-control': 'no-store' };
 
-export function createApp({ db, root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude' }) {
+export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude' }) {
   const app = { port };
   const guard = makeGuard({ port: () => app.port, token });
-  const dirs = { ui: join(root, 'studio/ui'), work: join(root, '.studio/work'), library: join(root, 'library'), thumbs: join(root, '.studio/thumbs') };
+  const dirs = { ui: join(root, 'studio/ui'), work: join(data, '.studio/work'), library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
   const body = async req => { try { return await req.json(); } catch { return {}; } };
   const file = (req, dir, rel, headers) => {
     let p; try { p = safeJoin(dir, decodeURIComponent(rel)); } catch { p = null; }

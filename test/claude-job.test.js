@@ -7,25 +7,25 @@ import { openDb } from '../studio/db.js';
 import { createClaudeRunner, chapterPath, permissionSettings } from '../studio/claude-job.js';
 import { goodStoryboard } from './helpers.js';
 
-// projectRoot locates the real repo (for the fake CLI script); root is a throwaway temp folder used as the
-// runner's own "project root" for its .studio/work and .studio/settings folders, so a runner test can never
-// touch — let alone delete — a real studio job's work folder.
-const projectRoot = process.cwd();
-let db, logs, costs, root;
+// root is the real repo (the fake CLI script, the brief's paths); data is a throwaway data root for the runner's
+// .studio/work and .studio/settings folders, so a runner test can never touch, let alone delete, a real studio
+// job's work folder.
+const root = process.cwd();
+let db, logs, costs, data;
 const ctx = (signal = new AbortController().signal) => ({ signal, log: t => logs.push(t), progress: () => {}, cost: c => costs.push(c) });
 const runner = (runs, validate = async () => [], extra = {}) => createClaudeRunner({
-  db, root, baseUrl: 'http://localhost:1', claudeCmd: ['bun', join(projectRoot, 'test/fake-claude.js')],
+  db, root, data, baseUrl: 'http://localhost:1', claudeCmd: ['bun', join(root, 'test/fake-claude.js')],
   validate, ...extra, env: { FAKE_CLAUDE_PLAN: JSON.stringify({ runs }), ...extra.env },
 });
 const job = (kind, params = {}, model = null) => db.getJob(db.addJob({ kind, versionId: 'v', params, model }));
 
 beforeEach(() => {
   db = openDb(':memory:'); logs = []; costs = [];
-  root = mkdtempSync(join(tmpdir(), 'studio-root-'));
+  data = mkdtempSync(join(tmpdir(), 'studio-data-'));
   db.createVersion({ id: 'v', concept: 'A cooking show where Clawd is dough that rises.' });
 });
 
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { rmSync(data, { recursive: true, force: true }); });
 
 test('a storyboard job writes the brief, imports the storyboard and updates the version', async () => {
   const j = job('storyboard', {}, 'opus');
@@ -34,7 +34,7 @@ test('a storyboard job writes the brief, imports the storyboard and updates the 
   expect(db.getVersion('v')).toMatchObject({ title: 'The P(doom) Bake-Off', status: 'storyboard' });
   expect(db.history('v', 'STORYBOARD.md')[0]).toMatchObject({ source: 'claude', job_id: j.id });
   expect(costs.at(-1)).toBe(.42);
-  expect(existsSync(join(root, '.studio/work', String(j.id)))).toBe(false);
+  expect(existsSync(join(data, '.studio/work', String(j.id)))).toBe(false);
 });
 
 test('the brief and the CLI arguments', async () => {
@@ -42,7 +42,7 @@ test('the brief and the CLI arguments', async () => {
   const j = job('chapter', { chapter: 3, feedback: 'make the oven bigger' }, 'sonnet');
   let brief = '';
   await runner([{ files: { 'ch/c03.js': "chapter('c3', 38.5, 59, []);" } }], async () => {
-    brief = readFileSync(join(root, '.studio/work', String(j.id), 'TASK.md'), 'utf8'); return [];
+    brief = readFileSync(join(data, '.studio/work', String(j.id), 'TASK.md'), 'utf8'); return [];
   }, { env: { FAKE_CLAUDE_LOG: log } })(j, ctx());
   expect(brief).toContain('ch/c03.js');
   expect(brief).toContain('38.5–59');
@@ -80,7 +80,7 @@ test('a second validation failure fails the job and keeps the work folder', asyn
   const j = job('chapter', { chapter: 1 });
   await expect(runner([{ files: { 'ch/c01.js': 'broken' } }], async () => ['still broken'])(j, ctx())).rejects.toThrow('validation failed: still broken');
   expect(db.getFile('v', 'ch/c01.js')).toBeNull();
-  expect(existsSync(join(root, '.studio/work', String(j.id)))).toBe(true);
+  expect(existsSync(join(data, '.studio/work', String(j.id)))).toBe(true);
 });
 
 test('an invalid storyboard is sent back for a fix', async () => {

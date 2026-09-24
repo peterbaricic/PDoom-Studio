@@ -1,17 +1,18 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { importOriginal } from '../studio/versions.js';
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { launchBrowser } from '../studio/browser.js';
+import { tempDir } from './helpers.js';
 
-const root = process.cwd(), T = { timeout: 120000 };
+const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
 let db, srv, browser;
 beforeAll(async () => {
   db = openDb(':memory:'); importOriginal(db, root);
-  srv = serve({ db, root, token: 't', events: createEvents(), port: 0 });
+  srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
   browser = await launchBrowser();
 });
 afterAll(async () => { await browser?.close(); srv?.stop(); });
@@ -48,14 +49,12 @@ test('loads a database version with its engine options', async () => {
 test('loads a work folder, and reports broken code', async () => {
   db.createVersion({ id: 'broken' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'broken', params: { chapter: 1 } });
-  const dir = join(root, '.studio/work', String(jid));
+  const dir = join(data, '.studio/work', String(jid));
   mkdirSync(join(dir, 'ch'), { recursive: true });
   writeFileSync(join(dir, 'ch/c01.js'), "throw new Error('boom');");
-  try {
-    const { page, errors } = await open(`work=${jid}`);
-    expect(errors.join()).toContain('boom');
-    await page.close();
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const { page, errors } = await open(`work=${jid}`);
+  expect(errors.join()).toContain('boom');
+  await page.close();
 }, T);
 
 test('an unknown version sets loadError', async () => {

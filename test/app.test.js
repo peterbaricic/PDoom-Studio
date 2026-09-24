@@ -1,25 +1,25 @@
 import { test, expect, beforeEach } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { importOriginal } from '../studio/versions.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
-import { goodStoryboard } from './helpers.js';
+import { goodStoryboard, tempDir } from './helpers.js';
 
 const root = process.cwd();
-let db, app, calls;
+let db, app, calls, data;
 const H = { host: 'localhost:8080' }, W = { ...H, origin: 'http://localhost:8080', 'x-studio-token': 'tok', 'content-type': 'application/json' };
 const get = p => app.fetch(new Request('http://localhost:8080' + p, { headers: H }));
 const send = (method, p, body, headers = W) => app.fetch(new Request('http://localhost:8080' + p, { method, headers, body: body && JSON.stringify(body) }));
 
 beforeEach(() => {
-  db = openDb(':memory:'); calls = [];
+  db = openDb(':memory:'); calls = []; data = tempDir();
   const queue = {
     enqueue: j => { calls.push(['enqueue', j]); return 7; }, approve: (id, model) => { calls.push(['approve', id, model]); return [8, 9]; },
     cancel: id => { calls.push(['cancel', id]); return true; }, retry: id => { calls.push(['retry', id]); return 10; },
   };
-  app = createApp({ db, root, token: 'tok', queue, events: createEvents(), port: 8080 });
+  app = createApp({ db, root, data, token: 'tok', queue, events: createEvents(), port: 8080 });
 });
 
 test('the shell page carries the token', async () => {
@@ -88,14 +88,14 @@ test('jobs are handed to the queue', async () => {
 });
 
 test('library lists renders and deleting removes the files', async () => {
-  mkdirSync(join(root, 'library'), { recursive: true });
-  writeFileSync(join(root, 'library', 'zz-test.mp4'), 'mp4'); writeFileSync(join(root, 'library', 'zz-test.jpg'), 'jpg');
+  mkdirSync(join(data, 'library'), { recursive: true });
+  writeFileSync(join(data, 'library', 'zz-test.mp4'), 'mp4'); writeFileSync(join(data, 'library', 'zz-test.jpg'), 'jpg');
   db.createVersion({ id: 'a', title: 'A' });
   const rid = db.addRender({ versionId: 'a', file: 'zz-test.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 3, poster: 'zz-test.jpg' });
   expect((await (await get('/api/library')).json())[0]).toMatchObject({ id: rid, title: 'A' });
   expect((await get('/library/zz-test.mp4')).status).toBe(200);
   await send('DELETE', `/api/library/${rid}`);
-  expect(existsSync(join(root, 'library', 'zz-test.mp4'))).toBe(false);
+  expect(existsSync(join(data, 'library', 'zz-test.mp4'))).toBe(false);
   expect(db.listRenders()).toEqual([]);
 });
 
@@ -117,11 +117,9 @@ test('the legacy-format Original never shows storyboard errors', async () => {
 test('work folders are served while a job runs', async () => {
   db.createVersion({ id: 'a' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });
-  const dir = join(root, '.studio/work', String(jid));
+  const dir = join(data, '.studio/work', String(jid));
   mkdirSync(join(dir, 'ch'), { recursive: true }); writeFileSync(join(dir, 'ch/c01.js'), '// c1');
-  try {
-    expect((await (await get(`/api/work/${jid}`)).json()).scripts).toEqual(['ch/c01.js']);
-    expect(await (await get(`/work/${jid}/ch/c01.js`)).text()).toBe('// c1');
-    expect((await get(`/work/${jid}/TASK.md`)).status).toBe(404);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  expect((await (await get(`/api/work/${jid}`)).json()).scripts).toEqual(['ch/c01.js']);
+  expect(await (await get(`/work/${jid}/ch/c01.js`)).text()).toBe('// c1');
+  expect((await get(`/work/${jid}/TASK.md`)).status).toBe(404);
 });

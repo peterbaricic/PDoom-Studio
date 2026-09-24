@@ -8,7 +8,8 @@
 //   bun render.mjs --encode [--frames-dir=out/frames] [--start=0] [--out=out/pdoom.mp4]   frames + song → MP4
 //   bun render.mjs --loop=recursion [--out=out/loop_recursion]                 one cycle of a standalone loop (PNGs)
 // Which version: --v=<id> (default: original) or --work=<jobId> (a studio job's work folder).
-// Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started.
+// Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started
+// ($STUDIO_DB picks another database, $STUDIO_DATA another folder for .studio/ and library/, as for the studio).
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
 import { dirname, resolve, sep, basename } from 'node:path';
@@ -72,9 +73,10 @@ let base = args.base, local = null;
 if (!base) {
   const [{ openDb }, { importOriginal }, { serve }, { createEvents }] = await Promise.all(
     ['./studio/db.js', './studio/versions.js', './studio/serve.js', './studio/events.js'].map(m => import(m)));
-  const db = openDb(resolve(HERE, 'studio.db'));
+  const db = openDb(process.env.STUDIO_DB ? resolve(CWD, process.env.STUDIO_DB) : resolve(HERE, 'studio.db'));
   importOriginal(db, HERE);
-  local = serve({ db, root: HERE, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
+  const data = process.env.STUDIO_DATA ? resolve(CWD, process.env.STUDIO_DATA) : HERE;
+  local = serve({ db, root: HERE, data, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
   base = local.url;
 }
 const PAGE = `${base}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);

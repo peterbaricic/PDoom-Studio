@@ -1,13 +1,12 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
 import { launchBrowser } from '../studio/browser.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { goodStoryboard } from './helpers.js';
+import { goodStoryboard, tempDir, isolatedEnv } from './helpers.js';
 
-const root = process.cwd(), dbPath = join(mkdtempSync(join(tmpdir(), 'ui-')), 'studio.db');
+const root = process.cwd(), data = tempDir(), dbPath = join(data, 'studio.db');
 const files = { 'STORYBOARD.md': goodStoryboard(), 'shared.js': 'const SET = {};' };
 CHAPTER_WINDOWS.forEach(([a, b], i) => {
   files[`ch/c0${i + 1}.js`] = `chapter('c${i + 1}', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`;
@@ -15,8 +14,8 @@ CHAPTER_WINDOWS.forEach(([a, b], i) => {
 let server, url, browser, page;
 
 beforeAll(async () => {
-  server = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { stdout: 'pipe', env: { ...process.env, STUDIO_DB: dbPath,
-    CLAUDE_BIN: `bun ${join(root, 'test/fake-claude.js')}`, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }) } });
+  server = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { stdout: 'pipe', env: isolatedEnv(data, {
+    CLAUDE_BIN: `bun ${join(root, 'test/fake-claude.js')}`, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }) }) });
   const reader = server.stdout.getReader(), dec = new TextDecoder();
   let out = '';
   while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
@@ -25,11 +24,7 @@ beforeAll(async () => {
   page = await browser.newPage();
   await page.setViewport({ width: 1400, height: 1000 });
 });
-afterAll(async () => {
-  await browser?.close(); server?.kill();
-  rmSync(join(root, 'library', 'zz-e2e.mp4'), { force: true }); rmSync(join(root, 'library', 'zz-e2e.jpg'), { force: true });
-  rmSync(join(root, '.studio/thumbs/e2e-test-show'), { recursive: true, force: true });
-});
+afterAll(async () => { await browser?.close(); server?.kill(); });
 
 test('create a version from a concept to nine chapters', async () => {
   await page.goto(`${url}/#/create/new`);
@@ -59,11 +54,11 @@ test('create a version from a concept to nine chapters', async () => {
 }, { timeout: 420000 });
 
 test('play a finished render with a synced walkthrough', async () => {
-  mkdirSync(join(root, 'library'), { recursive: true });
+  mkdirSync(join(data, 'library'), { recursive: true });
   const ff = Bun.spawn(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:d=40', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-    '-t', '40', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', join(root, 'library/zz-e2e.mp4')]);
+    '-t', '40', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', join(data, 'library/zz-e2e.mp4')]);
   await ff.exited;
-  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-i', join(root, 'library/zz-e2e.mp4'), '-frames:v', '1', join(root, 'library/zz-e2e.jpg')]);
+  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-i', join(data, 'library/zz-e2e.mp4'), '-frames:v', '1', join(data, 'library/zz-e2e.jpg')]);
   const db = openDb(dbPath);
   const rid = db.addRender({ versionId: 'e2e-test-show', file: 'zz-e2e.mp4', revisionIds: [], durationS: 40, renderS: 60, sizeBytes: 1, poster: 'zz-e2e.jpg' });
   db.close();

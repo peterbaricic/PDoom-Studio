@@ -1,5 +1,5 @@
 // claude-job.js: storyboard, shared-setup and chapter jobs. Each runs Claude Code headless in a throwaway work folder
-// that holds the version's current files and a TASK.md brief; Claude may only write there. The result is checked,
+// (<data>/.studio/work/<job id>) that holds the version's current files and a TASK.md brief; Claude may only write there. The result is checked,
 // sent back once for a fix if it fails, and imported as a new revision of the job's one target file.
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -24,12 +24,12 @@ export function permissionSettings({ root, jobId, dir }) {
   } };
 }
 
-export async function checkWithRenderer({ root, baseUrl, jobId, kind, versionId, chapter, signal }) {
+export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kind, versionId, chapter, signal }) {
   let times = 'load', thumb = null;
   if (kind === 'chapter') {
     const [a, b] = CHAPTER_WINDOWS[chapter - 1];
     times = [a + .3, (a + b) / 2, b - .3].map(t => t.toFixed(2)).join(',');
-    thumb = join(root, '.studio/thumbs', versionId, `c0${chapter}.jpg`);
+    thumb = join(data, '.studio/thumbs', versionId, `c0${chapter}.jpg`);
   }
   const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, ...(baseUrl ? [`--base=${baseUrl}`] : []),
     ...(thumb ? [`--out=${thumb}`, '--cols=3', '--w=320'] : [])];
@@ -92,11 +92,11 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
   return { cost: result.total_cost_usd || 0 };
 }
 
-export function createClaudeRunner({ db, root, baseUrl, events = null, claudeCmd = (process.env.CLAUDE_BIN || 'claude').split(' '),
+export function createClaudeRunner({ db, root, data = root, baseUrl, events = null, claudeCmd = (process.env.CLAUDE_BIN || 'claude').split(' '),
   env = {}, validate = checkWithRenderer, timeoutMs = 30 * 60 * 1000 }) {
   return async (job, ctx) => {
     const { kind, version_id: vid, params } = job, version = db.getVersion(vid);
-    const dir = join(root, '.studio/work', String(job.id)), settings = join(root, '.studio/settings', `${job.id}.json`);
+    const dir = join(data, '.studio/work', String(job.id)), settings = join(data, '.studio/settings', `${job.id}.json`);
     const target = kind === 'storyboard' ? 'STORYBOARD.md' : kind === 'shared' ? 'shared.js' : chapterPath(db, vid, params.chapter);
 
     // The work folder: the version's current files, plus the brief.
@@ -125,7 +125,7 @@ export function createClaudeRunner({ db, root, baseUrl, events = null, claudeCmd
       const file = join(dir, target);
       if (!existsSync(file)) return [`${target} was not written`];
       if (kind === 'storyboard') return parseStoryboard(readFileSync(file, 'utf8')).errors;
-      return validate({ root, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter, signal: ctx.signal });
+      return validate({ root, data, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter, signal: ctx.signal });
     };
 
     await attempt('Read TASK.md in the current folder and do what it says.');

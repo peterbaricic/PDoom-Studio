@@ -3,9 +3,11 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
+import { isolatedEnv } from './helpers.js';
 
+const envFor = dbPath => isolatedEnv(undefined, { STUDIO_DB: dbPath });
 async function start(dbPath) {
-  const p = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: { ...process.env, STUDIO_DB: dbPath }, stdout: 'pipe' });
+  const p = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: envFor(dbPath), stdout: 'pipe' });
   const reader = p.stdout.getReader(), dec = new TextDecoder();
   let out = '';
   while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
@@ -36,7 +38,7 @@ test('a second server on the same database refuses to start', async () => {
   const dbPath = join(mkdtempSync(join(tmpdir(), 'srv-')), 'studio.db');
   const first = await start(dbPath);
   try {
-    const second = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: { ...process.env, STUDIO_DB: dbPath }, stdout: 'ignore', stderr: 'pipe' });
+    const second = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: envFor(dbPath), stdout: 'ignore', stderr: 'pipe' });
     const [err, code] = await Promise.all([new Response(second.stderr).text(), second.exited]);
     expect(code).toBe(1);
     expect(err).toContain('another studio is already running');
