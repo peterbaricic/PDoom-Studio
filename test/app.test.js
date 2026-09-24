@@ -61,7 +61,25 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   expect(csp['img-src']).toEqual(["'self'", 'data:', 'blob:']);
   expect(csp['connect-src']).toEqual(["'self'"]);
   expect(csp['media-src']).toEqual(["'self'"]);
+  expect(csp['form-action']).toEqual(["'none'"]);
+  expect(csp['base-uri']).toEqual(["'none'"]);
   expect(csp['frame-ancestors']).toEqual(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://*.localhost:8080']);
+});
+
+test('worker hosts answer only the two API endpoints the loader needs; the rest of /api is 404 there', async () => {
+  db.createVersion({ id: 'a' });
+  const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });
+  mkdirSync(join(data, '.studio/work', String(jid)), { recursive: true });
+  for (const host of ['w0.localhost:8080', 'w3.localhost:8080']) {
+    expect((await getOn(host, '/api/versions/a')).status).toBe(200);
+    expect((await getOn(host, `/api/work/${jid}`)).status).toBe(200);
+    for (const p of ['/api/versions', '/api/jobs', `/api/jobs/${jid}`, '/api/health', '/api/library', '/api/events', '/api/versions/a/history']) {
+      expect((await getOn(host, p)).status).toBe(404);
+    }
+  }
+  // unaffected on the studio's own hosts
+  expect((await get('/api/versions')).status).toBe(200);
+  expect((await get(`/api/jobs/${jid}`)).status).toBe(200);
 });
 
 test('serves engine files but nothing private', async () => {

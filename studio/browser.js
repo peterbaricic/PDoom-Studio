@@ -43,6 +43,10 @@ export function launchBrowser({ chrome, angle = ANGLE, fromEnv = true } = {}) {
   return puppeteer.launch({
     executablePath: findBrowser(chrome, { fromEnv }), headless: true, protocolTimeout: 0,
     args: ['--ignore-gpu-blocklist', ...(angle ? ['--use-angle=' + angle] : []), '--enable-gpu-rasterization', '--window-size=1920,1080',
-      '--disable-renderer-backgrounding', '--disable-background-timer-throttling'],
+      '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
+      // Chapter code can't reach the network through fetch/XHR (the CSP blocks that) or navigation (render.mjs
+      // intercepts that), but WebRTC ICE candidates are neither: without a configured proxy, these flags stop it
+      // from gathering real local or public IPs, so it has nothing to open a connection with.
+      '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--webrtc-ip-handling-policy=disable_non_proxied_udp'],
   });
 }

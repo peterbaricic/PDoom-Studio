@@ -107,6 +107,12 @@ if (!base) {
 const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
 const PAGE = `${pageOrigin.origin}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
+// The CSP blocks chapter code from fetching or XHR-ing out, but not from navigating the top-level page away, from
+// form submission, or from opening a popup — so a sandboxed render still needs its own net to catch those. Requests
+// to the page's own origin are allowed, plus the Google Fonts domains studio.html's stylesheet loads from.
+const PAGE_ORIGIN = new URL(PAGE).origin;
+const ALLOWED_ORIGINS = new Set([PAGE_ORIGIN, 'https://fonts.googleapis.com', 'https://fonts.gstatic.com']);
+
 browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
 let exitCode = 0;
 // errors: collect load and page errors there instead of logging them (--check). strict: an error while the page loads
@@ -115,6 +121,32 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
   const loadErrors = [];
   let loading = true;
   const page = await browser.newPage();
+  // window.open never even gets chapter code a target to send data with — closing one after the fact (below) is too
+  // late: Chrome dispatches a popup's first request as soon as the target exists, before we can hear about it.
+  await page.evaluateOnNewDocument(() => {
+    window.open = () => null;
+    // A same-tab navigation away (location.href = …, a link, a form) starts with beforeunload; cancelling it here
+    // keeps the current document live, instead of racing to abort the network request after the browser already
+    // committed to unloading (which reliably wedges the renderer — the page never becomes ready).
+    addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
+  });
+  // A beforeunload prompt is silently skipped for a frame that's never had real input, so it needs one lie below
+  // (a synthetic click) to make the cancellation above actually take effect.
+  page.on('dialog', d => d.dismiss().catch(() => {}));
+  // Belt and suspenders for any popup that slips past the override above (e.g. a future code path that reintroduces
+  // window.open): closed immediately, and network-dead regardless.
+  page.on('popup', async popup => {
+    await popup.setRequestInterception(true).catch(() => {});
+    popup.on('request', request => request.abort('aborted').catch(() => {}));
+    await popup.close().catch(() => {});
+  });
+  await page.setRequestInterception(true);
+  page.on('request', request => {
+    let origin; try { origin = new URL(request.url()).origin; } catch { origin = null; }
+    // 'aborted' (net::ERR_ABORTED), not the default 'failed': a live top-level navigation should never reach here
+    // (beforeunload cancels it first), but if it ever did, ERR_FAILED would commit an error page in its place.
+    if (ALLOWED_ORIGINS.has(origin)) request.continue(); else request.abort('aborted');
+  });
   page.on('console', m => {
     if (!['error', 'warn'].includes(m.type())) return;
     if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
@@ -125,6 +157,11 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     console.log(`[page error${tag}]`, e.message);
     if (loading) loadErrors.push(e.message);
   });
+  // The chapter scripts that follow load asynchronously (waited for below via window.ready) and could try to
+  // navigate away as soon as they run, so the synthetic click that arms beforeunload has to land as soon as there's
+  // a document to click — at domcontentloaded, well before that — not after goto's own networkidle0 wait, which
+  // only settles once everything, including a malicious attempt, has already happened.
+  page.once('domcontentloaded', () => { page.mouse.click(1, 1).catch(() => {}); });
   await page.goto(PAGE, { waitUntil: 'networkidle0' });
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
   const loadError = await page.evaluate(() => window.loadError || null);

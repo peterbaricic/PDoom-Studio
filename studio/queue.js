@@ -32,7 +32,10 @@ export function createQueue({ db, events, runners, limits = { claude: 3, render:
 
   // A retried job waits for the same job as before, unless that one can no longer finish (it failed or was cancelled
   // meanwhile): then for the newest shared job of the version that can, or for nothing if the version already has
-  // its shared.js. Otherwise it keeps waiting, and retrying the shared job moves it along (repointDependents).
+  // its shared.js. Failing both of those, it chases the newest shared job of the version regardless of status (even
+  // a failed or cancelled one), so that retrying *that* job later repoints this one forward (repointDependents) —
+  // and so on, until a shared job actually succeeds. Without this, a chapter retried while every shared job so far
+  // has failed would stay pointed at whichever one it originally waited for, and never catch up.
   function retry(id) {
     const job = db.getJob(id);
     if (!job || !['failed', 'cancelled', 'interrupted'].includes(job.status)) throw new Error('only failed, cancelled or interrupted jobs can be retried');
@@ -41,6 +44,10 @@ export function createQueue({ db, events, runners, limits = { claude: 3, render:
       const [shared] = db.findJobs({ versionId: job.version_id, kinds: ['shared'], statuses: ['queued', 'running', 'done'] });
       if (shared) params = { ...params, after: shared.id };
       else if (db.getFile(job.version_id, 'shared.js')) { const { after, ...rest } = params; params = rest; }
+      else {
+        const [newest] = db.findJobs({ versionId: job.version_id, kinds: ['shared'], statuses: ['queued', 'running', 'done', 'failed', 'cancelled', 'interrupted'] });
+        if (newest) params = { ...params, after: newest.id };
+      }
     }
     const next = enqueue({ kind: job.kind, versionId: job.version_id, params, model: job.model });
     db.repointDependents(id, next);

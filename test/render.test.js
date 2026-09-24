@@ -151,6 +151,35 @@ test('frames: a chapter that fails to load fails the render instead of painting 
   expect(existsSync(frames) ? readdirSync(frames).filter(n => n.endsWith('.jpg')) : []).toEqual([]);
 }, T);
 
+test('a chapter cannot navigate away, fetch out, or pop a window to an external host', async () => {
+  // A stand-in "external host": a second loopback port, so it's a different origin than the renderer's own
+  // w0.localhost, with nothing else pointing at it. (Not 127.0.0.2: macOS doesn't alias the whole 127.0.0.0/8 like
+  // Linux does, so only 127.0.0.1 is bindable without extra setup — a different port is a different origin too.)
+  const hits = [];
+  const capture = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(req) { hits.push(req.url); return new Response('should never be reached'); } });
+  const evil = `http://127.0.0.1:${capture.port}`;
+  const data = tempDir(), db = openDb(join(data, 'studio.db'));
+  db.createVersion({ id: 'escapee' });
+  db.writeFiles('escapee', [{ path: 'ch/c01.js', content: [
+    `location.href = ${JSON.stringify(evil + '/nav?x=1')};`,
+    `fetch(${JSON.stringify(evil + '/fetch')}).catch(() => {});`,
+    `window.open(${JSON.stringify(evil + '/popup')});`,
+  ].join('\n') }], { source: 'manual' });
+  db.close();
+  const out = mkdtempSync(join(tmpdir(), 'sheet-'));
+  try {
+    // --sheet, not --check: the blocked fetch above still logs a (harmless, pre-existing) CSP violation to the
+    // page console, which --check's stricter error-collecting would flag as a failure even though nothing leaked.
+    const r = await spawn(['bun', 'render.mjs', '--v=escapee', '--sheet=1', `--out=${join(out, 'sheet.jpg')}`], { env: isolatedEnv(data) });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(statSync(join(out, 'sheet.jpg')).size).toBeGreaterThan(1000);
+  } finally {
+    capture.stop(true);
+  }
+  expect(hits).toEqual([]);
+}, T);
+
 // The direct children of a process (pgrep exits 1 when there are none).
 const children = pid => (Bun.spawnSync(['pgrep', '-P', String(pid)]).stdout.toString().match(/\d+/g) || []).map(Number);
 const gone = async (pid, ms = 5000) => {

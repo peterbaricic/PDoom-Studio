@@ -21,8 +21,11 @@ const NO_STORE = { 'cache-control': 'no-store' };
 const onRenderer = req => /^w\d+\.localhost:\d+$/.test(req.headers.get('host') || '');
 const studioCsp = port => ["default-src 'self'", "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'",
+  "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'", "form-action 'none'", "base-uri 'none'",
   `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`].join('; ');
+// The only two /api endpoints chapter code needs (src/loader.js): everything else under /api/ is answered 404 on
+// renderer hosts, so code running there can't read (or, were the guard ever to slip, write) anything through it.
+const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/];
 const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
 export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000 }) {
@@ -162,6 +165,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   app.fetch = async req => {
     const denied = guard(req); if (denied) return denied;
     const path = new URL(req.url).pathname;
+    if (onRenderer(req) && path.startsWith('/api/') && !((req.method === 'GET' || req.method === 'HEAD') && RENDERER_API_OK.some(re => re.test(path)))) {
+      return error(404, 'not found');
+    }
     for (const [method, re, handler] of routes) {
       const m = re.exec(path);
       if (m && (req.method === method || (method === 'GET' && req.method === 'HEAD'))) {

@@ -119,3 +119,23 @@ test('a retried chapter whose shared job is gone runs if the version has shared.
   expect(started).toContain(`chapter#${runs}`);
   open(runs);
 });
+
+// The review's stuck-chapter scenario: a chapter that keeps chasing a shared job through several failed retries,
+// instead of being left pointed at the very first (and by then long-dead) attempt.
+test('a chapter chases the shared job through repeated failed retries until one finally succeeds', async () => {
+  const q = make();
+  const [s1, ...chapters] = q.approve('a', null);
+  await tick(); fail(s1, 'bad code'); await tick();
+  for (const id of chapters) q.cancel(id);                // the user gives up on the waiting chapters…
+  const s2 = q.retry(s1);                                 // …retries the shared setup…
+  await tick(); fail(s2, 'bad code again'); await tick();  // …which fails again…
+  const chapter = q.retry(chapters[0]);                   // …and retries the chapter anyway
+  expect(db.getJob(chapter).params).toEqual({ chapter: 1, after: s2 });   // chases s2, not the long-dead s1
+  const s3 = q.retry(s2);                                 // retrying s2 repoints the still-queued chapter forward
+  expect(db.getJob(chapter).params).toEqual({ chapter: 1, after: s3 });
+  await tick(); open(s3); await tick();
+  expect(db.getJob(s3).status).toBe('done');
+  await tick();
+  expect(started).toContain(`chapter#${chapter}`);
+  open(chapter); await q.idle();
+});
