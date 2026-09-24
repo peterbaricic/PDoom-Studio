@@ -238,6 +238,21 @@ test('a chapter cannot reach an external host through a service worker, a shared
   expect(hits).toEqual([]);
 }, T);
 
+test('without USER_DB, the in-process server reads user.db in STUDIO_DATA, or a not-yet-migrated studio.db there', async () => {
+  const chapter = "chapter('one', 0, 23, [[0, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);";
+  for (const name of ['user.db', 'studio.db']) {
+    const data = tempDir(), db = openDb(join(data, name));
+    db.createVersion({ id: 'in-data-folder' });
+    db.writeFiles('in-data-folder', [{ path: 'ch/c01.js', content: chapter }], { source: 'manual' });
+    db.close();
+    const { USER_DB, STUDIO_DB, ...env } = isolatedEnv(data);
+    const r = await spawn(['bun', 'render.mjs', '--v=in-data-folder', '--check=5'], { env });
+    expect(r.out).toContain('CHECK OK');
+    expect(r.code).toBe(0);
+    expect(readdirSync(data).filter(n => n.endsWith('.db'))).toEqual([name]);   // and made no other database there
+  }
+}, T);
+
 test('a data: URI image still renders under request interception', async () => {
   // Chrome reports a data: URI as a "request" to Fetch-domain interception (so it does reach the handler below),
   // but it never actually goes over the network — abort()/continue() has no effect on it either way, and it loads

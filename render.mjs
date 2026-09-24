@@ -8,8 +8,10 @@
 //   bun render.mjs --encode [--frames-dir=out/frames] [--start=0] [--out=out/pdoom.mp4]   frames + song → MP4
 //   bun render.mjs --loop=recursion [--out=out/loop_recursion]                 one cycle of a standalone loop (PNGs)
 // Which version: --v=<id> (default: original) or --work=<jobId> (a studio job's work folder).
-// Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started
-// ($STUDIO_DB picks another database, $STUDIO_DATA another folder for .studio/ and library/, as for the studio).
+// Pages come from a running studio at --base=<url>; without it, an in-process server is started over the studio's
+// own databases: user.db in the data folder (or, until the studio has migrated it, the old studio.db there) plus
+// studio/default.db for the examples. As for the studio, $STUDIO_DATA picks another data folder (for user.db, .studio/
+// and library/), $USER_DB (alias $STUDIO_DB) another user database and $DEFAULT_DB another examples database.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve, sep, basename, join } from 'node:path';
@@ -97,14 +99,14 @@ let base = args.base, local = null;
 if (!base) {
   const [{ openDb }, { serve }, { createEvents }] = await Promise.all(
     ['./studio/db.js', './studio/serve.js', './studio/events.js'].map(m => import(m)));
+  const data = process.env.STUDIO_DATA ? resolve(CWD, process.env.STUDIO_DATA) : HERE;
   const envUserDb = process.env.USER_DB || process.env.STUDIO_DB;
-  // No override: use the split layout's user.db, but fall back to a not-yet-migrated studio.db so this keeps
-  // working before the studio server has had a chance to run its migration.
+  // No override: the data folder's user.db, as for the studio, but falling back to a not-yet-migrated studio.db
+  // beside it, so this keeps working before the studio server has had a chance to run its migration.
   const userPath = envUserDb ? resolve(CWD, envUserDb)
-    : (existsSync(resolve(HERE, 'user.db')) || !existsSync(resolve(HERE, 'studio.db')) ? resolve(HERE, 'user.db') : resolve(HERE, 'studio.db'));
+    : (existsSync(join(data, 'user.db')) || !existsSync(join(data, 'studio.db')) ? join(data, 'user.db') : join(data, 'studio.db'));
   const defaultPath = process.env.DEFAULT_DB ? resolve(CWD, process.env.DEFAULT_DB) : resolve(HERE, 'studio/default.db');
   const db = openDb(userPath, { defaultPath });
-  const data = process.env.STUDIO_DATA ? resolve(CWD, process.env.STUDIO_DATA) : HERE;
   local = serve({ db, root: HERE, data, token: randomBytes(16).toString('hex'), events: createEvents(), port: 0 });
   base = local.url;
 }
