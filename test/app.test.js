@@ -99,6 +99,16 @@ test('library lists renders and deleting removes the files', async () => {
   expect(db.listRenders()).toEqual([]);
 });
 
+test('version responses carry storyboard errors, and the whole history', async () => {
+  db.createVersion({ id: 'a' });
+  db.writeFiles('a', [{ path: 'STORYBOARD.md', content: 'nope' }], { source: 'manual', note: 'first try' });
+  db.writeFiles('a', [{ path: 'ch/c01.js', content: '//' }], { source: 'claude', note: 'make it pop' });
+  expect((await (await get('/api/versions/a')).json()).storyboardErrors).toContain('expected 9 chapters, found 0');
+  const hist = await (await get('/api/versions/a/history')).json();
+  expect(hist.map(r => [r.path, r.note])).toEqual([['ch/c01.js', 'make it pop'], ['STORYBOARD.md', 'first try']]);
+  expect(hist[0].content).toBeUndefined();
+});
+
 test('work folders are served while a job runs', async () => {
   db.createVersion({ id: 'a' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });

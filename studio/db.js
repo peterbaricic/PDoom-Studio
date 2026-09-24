@@ -90,7 +90,9 @@ class StudioDb {
     return this.db.query('SELECT path, revision_id FROM files WHERE version_id = $versionId ORDER BY path').all({ versionId });
   }
   history(versionId, path) {
-    return this.db.query('SELECT * FROM revisions WHERE version_id = $versionId AND path = $path ORDER BY id DESC').all({ versionId, path });
+    return path == null
+      ? this.db.query('SELECT * FROM revisions WHERE version_id = $versionId ORDER BY id DESC').all({ versionId })
+      : this.db.query('SELECT * FROM revisions WHERE version_id = $versionId AND path = $path ORDER BY id DESC').all({ versionId, path });
   }
   getRevision(id) { return this.db.query('SELECT * FROM revisions WHERE id = $id').get({ id }) ?? null; }
   restore(id) {

@@ -48,8 +48,11 @@ export function createApp({ db, root, token, queue, events, port = 8080, claudeB
     ['GET', /^\/api\/versions\/([a-z0-9-]+)$/, (req, [, id]) => {
       const m = versionManifest(db, id);
       if (!m) return error(404, 'no such version');
-      return json({ ...m, concept: db.getVersion(id).concept, fileRevisions: Object.fromEntries(db.listFiles(id).map(f => [f.path, f.revision_id])) });
+      const sb = db.getFile(id, 'STORYBOARD.md');
+      return json({ ...m, concept: db.getVersion(id).concept, fileRevisions: Object.fromEntries(db.listFiles(id).map(f => [f.path, f.revision_id])),
+        storyboardErrors: sb ? parseStoryboard(sb.content).errors : [] });
     }],
+    ['GET', /^\/api\/versions\/([a-z0-9-]+)\/history$/, (req, [, id]) => json(db.history(id, null).map(({ content, ...r }) => r))],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
       const b = await body(req), patch = Object.fromEntries(['title', 'concept', 'options'].filter(k => k in b).map(k => [k, b[k]]));
