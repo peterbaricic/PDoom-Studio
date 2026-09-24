@@ -1,6 +1,7 @@
 import { test, expect, beforeEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, cpSync, readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { openDb, isValidPath, EXAMPLE_REVISION_FLOOR } from '../studio/db.js';
 import { buildDefault } from '../studio/build-default.js';
@@ -177,6 +178,72 @@ test('promoteVersion refuses examples, and refuses when there is no default.db',
   plain.createVersion({ id: 'solo' });
   expect(() => plain.promoteVersion('solo')).toThrow('default.db does not exist');
   plain.close();
+});
+
+test('an id in both databases (promote interrupted after writing default.db) resolves to the example, and promoting again finishes the move', () => {
+  // The crash state: default.db already has the version, user.db still has it too. Two user databases sharing one
+  // default.db make it exactly: both hold an identical "mine", the first promotes it, and the second is left holding
+  // its copy of what default.db now has. A third holds a "mine" with other files.
+  const defaultPath = freshDefaultPath();
+  const mine = (udb, files = [{ path: 'STORYBOARD.md', content: 'sb' }, { path: 'ch/c01.js', content: '// 1' }]) => {
+    udb.createVersion({ id: 'mine', title: 'Mine' });
+    udb.writeFiles('mine', files, { source: 'manual' });
+    udb.addRender({ versionId: 'mine', file: 'mine-1.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 1, poster: 'mine-1.jpg' });
+    return udb;
+  };
+  const first = mine(openDb(tempDbPath('user-'), { defaultPath }));
+  const crashed = mine(openDb(tempDbPath('user-'), { defaultPath }));
+  const other = mine(openDb(tempDbPath('user-'), { defaultPath }), [{ path: 'ch/c01.js', content: '// something else' }]);
+  first.promoteVersion('mine');
+  first.close();
+
+  crashed.db.query("UPDATE versions SET title = 'Stale' WHERE id = 'mine'").run();   // the user.db row, not the example's
+  expect(crashed.getVersion('mine')).toMatchObject({ id: 'mine', title: 'Mine', example: true });
+  expect(crashed.listVersions().filter(v => v.id === 'mine')).toEqual([expect.objectContaining({ title: 'Mine', example: true })]);
+  expect(crashed.listRenders().map(r => [r.version_id, r.title])).toEqual([['mine', 'Mine']]);
+  expect(() => crashed.writeFiles('mine', [{ path: 'ch/c01.js', content: 'x' }], { source: 'manual' })).toThrow('examples are read-only');
+
+  expect(crashed.promoteVersion('mine')).toMatchObject({ id: 'mine', title: 'Mine', example: true });
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM versions WHERE id = 'mine'").get().n).toBe(0);
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM files WHERE version_id = 'mine'").get().n).toBe(0);
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM revisions WHERE version_id = 'mine'").get().n).toBe(0);
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM def.files WHERE version_id = 'mine'").get().n).toBe(2);   // not written twice
+  expect(() => crashed.promoteVersion('mine')).toThrow('already an example: mine');
+  crashed.close();
+
+  // A user version that only shares the id, with other files, is refused and left alone.
+  expect(() => other.promoteVersion('mine')).toThrow('default.db already has a different version with the id mine');
+  expect(other.db.query("SELECT content FROM files WHERE version_id = 'mine'").get().content).toBe('// something else');
+  other.close();
+});
+
+test('listRenders names a render of an example after the example', () => {
+  const udb = openDb(tempDbPath('user-'), { defaultPath: freshDefaultPath() });
+  const id = udb.addRender({ versionId: 'original', file: 'o-1.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 1, poster: 'o-1.jpg' });
+  const { title, logline } = udb.getVersion('original');
+  expect(title).toBeTruthy();
+  expect(udb.listRenders()).toEqual([expect.objectContaining({ id, version_id: 'original', title, logline })]);
+  udb.close();
+});
+
+test('reads across both databases name their columns, whatever order the examples database declares them in', () => {
+  const defaultPath = tempDbPath('reordered-'), d = new Database(defaultPath);
+  d.exec(`CREATE TABLE versions (updated_at INTEGER, status TEXT NOT NULL DEFAULT 'concept', options TEXT NOT NULL DEFAULT '{}',
+      concept TEXT NOT NULL DEFAULT '', logline TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', id TEXT PRIMARY KEY, created_at INTEGER);
+    CREATE TABLE revisions (id INTEGER PRIMARY KEY, version_id TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL, job_id INTEGER,
+      source TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at INTEGER);
+    CREATE TABLE files (version_id TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL, revision_id INTEGER NOT NULL, PRIMARY KEY (version_id, path));
+    INSERT INTO versions (id, title, logline, concept, options, status, created_at, updated_at) VALUES ('ex', 'Ex', 'L', 'C', '{"wipes":false}', 'ready', 1, 2);`);
+  d.close();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  udb.createVersion({ id: 'mine', title: 'Mine' });
+  udb.addRender({ versionId: 'ex', file: 'ex.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 1, poster: 'ex.jpg' });
+  const ex = { id: 'ex', title: 'Ex', logline: 'L', concept: 'C', options: { wipes: false }, status: 'ready', created_at: 1, updated_at: 2, example: true };
+  expect(udb.listVersions()[0]).toEqual(ex);
+  expect(udb.getVersion('ex')).toEqual(ex);
+  expect(udb.listVersions()[1]).toMatchObject({ id: 'mine', title: 'Mine', example: false });
+  expect(udb.listRenders()[0]).toMatchObject({ version_id: 'ex', title: 'Ex', logline: 'L' });
+  udb.close();
 });
 
 test('example revision ids are >= EXAMPLE_REVISION_FLOOR and getRevision resolves them', () => {

@@ -36,6 +36,10 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
 // alone says which database it lives in and GET /api/revisions/<id> and restore are never ambiguous.
 export const EXAMPLE_REVISION_FLOOR = 1_000_000_000;
 
+// The versions columns, by name: the reads that span both databases can't use SELECT *, which would pair up columns
+// by position across two files whose tables needn't declare them in the same order.
+const VERSION_COLUMNS = 'id, title, logline, concept, options, status, created_at, updated_at';
+
 // Job lists leave out the log, which can be long; getJob has it.
 const JOB_LIST_COLUMNS = 'id, kind, version_id, params, status, progress, cost_usd, model, error, created_at, started_at, finished_at';
 
@@ -71,7 +75,8 @@ class StudioDb {
   constructor(db, { defaultPath = null, hasDef = false } = {}) { this.db = db; this.defaultPath = defaultPath; this.hasDef = hasDef; }
   close() { this.db.close(); }
 
-  // Whether versionId names an example (lives in def, not user.db). False whenever def isn't attached.
+  // Whether versionId names an example (lives in def). False whenever def isn't attached. An id in both databases
+  // (promoteVersion interrupted between its two steps) is an example: every read and write treats it as one.
   _isExample(versionId) {
     return this.hasDef && !!this.db.query('SELECT 1 FROM def.versions WHERE id = $id').get({ id: versionId });
   }
@@ -88,17 +93,20 @@ class StudioDb {
     return this.getVersion(id);
   }
   getVersion(id) {
-    const own = parseVersion(this.db.query('SELECT *, 0 AS example FROM versions WHERE id = $id').get({ id }));
-    if (own) return own;
-    if (!this.hasDef) return own;
-    return parseVersion(this.db.query('SELECT *, 1 AS example FROM def.versions WHERE id = $id').get({ id }));
+    const example = this.hasDef && this.db.query(`SELECT ${VERSION_COLUMNS}, 1 AS example FROM def.versions WHERE id = $id`).get({ id });
+    return parseVersion(example || this.db.query(`SELECT ${VERSION_COLUMNS}, 0 AS example FROM versions WHERE id = $id`).get({ id }));
+  }
+  // Every version once, as getVersion sees it: the examples plus the user's own versions (minus any id default.db
+  // also has), as rows with the same named columns.
+  _versionsSql() {
+    return this.hasDef
+      ? `SELECT ${VERSION_COLUMNS}, 1 AS example FROM def.versions
+         UNION ALL SELECT ${VERSION_COLUMNS}, 0 AS example FROM versions WHERE id NOT IN (SELECT id FROM def.versions)`
+      : `SELECT ${VERSION_COLUMNS}, 0 AS example FROM versions`;
   }
   // Examples first (there's normally just a handful), then the user's own versions by created_at.
   listVersions() {
-    const q = this.hasDef
-      ? `SELECT *, 1 AS example FROM def.versions UNION ALL SELECT *, 0 AS example FROM versions ORDER BY example DESC, created_at, id`
-      : `SELECT *, 0 AS example FROM versions ORDER BY created_at, id`;
-    return this.db.query(q).all().map(parseVersion);
+    return this.db.query(`${this._versionsSql()} ORDER BY example DESC, created_at, id`).all().map(parseVersion);
   }
   updateVersion(id, patch) {
     if (this._isExample(id)) throw new Error('examples are read-only');
@@ -167,14 +175,35 @@ class StudioDb {
   // ids >= EXAMPLE_REVISION_FLOOR), in one transaction on a separate writable connection. Then deletes the version
   // (and its files and revisions) from user.db, in one transaction. Jobs and renders keep their version_id: it now
   // resolves to the example.
+  //
+  // Should the process die between those two transactions, the id is left in both databases (where it reads as the
+  // example). Promoting it again then finishes the move: when default.db's copy has exactly these current files, it
+  // only deletes the user.db copy. A different version that merely shares the id is refused.
   promoteVersion(id) {
-    const v = this.getVersion(id);
-    if (!v) throw new Error(`no such version: ${id}`);
-    if (v.example) throw new Error(`already an example: ${id}`);
+    const own = this.db.query(`SELECT ${VERSION_COLUMNS} FROM versions WHERE id = $id`).get({ id });
+    if (!own) throw new Error(this._isExample(id) ? `already an example: ${id}` : `no such version: ${id}`);
     if (!this.defaultPath || !existsSync(this.defaultPath)) throw new Error('default.db does not exist');
+    const v = parseVersion(own);
+    const files = this.db.query('SELECT path, content FROM files WHERE version_id = $id ORDER BY path').all({ id });
 
-    const files = this.listFiles(id).map(f => this.getFile(id, f.path));
+    if (this._isExample(id)) {
+      const theirs = this.db.query('SELECT path, content FROM def.files WHERE version_id = $id ORDER BY path').all({ id });
+      const same = theirs.length === files.length && theirs.every((f, i) => f.path === files[i].path && f.content === files[i].content);
+      if (!same) throw new Error(`default.db already has a different version with the id ${id}`);
+    } else {
+      this._writeExample(v, files);
+    }
 
+    this.db.transaction(() => {
+      this.db.query('DELETE FROM files WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM revisions WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM versions WHERE id = $id').run({ id });
+    })();
+
+    return this.getVersion(id);
+  }
+  // promoteVersion's first step: v and its current files into default.db, on a separate writable connection.
+  _writeExample(v, files) {
     const defDb = new Database(this.defaultPath, { strict: true });
     defDb.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     try {
@@ -197,14 +226,6 @@ class StudioDb {
     } finally {
       defDb.close();
     }
-
-    this.db.transaction(() => {
-      this.db.query('DELETE FROM files WHERE version_id = $id').run({ id });
-      this.db.query('DELETE FROM revisions WHERE version_id = $id').run({ id });
-      this.db.query('DELETE FROM versions WHERE id = $id').run({ id });
-    })();
-
-    return this.getVersion(id);
   }
 
   // ---------- jobs ----------
@@ -251,8 +272,7 @@ class StudioDb {
     return Number(lastInsertRowid);
   }
   listRenders() {
-    const versions = this.hasDef ? '(SELECT * FROM versions UNION ALL SELECT * FROM def.versions)' : 'versions';
-    return this.db.query(`SELECT r.*, v.title, v.logline FROM renders r JOIN ${versions} v ON v.id = r.version_id
+    return this.db.query(`SELECT r.*, v.title, v.logline FROM renders r JOIN (${this._versionsSql()}) v ON v.id = r.version_id
       ORDER BY r.created_at DESC, r.id DESC`).all().map(parseRender);
   }
   getRender(id) { return parseRender(this.db.query('SELECT * FROM renders WHERE id = $id').get({ id })); }
