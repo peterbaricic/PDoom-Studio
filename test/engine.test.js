@@ -39,6 +39,47 @@ test('loads the original by default on w0.localhost and renders a frame, within 
   await page.close();
 }, T);
 
+test('the launched browser cannot resolve hosts outside the allow-list, and Google Fonts still can', async () => {
+  const host = `probe-${Date.now()}-${Math.random().toString(36).slice(2)}.example`;
+  const probe = await browser.newPage();
+  await probe.goto('about:blank');
+  const failures = [];
+  probe.on('requestfailed', r => failures.push(r.failure()?.errorText));
+  await probe.evaluate(h => fetch(`https://${h}/`, { mode: 'no-cors' }).catch(() => {}), host);
+  // Not just "the fetch failed" (a fetch() TypeError never says why) — the underlying network error is specifically
+  // a name-resolution failure, meaning --host-resolver-rules refused the lookup before any real DNS query went out.
+  expect(failures).toContain('net::ERR_NAME_NOT_RESOLVED');
+  expect(await probe.evaluate(() => fetch('https://fonts.googleapis.com/', { mode: 'no-cors' }).then(() => 'ok', e => e.message))).toBe('ok');
+  expect(await probe.evaluate(() => fetch('https://fonts.gstatic.com/', { mode: 'no-cors' }).then(() => 'ok', e => e.message))).toBe('ok');
+  await probe.close();
+}, T);
+
+test('a chapter cannot leak data through dns-prefetch/preconnect, and Google Fonts still loads through the same lockdown', async () => {
+  const host = `leak-${Date.now()}-${Math.random().toString(36).slice(2)}.example`;
+  db.createVersion({ id: 'dns-probe' });
+  db.writeFiles('dns-probe', [{ path: 'ch/c01.js', content: [
+    `const p = document.createElement('link'); p.rel = 'dns-prefetch'; p.href = '//${host}'; document.head.append(p);`,
+    `const c = document.createElement('link'); c.rel = 'preconnect'; c.href = 'https://${host}'; document.head.append(c);`,
+  ].join('\n') }], { source: 'manual' });
+  const { page, errors } = await open('v=dns-probe');
+  expect(errors).toEqual([]);
+  // core.js's setup() awaits document.fonts.load() for both families before window.ready is ever set, so getting
+  // here at all already proves Google Fonts loaded through the lockdown; this double-checks the faces are usable.
+  expect(await page.evaluate(() => [document.fonts.check('100px "Permanent Marker"'), document.fonts.check('800 50px "Shantell Sans"')])).toEqual([true, true]);
+  await page.close();
+
+  // A separate, unrestricted page sharing the same browser (so the same --host-resolver-rules): if the
+  // dns-prefetch/preconnect hint above had made a real DNS query, the host would now be "known" and a later fetch
+  // would fail some other way (a connection or TLS error), not with a fresh name-resolution failure.
+  const probe = await browser.newPage();
+  await probe.goto('about:blank');
+  const failures = [];
+  probe.on('requestfailed', r => failures.push(r.failure()?.errorText));
+  await probe.evaluate(h => fetch(`https://${h}/`, { mode: 'no-cors' }).catch(() => {}), host);
+  expect(failures).toContain('net::ERR_NAME_NOT_RESOLVED');
+  await probe.close();
+}, T);
+
 test('loads a database version with its engine options', async () => {
   db.createVersion({ id: 'mini', options: { wipes: false, cornerMeter: false } });
   db.writeFiles('mini', [

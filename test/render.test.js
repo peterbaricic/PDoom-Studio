@@ -65,6 +65,23 @@ test('renders a short range of frames and encodes it', async () => {
   expect(existsSync(out)).toBe(true);
 }, T);
 
+test('the synthetic key press that arms the navigation guard does not perturb the picture', async () => {
+  // p5 tracks mouse state and would fire mousePressed() from a synthetic click; nothing today reads that, but a
+  // keyboard gesture (see render.mjs) was chosen specifically so this holds regardless of what a chapter does.
+  // Proof: render the same stills with and without the gesture (RENDER_TEST_NO_GESTURE is a test-only escape
+  // hatch) and diff the PNGs byte for byte — lossless, so any difference at all would show up.
+  const armed = mkdtempSync(join(tmpdir(), 'gesture-on-')), unarmed = mkdtempSync(join(tmpdir(), 'gesture-off-'));
+  const withGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${armed}`], { env: isolatedEnv() });
+  const withoutGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${unarmed}`], { env: isolatedEnv(undefined, { RENDER_TEST_NO_GESTURE: '1' }) });
+  expect(withGesture.code).toBe(0);
+  expect(withoutGesture.code).toBe(0);
+  for (const f of ['t5_00.png', 't40_00.png', 't90_00.png']) {
+    expect(statSync(join(armed, f)).size).toBeGreaterThan(1000);
+    const [a, b] = await Promise.all([Bun.file(join(armed, f)).arrayBuffer(), Bun.file(join(unarmed, f)).arrayBuffer()]);
+    expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).toBe(0);
+  }
+}, T);
+
 test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const outside = join(tmpdir(), 'outside-sheet.jpg');
@@ -178,6 +195,28 @@ test('a chapter cannot navigate away, fetch out, or pop a window to an external 
     capture.stop(true);
   }
   expect(hits).toEqual([]);
+}, T);
+
+test('a data: URI image still renders under request interception', async () => {
+  // Chrome reports a data: URI as a "request" to Fetch-domain interception (so it does reach the handler below),
+  // but it never actually goes over the network — abort()/continue() has no effect on it either way, and it loads
+  // regardless. Verified directly against a bare interception handler before writing this; this test proves it
+  // holds through the real pipeline, including the origin allow-list (a data: URI's origin is the string "null").
+  const data = tempDir(), db = openDb(join(data, 'studio.db'));
+  db.createVersion({ id: 'datauri' });
+  db.writeFiles('datauri', [{ path: 'ch/c01.js', content: [
+    "const img = new Image();",
+    "img.onload = () => console.warn('DATA URI IMAGE LOADED ' + img.naturalWidth + 'x' + img.naturalHeight);",
+    "img.onerror = () => console.error('DATA URI IMAGE FAILED TO LOAD');",
+    "img.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';",
+    "document.body.append(img);",
+  ].join('\n') }], { source: 'manual' });
+  db.close();
+  const r = await spawn(['bun', 'render.mjs', '--v=datauri', '--check=load'], { env: isolatedEnv(data) });
+  expect(r.out).toContain('DATA URI IMAGE LOADED 1x1');
+  expect(r.out).toContain('CHECK OK');
+  expect(r.err).toBe('');
+  expect(r.code).toBe(0);
 }, T);
 
 // The direct children of a process (pgrep exits 1 when there are none).

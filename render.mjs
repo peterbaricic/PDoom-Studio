@@ -130,8 +130,8 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     // committed to unloading (which reliably wedges the renderer — the page never becomes ready).
     addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
   });
-  // A beforeunload prompt is silently skipped for a frame that's never had real input, so it needs one lie below
-  // (a synthetic click) to make the cancellation above actually take effect.
+  // A beforeunload prompt is silently skipped for a frame that's never had real input, so it needs one gesture below
+  // to make the cancellation above actually take effect.
   page.on('dialog', d => d.dismiss().catch(() => {}));
   // Belt and suspenders for any popup that slips past the override above (e.g. a future code path that reintroduces
   // window.open): closed immediately, and network-dead regardless.
@@ -145,7 +145,9 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     let origin; try { origin = new URL(request.url()).origin; } catch { origin = null; }
     // 'aborted' (net::ERR_ABORTED), not the default 'failed': a live top-level navigation should never reach here
     // (beforeunload cancels it first), but if it ever did, ERR_FAILED would commit an error page in its place.
-    if (ALLOWED_ORIGINS.has(origin)) request.continue(); else request.abort('aborted');
+    // Both calls can reject (e.g. the request already finished by the time we act on it, a race Chrome allows) —
+    // caught so that doesn't surface as an unhandled rejection.
+    if (ALLOWED_ORIGINS.has(origin)) request.continue().catch(() => {}); else request.abort('aborted').catch(() => {});
   });
   page.on('console', m => {
     if (!['error', 'warn'].includes(m.type())) return;
@@ -158,10 +160,17 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     if (loading) loadErrors.push(e.message);
   });
   // The chapter scripts that follow load asynchronously (waited for below via window.ready) and could try to
-  // navigate away as soon as they run, so the synthetic click that arms beforeunload has to land as soon as there's
-  // a document to click — at domcontentloaded, well before that — not after goto's own networkidle0 wait, which
-  // only settles once everything, including a malicious attempt, has already happened.
-  page.once('domcontentloaded', () => { page.mouse.click(1, 1).catch(() => {}); });
+  // navigate away as soon as they run, so the gesture that arms beforeunload has to land as soon as there's a
+  // document for it to land on — at domcontentloaded, well before that — not after goto's own networkidle0 wait,
+  // which only settles once everything, including a malicious attempt, has already happened. A key press, not a
+  // mouse click: p5 tracks mouseX/mouseY/mouseIsPressed and would fire mousePressed() off a synthetic click, which
+  // no sketch reads today but would still be this code nudging a chapter's own state. Tab counts as "real" input to
+  // Chrome's activation tracking the same way a click does (a bare modifier like Shift does not — verified: with
+  // only Shift pressed, beforeunload is silently skipped exactly as with no input at all), and nothing in the
+  // engine listens for it, so it's otherwise inert.
+  // RENDER_TEST_NO_GESTURE exists only so a test can render with and without this gesture and diff the pixels —
+  // it's never set outside that one test.
+  if (!process.env.RENDER_TEST_NO_GESTURE) page.once('domcontentloaded', () => { page.keyboard.press('Tab').catch(() => {}); });
   await page.goto(PAGE, { waitUntil: 'networkidle0' });
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
   const loadError = await page.evaluate(() => window.loadError || null);
