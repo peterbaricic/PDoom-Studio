@@ -3,3 +3,6 @@ out/
 assets/source.mp4
 .browsers/
 .superpowers/
+studio.db*
+library/
+.studio/

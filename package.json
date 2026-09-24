@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "watch": "node serve.mjs",
-    "frames": "node render.mjs --frames=0:156.6 --workers=4",
-    "encode": "node render.mjs --encode --out=out/pdoom.mp4",
-    "get-browser": "npx @puppeteer/browsers install chrome-headless-shell@stable --path .browsers"
+    "studio": "bun studio/server.js",
+    "render": "bun render.mjs",
+    "test": "bun test",
+    "get-browser": "bunx @puppeteer/browsers install chrome-headless-shell@stable --path .browsers"
   },
   "keywords": [],
   "author": "",
