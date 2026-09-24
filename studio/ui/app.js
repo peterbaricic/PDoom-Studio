@@ -58,25 +58,53 @@ addEventListener('hashchange', route);
 // ---------- job strip ----------
 const strip = document.getElementById('jobs'), logDialog = document.getElementById('log');
 let logJob = null;
-const label = j => `${j.kind}${j.params.chapter ? ' ' + j.params.chapter : ''} · ${j.version_id} · ${j.status}` +
+export const jobKind = j => `${j.kind}${j.params.chapter ? ' ' + j.params.chapter : ''}`;
+const label = j => `${jobKind(j)} · ${j.version_id} · ${j.status}` +
   (j.status === 'running' ? ` ${Math.round(j.progress * 100)}%` : '') + (j.cost_usd ? ` · $${j.cost_usd.toFixed(2)}` : '');
+
+const jobsSummary = h('span.jobs-summary');
+let jobsExpanded = false;
+try { jobsExpanded = localStorage.getItem('studio-jobs-expanded') === '1'; } catch {}
+const jobsToggle = h('button#jobs-toggle', { onclick: () => setJobsExpanded(!jobsExpanded) }, jobsExpanded ? 'Collapse' : 'Expand');
+const jobsHeader = h('div.jobs-header', {}, jobsSummary, jobsToggle);
+function setJobsExpanded(v) {
+  jobsExpanded = v;
+  strip.classList.toggle('expanded', jobsExpanded);
+  jobsToggle.textContent = jobsExpanded ? 'Collapse' : 'Expand';
+  try { localStorage.setItem('studio-jobs-expanded', jobsExpanded ? '1' : '0'); } catch {}
+}
+strip.append(jobsHeader);
+strip.classList.toggle('expanded', jobsExpanded);
+new ResizeObserver(() => { document.getElementById('view').style.paddingBottom = `${strip.offsetHeight + 16}px`; }).observe(strip);
+
 async function drawJobs() {
   const recent = j => ['queued', 'running'].includes(j.status) || (['failed', 'interrupted'].includes(j.status) && Date.now() - (j.finished_at || 0) < 3600e3);
   const jobs = (await get('/api/jobs')).filter(recent);
-  strip.replaceChildren(...jobs.map(j => h(`div.job.${j.status}`, {}, label(j), j.error ? h('span', {}, '· ' + j.error.slice(0, 160)) : null,
+  const running = jobs.filter(j => j.status === 'running').length, queued = jobs.filter(j => j.status === 'queued').length;
+  jobsSummary.textContent = running || queued ? `Jobs: ${running} running · ${queued} queued` : 'No jobs running';
+  strip.replaceChildren(jobsHeader, ...jobs.map(j => h(`div.job.${j.status}`, {}, label(j), j.error ? h('span', {}, '· ' + j.error.slice(0, 160)) : null,
     ['queued', 'running'].includes(j.status)
       ? h('button', { onclick: () => api('POST', `/api/jobs/${j.id}/cancel`) }, 'Cancel')
       : h('button', { onclick: () => api('POST', `/api/jobs/${j.id}/retry`) }, 'Retry'),
     h('button', { onclick: () => showLog(j.id) }, 'Log'))));
 }
-async function showLog(id) {
+export async function showLog(id) {
   logJob = id;
-  logDialog.querySelector('pre').textContent = (await get('/api/jobs')).find(j => j.id === id)?.log || '';
+  const job = (await get('/api/jobs')).find(j => j.id === id);
+  logDialog.querySelector('.log-title').textContent = job ? `${jobKind(job)} · ${job.version_id} · ${job.status}` : '';
+  const pre = logDialog.querySelector('pre');
+  pre.textContent = job?.log || '';
   logDialog.showModal();
+  pre.scrollTop = pre.scrollHeight;
 }
 let pending = false;
 on((type, data) => {
-  if (type === 'log' && data.id === logJob && logDialog.open) logDialog.querySelector('pre').append(data.text);
+  if (type === 'log' && data.id === logJob && logDialog.open) {
+    const pre = logDialog.querySelector('pre');
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
+    pre.append(data.text);
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }
   if (type === 'job' && !pending) { pending = true; setTimeout(() => { pending = false; drawJobs(); }, 300); }
 });
 

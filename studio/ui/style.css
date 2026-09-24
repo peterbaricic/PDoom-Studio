@@ -35,12 +35,20 @@ textarea, input { width: 100%; }
 .tile.done small { color: var(--ok); } .tile.running small, .tile.queued small { color: var(--wait); } .tile.failed small { color: var(--bad); }
 .detail iframe { width: 100%; aspect-ratio: 16 / 10; border: 0; border-radius: 6px; background: #000; }
 .history li { margin: 4px 0; }
-footer#jobs { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); max-height: 110px; overflow: auto; }
+footer#jobs { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); max-height: 110px; overflow: auto; font-size: 14px; }
+footer#jobs.expanded { max-height: 50vh; }
+.jobs-header { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.jobs-summary { color: var(--dim); }
 .job { padding: 4px 16px; display: flex; gap: 8px; align-items: center; }
 .job.running { color: var(--wait); } .job.failed, .job.interrupted { color: var(--bad); }
-.job button { padding: 1px 8px; }
-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); width: min(900px, 90vw); }
-dialog pre { max-height: 60vh; overflow: auto; white-space: pre-wrap; }
+.job button, .job-row button { padding: 5px 14px; font-size: 14px; min-width: 72px; }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); width: min(1100px, 94vw); }
+dialog .log-title { margin: 0 0 8px; font-size: 14px; color: var(--dim); }
+dialog pre { max-height: 75vh; overflow: auto; white-space: pre-wrap; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.job-history { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.job-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 10px; border-radius: 6px; background: var(--bg); }
+.job-row.running { color: var(--wait); } .job-row.failed, .job-row.interrupted { color: var(--bad); }
+.job-row .err { color: var(--bad); flex: 1 1 100%; font-size: 13px; }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
 .card { background: var(--panel); border-radius: 10px; overflow: hidden; text-decoration: none; display: flex; flex-direction: column; }
 .card img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }

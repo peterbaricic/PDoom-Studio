@@ -43,6 +43,19 @@ test('create a version from a concept to nine chapters', async () => {
   await page.click('#approve');
   await page.waitForFunction(() => document.querySelectorAll('.tile.done').length === 9, { timeout: 360000, polling: 1000 });
   expect(await page.$eval('.versions .version.active small', e => e.textContent)).toBe('ready to render');
+
+  // Job history: storyboard + shared + nine chapter jobs, newest first.
+  await page.waitForFunction(() => document.querySelectorAll('.job-history .job-row').length >= 11);
+  await page.click('.job-history .job-row button');
+  await page.waitForFunction(() => document.getElementById('log').open);
+  expect(await page.$eval('#log pre', e => e.textContent.length)).toBeGreaterThan(0);
+  await page.click('#log form button');
+
+  // Expandable job strip: toggling changes the footer's computed max-height.
+  const collapsedHeight = await page.$eval('footer#jobs', e => getComputedStyle(e).maxHeight);
+  await page.click('#jobs-toggle');
+  const expandedHeight = await page.$eval('footer#jobs', e => getComputedStyle(e).maxHeight);
+  expect(expandedHeight).not.toBe(collapsedHeight);
 }, { timeout: 420000 });
 
 test('play a finished render with a synced walkthrough', async () => {

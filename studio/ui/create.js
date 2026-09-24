@@ -1,6 +1,6 @@
 // create.js: the Create tab. The version list, and one workspace per version with the four steps:
 // concept → storyboard (review, edit, ask for changes, approve) → chapters (tiles, preview, feedback, history) → render.
-import { api, get, h, on, fmtTime } from './app.js';
+import { api, get, h, on, fmtTime, showLog, jobKind } from './app.js';
 import { md } from './md.js';
 
 const MODELS = [['', 'CLI default model'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
@@ -92,12 +92,28 @@ async function drawVersion(main, id) {
   // 4 · final render
   const renderBtn = h('button#final-render', { onclick: () => api('POST', '/api/jobs', { kind: 'render', versionId: id }).catch(fail) }, 'Final render (1080p MP4)');
   const renders = h('div.renders');
+  // 5 · job history
+  const jobHistory = h('div.job-history');
 
   main.append(heading, steps,
     h('section.step', {}, h('h3', {}, '1 · Concept'), conceptText, h('div.row', {}, cModel, redraft), h('div.row', {}, wipesLabel, meterLabel)),
     h('section.step', {}, h('h3', {}, '2 · Storyboard'), sbErrors, sbView, sbEdit, h('div.row', {}, approve, editBtn), h('div.row', {}, feedback, sModel, ask)),
     h('section.step', {}, h('h3', {}, '3 · Chapters'), tiles, h('div.row', {}, thumbsBtn), detail),
-    h('section.step', {}, h('h3', {}, '4 · Final render'), h('div.row', {}, h('a.button', { href: `/watch.html?v=${id}`, target: '_blank' }, 'Full preview'), renderBtn), renders));
+    h('section.step', {}, h('h3', {}, '4 · Final render'), h('div.row', {}, h('a.button', { href: `/watch.html?v=${id}`, target: '_blank' }, 'Full preview'), renderBtn), renders),
+    h('section.step', {}, h('h3', {}, '5 · Jobs'), jobHistory));
+
+  function jobRow(j) {
+    const started = j.started_at ? new Date(j.started_at).toLocaleTimeString() : '—';
+    const dur = j.started_at ? fmtTime(((j.finished_at || Date.now()) - j.started_at) / 1000) : '—';
+    const cost = j.cost_usd ? `$${j.cost_usd.toFixed(2)}` : '—';
+    return h(`div.job-row.${j.status}`, {},
+      h('b', {}, jobKind(j)), h('span', {}, j.status), h('span', {}, started), h('span', {}, dur), h('span', {}, cost),
+      j.status === 'failed' && j.error ? h('span.err', {}, j.error) : null,
+      h('button', { onclick: () => showLog(j.id) }, 'Log'),
+      ['queued', 'running'].includes(j.status) ? h('button', { onclick: () => api('POST', `/api/jobs/${j.id}/cancel`).catch(fail) }, 'Cancel')
+        : ['failed', 'cancelled', 'interrupted'].includes(j.status) ? h('button', { onclick: () => api('POST', `/api/jobs/${j.id}/retry`).catch(fail) }, 'Retry')
+        : null);
+  }
 
   // Chapter detail: built once per opened chapter so typed feedback survives refreshes; its history list refreshes.
   let open = null, history = null;
@@ -155,6 +171,8 @@ async function drawVersion(main, id) {
 
     renders.replaceChildren(...jobs.filter(j => j.kind === 'render').slice(0, 3).map(j =>
       h('p', {}, `Render #${j.id}: ${j.status}${j.status === 'running' ? ` ${Math.round(j.progress * 100)}%` : ''}${j.status === 'done' ? ' · watch it in Play' : ''}`)));
+
+    jobHistory.replaceChildren(...[...jobs].sort((a, b) => b.id - a.id).map(jobRow));
   }
   await refresh();
   return refresh;
