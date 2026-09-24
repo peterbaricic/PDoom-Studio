@@ -58,6 +58,17 @@ test('jobs: add, update, log, interrupt', () => {
   expect(db.markInterrupted()).toBe(1);
   expect(db.getJob(id).status).toBe('interrupted');
   expect(db.listJobs({ versionId: 'a' }).map(j => j.id)).toEqual([id]);
+  expect('log' in db.listJobs()[0]).toBe(false);
+});
+
+test('findJobs picks jobs by version, kind and status, newest first', () => {
+  db.createVersion({ id: 'a' }); db.createVersion({ id: 'b' });
+  const [s1, c1, s2, s3] = ['shared', 'chapter', 'shared', 'shared'].map(kind => db.addJob({ kind, versionId: 'a' }));
+  db.addJob({ kind: 'shared', versionId: 'b' });
+  db.updateJob(s1, { status: 'done' }); db.updateJob(s3, { status: 'failed' });
+  expect(db.findJobs({ versionId: 'a', kinds: ['shared'], statuses: ['queued', 'running', 'done'] }).map(j => j.id)).toEqual([s2, s1]);
+  expect(db.findJobs({ versionId: 'a', kinds: ['shared', 'chapter'], statuses: ['queued'] }).map(j => j.id)).toEqual([s2, c1]);
+  expect(db.findJobs({ versionId: 'a', kinds: ['render'], statuses: ['queued'] })).toEqual([]);
 });
 
 test('renders: add, list with version info, delete', () => {

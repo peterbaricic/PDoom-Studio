@@ -88,3 +88,34 @@ test('cancel stops queued and running jobs', async () => {
   expect(db.getJob(a).status).toBe('cancelled');
   expect(q.cancel(a)).toBe(false);
 });
+
+test('a retried chapter waits for the shared job that can still finish, not the failed one it first waited for', async () => {
+  const q = make();
+  const [shared, ...chapters] = q.approve('a', null);
+  await tick(); fail(shared, 'bad code'); await tick();
+  for (const id of chapters) q.cancel(id);              // the user gives up on the waiting chapters…
+  const again = q.retry(shared);                         // …retries the shared setup, which now works…
+  await tick(); open(again); await tick();
+  expect(db.getJob(again).status).toBe('done');
+  const chapter = q.retry(chapters[0]);                  // …and then retries a chapter
+  expect(db.getJob(chapter).params).toEqual({ chapter: 1, after: again });
+  await tick();
+  expect(started).toContain(`chapter#${chapter}`);
+  open(chapter); await q.idle();
+});
+
+test('a retried chapter whose shared job is gone runs if the version has shared.js, and waits otherwise', async () => {
+  const q = make();
+  const [shared, first, second] = q.approve('a', null);
+  await tick(); fail(shared, 'bad code'); await tick();
+  q.cancel(first); q.cancel(second);
+  const waiting = q.retry(first);
+  expect(db.getJob(waiting).params).toEqual({ chapter: 1, after: shared });
+  db.writeFiles('a', [{ path: 'shared.js', content: 'const SET = {};' }], { source: 'manual' });
+  q.cancel(waiting);
+  const runs = q.retry(second);
+  expect(db.getJob(runs).params).toEqual({ chapter: 2 });
+  await tick();
+  expect(started).toContain(`chapter#${runs}`);
+  open(runs);
+});

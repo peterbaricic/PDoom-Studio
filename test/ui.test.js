@@ -35,9 +35,16 @@ test('create a version from a concept to nine chapters', async () => {
   await page.waitForFunction(() => location.hash === '#/create/e2e-test-show');
   await page.waitForFunction(() => document.querySelector('.storyboard')?.textContent.includes('Walkthrough: What happens in chapter 9.'), { timeout: 60000 });
   await page.waitForFunction(() => !document.querySelector('#approve').disabled);
-  await page.click('#approve');
+  const dialogs = [];
+  page.on('dialog', d => { dialogs.push(d.message()); d.dismiss(); });
+  await page.$eval('#approve', b => { b.click(); b.click(); });   // a double click approves once
   await page.waitForFunction(() => document.querySelectorAll('.tile.done').length === 9, { timeout: 360000, polling: 1000 });
   expect(await page.$eval('.versions .version.active small', e => e.textContent)).toBe('ready to render');
+  const jobs = await (await fetch(`${url}/api/jobs?version=e2e-test-show`)).json();
+  expect(jobs.map(j => j.kind).filter(k => k !== 'chapter')).toEqual(['shared', 'storyboard']);
+  expect(jobs.filter(j => j.kind === 'chapter')).toHaveLength(9);
+  expect(dialogs).toEqual([]);
+  expect(await page.$eval('#approve', b => b.disabled)).toBe(true);
 
   // Job history: storyboard + shared + nine chapter jobs, newest first.
   await page.waitForFunction(() => document.querySelectorAll('.job-history .job-row').length >= 11);

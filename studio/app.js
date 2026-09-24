@@ -98,14 +98,21 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     }],
     ['POST', /^\/api\/versions\/([a-z0-9-]+)\/approve$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
+      // Everything after this await runs synchronously up to queue.approve (which sets the status to approved), so
+      // two approvals sent at once can't both get through.
       const b = await body(req), sb = db.getFile(id, 'STORYBOARD.md');
       if (!sb) return error(409, 'there is no storyboard yet');
       const { errors } = parseStoryboard(sb.content);
       if (errors.length) return error(409, 'the storyboard is not valid: ' + errors.join('; '));
+      const { status } = db.getVersion(id);
+      if (status !== 'storyboard') return error(409, `this version is past approval (${status})`);
+      const [busy] = db.findJobs({ versionId: id, kinds: ['shared', 'chapter'], statuses: ['queued', 'running'] });
+      if (busy) return error(409, `a ${busy.kind} job for this version is already ${busy.status}`);
       return json({ jobs: queue.approve(id, b.model || null) });
     }],
 
     ['GET', /^\/api\/jobs$/, req => json(db.listJobs({ versionId: new URL(req.url).searchParams.get('version') }))],
+    ['GET', /^\/api\/jobs\/(\d+)$/, (req, [, jid]) => { const j = db.getJob(+jid); return j ? json(j) : error(404, 'no such job'); }],
     ['POST', /^\/api\/jobs$/, async req => {
       const b = await body(req);
       if (!JOB_KINDS.includes(b.kind)) return error(400, `kind must be one of ${JOB_KINDS.join(', ')}`);

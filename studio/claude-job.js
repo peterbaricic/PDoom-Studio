@@ -1,6 +1,8 @@
 // claude-job.js: storyboard, shared-setup and chapter jobs. Each runs Claude Code headless in a throwaway work folder
-// (<data>/.studio/work/<job id>) that holds the version's current files and a TASK.md brief; Claude may only write there. The result is checked,
-// sent back once for a fix if it fails, and imported as a new revision of the job's one target file.
+// (<data>/.studio/work/<job id>) that holds the version's current files and a TASK.md brief; Claude may only write
+// there. The result is checked, sent back once for a fix if it fails, and imported as a new revision of the job's one
+// target file. Only the target is imported, so before every check the other version files are put back as they
+// were: the check then sees exactly what the version will be.
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readWorkFiles } from './versions.js';
@@ -123,7 +125,22 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       const r = await runClaude({ cmd: claudeCmd, prompt, dir, settings, root, model: job.model, env, ctx, timeoutMs });
       spent += r.cost; ctx.cost(spent);
     };
+    const revertOthers = () => {
+      const now = readWorkFiles(dir), reverted = [];
+      for (const [p, content] of now) {
+        if (p === target || content === before.get(p)) continue;
+        if (before.has(p)) writeFileSync(join(dir, p), before.get(p)); else rmSync(join(dir, p));
+        reverted.push(p);
+      }
+      for (const [p, content] of before) {
+        if (p === target || now.has(p)) continue;
+        mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), content);
+        reverted.push(p);
+      }
+      if (reverted.length) ctx.log(`\nReverted changes outside ${target} before the check: ${reverted.sort().join(', ')}\n`);
+    };
     const check = async () => {
+      revertOthers();
       const file = join(dir, target);
       if (!existsSync(file)) return [`${target} was not written`];
       if (kind === 'storyboard') return parseStoryboard(readFileSync(file, 'utf8')).errors;
@@ -141,14 +158,12 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       if (errors.length) throw new Error('validation failed: ' + errors.join('; '));
     }
 
-    const after = readWorkFiles(dir);
-    const ignored = [...after.keys()].filter(p => p !== target && after.get(p) !== before.get(p)).sort();
-    if (ignored.length) ctx.log(`\nIgnored changes outside ${target}: ${ignored.join(', ')}\n`);
+    const result = readFileSync(join(dir, target), 'utf8');
     if (ctx.signal.aborted) throw new Error('cancelled');
-    db.writeFiles(vid, [{ path: target, content: after.get(target) }], { source: 'claude', note: params.feedback || `${kind} job`, jobId: job.id });
+    db.writeFiles(vid, [{ path: target, content: result }], { source: 'claude', note: params.feedback || `${kind} job`, jobId: job.id });
 
     if (kind === 'storyboard') {
-      const sb = parseStoryboard(after.get(target));
+      const sb = parseStoryboard(result);
       db.updateVersion(vid, { title: sb.title, logline: sb.logline, ...(version.status === 'concept' ? { status: 'storyboard' } : {}) });
     } else if (kind === 'chapter') {
       const n = db.listFiles(vid).filter(f => f.path.startsWith('ch/')).length;

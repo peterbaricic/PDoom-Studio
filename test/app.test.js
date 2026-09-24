@@ -5,6 +5,7 @@ import { openDb } from '../studio/db.js';
 import { importOriginal } from '../studio/versions.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
+import { createQueue } from '../studio/queue.js';
 import { goodStoryboard, tempDir } from './helpers.js';
 
 const root = process.cwd();
@@ -108,12 +109,53 @@ test('version files are served from the database', async () => {
 });
 
 test('approve checks the storyboard first', async () => {
-  db.createVersion({ id: 'a' });
+  db.createVersion({ id: 'a' }); db.updateVersion('a', { status: 'storyboard' });
   db.writeFiles('a', [{ path: 'STORYBOARD.md', content: 'not valid' }], { source: 'manual' });
   expect((await send('POST', '/api/versions/a/approve', {})).status).toBe(409);
   db.writeFiles('a', [{ path: 'STORYBOARD.md', content: goodStoryboard() }], { source: 'manual' });
   expect(await (await send('POST', '/api/versions/a/approve', { model: 'opus' })).json()).toEqual({ jobs: [8, 9] });
   expect(calls).toContainEqual(['approve', 'a', 'opus']);
+});
+
+test('approve works only on a storyboard waiting for it, and never while shared or chapter jobs run', async () => {
+  db.createVersion({ id: 'a' });
+  db.writeFiles('a', [{ path: 'STORYBOARD.md', content: goodStoryboard() }], { source: 'manual' });
+  for (const status of ['concept', 'approved', 'chapters', 'ready']) {
+    db.updateVersion('a', { status });
+    expect((await send('POST', '/api/versions/a/approve', {})).status).toBe(409);
+  }
+  db.updateVersion('a', { status: 'storyboard' });
+  for (const kind of ['shared', 'chapter']) for (const status of ['queued', 'running']) {
+    const jid = db.addJob({ kind, versionId: 'a', params: { chapter: 1 } }); db.updateJob(jid, { status });
+    const res = await send('POST', '/api/versions/a/approve', {});
+    expect([res.status, (await res.json()).error]).toEqual([409, `a ${kind} job for this version is already ${status}`]);
+    db.updateJob(jid, { status: 'failed' });
+  }
+  db.updateJob(db.addJob({ kind: 'storyboard', versionId: 'a' }), { status: 'running' });   // other kinds don't block
+  expect((await send('POST', '/api/versions/a/approve', {})).status).toBe(200);
+  expect(calls.filter(c => c[0] === 'approve')).toHaveLength(1);
+});
+
+test('approving twice queues the chapters once', async () => {
+  const queue = createQueue({ db, events: createEvents(), runners: {} });   // not started: jobs stay queued
+  app = createApp({ db, root, data, token: 'tok', queue, events: createEvents(), port: 8080 });
+  db.createVersion({ id: 'a' }); db.updateVersion('a', { status: 'storyboard' });
+  db.writeFiles('a', [{ path: 'STORYBOARD.md', content: goodStoryboard() }], { source: 'manual' });
+  const [first, second] = await Promise.all([send('POST', '/api/versions/a/approve', {}), send('POST', '/api/versions/a/approve', {})]);
+  expect([first.status, second.status].sort()).toEqual([200, 409]);
+  expect(db.listJobs({ versionId: 'a' }).map(j => j.kind).sort()).toEqual(['chapter', 'chapter', 'chapter', 'chapter', 'chapter', 'chapter', 'chapter', 'chapter', 'chapter', 'shared']);
+});
+
+test('job lists leave the logs out; a single job comes with its log', async () => {
+  db.createVersion({ id: 'a' });
+  const jid = db.addJob({ kind: 'storyboard', versionId: 'a' }); db.appendLog(jid, 'hello log');
+  for (const p of ['/api/jobs', '/api/jobs?version=a']) {
+    const [j] = await (await get(p)).json();
+    expect(j).toMatchObject({ id: jid, kind: 'storyboard', status: 'queued', params: {} });
+    expect('log' in j).toBe(false);
+  }
+  expect(await (await get(`/api/jobs/${jid}`)).json()).toMatchObject({ id: jid, kind: 'storyboard', params: {}, log: 'hello log' });
+  expect((await get('/api/jobs/999')).status).toBe(404);
 });
 
 test('jobs are handed to the queue', async () => {

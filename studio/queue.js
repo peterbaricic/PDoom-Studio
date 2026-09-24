@@ -30,10 +30,19 @@ export function createQueue({ db, events, runners, limits = { claude: 3, render:
     return false;
   }
 
+  // A retried job waits for the same job as before, unless that one can no longer finish (it failed or was cancelled
+  // meanwhile): then for the newest shared job of the version that can, or for nothing if the version already has
+  // its shared.js. Otherwise it keeps waiting, and retrying the shared job moves it along (repointDependents).
   function retry(id) {
     const job = db.getJob(id);
     if (!job || !['failed', 'cancelled', 'interrupted'].includes(job.status)) throw new Error('only failed, cancelled or interrupted jobs can be retried');
-    const next = enqueue({ kind: job.kind, versionId: job.version_id, params: job.params, model: job.model });
+    let params = job.params;
+    if (params.after != null && !['queued', 'running', 'done'].includes(db.getJob(params.after)?.status)) {
+      const [shared] = db.findJobs({ versionId: job.version_id, kinds: ['shared'], statuses: ['queued', 'running', 'done'] });
+      if (shared) params = { ...params, after: shared.id };
+      else if (db.getFile(job.version_id, 'shared.js')) { const { after, ...rest } = params; params = rest; }
+    }
+    const next = enqueue({ kind: job.kind, versionId: job.version_id, params, model: job.model });
     db.repointDependents(id, next);
     schedule();
     return next;

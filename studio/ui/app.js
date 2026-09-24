@@ -90,7 +90,7 @@ async function drawJobs() {
 }
 export async function showLog(id) {
   logJob = id;
-  const job = (await get('/api/jobs')).find(j => j.id === id);
+  const job = await get(`/api/jobs/${id}`).catch(() => null);
   logDialog.querySelector('.log-title').textContent = job ? `${jobKind(job)} · ${job.version_id} · ${job.status}` : '';
   const pre = logDialog.querySelector('pre');
   pre.textContent = job?.log || '';

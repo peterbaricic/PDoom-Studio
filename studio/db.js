@@ -26,6 +26,9 @@ const PATH_RE = /^(STORYBOARD\.md|shared\.js|walkthrough\.json|ch\/c0[1-9](_[a-z
 export const isValidPath = p => PATH_RE.test(p);
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
 
+// Job lists leave out the log, which can be long; getJob has it.
+const JOB_LIST_COLUMNS = 'id, kind, version_id, params, status, progress, cost_usd, model, error, created_at, started_at, finished_at';
+
 const parseVersion = r => r && { ...r, options: JSON.parse(r.options) };
 const parseJob = r => r && { ...r, params: JSON.parse(r.params) };
 const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids) };
@@ -110,9 +113,16 @@ class StudioDb {
   getJob(id) { return parseJob(this.db.query('SELECT * FROM jobs WHERE id = $id').get({ id })); }
   listJobs({ versionId = null, limit = 100 } = {}) {
     const rows = versionId
-      ? this.db.query('SELECT * FROM jobs WHERE version_id = $versionId ORDER BY id DESC LIMIT $limit').all({ versionId, limit })
-      : this.db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT $limit').all({ limit });
+      ? this.db.query(`SELECT ${JOB_LIST_COLUMNS} FROM jobs WHERE version_id = $versionId ORDER BY id DESC LIMIT $limit`).all({ versionId, limit })
+      : this.db.query(`SELECT ${JOB_LIST_COLUMNS} FROM jobs ORDER BY id DESC LIMIT $limit`).all({ limit });
     return rows.map(parseJob);
+  }
+  // A version's jobs of some kinds in some statuses, newest first (without logs).
+  findJobs({ versionId, kinds, statuses }) {
+    const list = (name, values) => values.map((_, i) => `$${name}${i}`).join(', ');
+    const bind = (name, values) => Object.fromEntries(values.map((v, i) => [`${name}${i}`, v]));
+    return this.db.query(`SELECT ${JOB_LIST_COLUMNS} FROM jobs WHERE version_id = $versionId AND kind IN (${list('k', kinds)})
+      AND status IN (${list('s', statuses)}) ORDER BY id DESC`).all({ versionId, ...bind('k', kinds), ...bind('s', statuses) }).map(parseJob);
   }
   updateJob(id, patch) {
     const { sql, values } = setClause(patch, ['status', 'progress', 'cost_usd', 'error', 'started_at', 'finished_at', 'params']);

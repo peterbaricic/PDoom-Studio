@@ -77,8 +77,13 @@ async function drawVersion(main, id) {
     editing = false; sbEdit.hidden = true; sbView.hidden = false; editBtn.textContent = 'Edit text'; refresh();
   } }, 'Edit text');
   const sModel = modelSelect(), feedback = h('input#sb-feedback', { placeholder: 'Ask for changes, e.g. "set chapter 5 in a food truck"' });
+  // Approving queues the shared setup and nine chapters, so it happens once: the button is off while the request is
+  // in flight, and afterwards the version is past the storyboard stage.
+  let approving = false;
   const approve = h('button#approve.needs-claude', { onclick: async () => {
+    approving = true; approve.disabled = true;
     try { await api('POST', `/api/versions/${id}/approve`, { model: sModel.value || null }); } catch (e) { fail(e); }
+    finally { approving = false; refresh(); }
   } }, 'Approve and build chapters');
   const ask = h('button.needs-claude', { onclick: async () => {
     if (!feedback.value.trim()) return;
@@ -156,7 +161,7 @@ async function drawVersion(main, id) {
     const sbJob = jobs.find(j => j.kind === 'storyboard');
     sbErrors.replaceChildren(...(sbJob && ['queued', 'running'].includes(sbJob.status) ? [h('li.hint', {}, `Claude is ${sbJob.status === 'queued' ? 'about to write' : 'writing'} the storyboard…`)] : []),
       ...m.storyboardErrors.map(e => h('li', {}, e)));
-    approve.disabled = !sb || m.storyboardErrors.length > 0 || m.files.some(p => p.startsWith('ch/'));
+    approve.disabled = approving || m.status !== 'storyboard' || !sb || m.storyboardErrors.length > 0;
 
     tiles.replaceChildren(...WINDOWS.map(([a, b], i) => {
       const n = i + 1, path = m.files.find(p => p.startsWith(`ch/c0${n}`));

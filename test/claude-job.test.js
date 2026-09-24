@@ -62,8 +62,26 @@ test('a chapter job imports only its own file', async () => {
   expect(db.getFile('v', 'ch/c03.js').content).toBe('// three');
   expect(db.getFile('v', 'ch/c04.js')).toBeNull();
   expect(db.getFile('v', 'shared.js')).toBeNull();
-  expect(logs.join('')).toContain('Ignored changes outside ch/c03.js: ch/c04.js, shared.js');
+  expect(logs.join('')).toContain('Reverted changes outside ch/c03.js before the check: ch/c04.js, shared.js');
   expect(db.getVersion('v').status).toBe('chapters');
+});
+
+test('the check sees exactly what will be imported: other files are put back first', async () => {
+  db.writeFiles('v', [{ path: 'shared.js', content: 'const SET = { real: 1 };' }, { path: 'ch/c01.js', content: '// one' }], { source: 'manual' });
+  const j = job('chapter', { chapter: 3 }), dir = join(data, '.studio/work', String(j.id)), seen = [];
+  const validate = async () => {
+    seen.push({ shared: readFileSync(join(dir, 'shared.js'), 'utf8'), c01: existsSync(join(dir, 'ch/c01.js')) && readFileSync(join(dir, 'ch/c01.js'), 'utf8'),
+      c05: existsSync(join(dir, 'ch/c05.js')), c03: readFileSync(join(dir, 'ch/c03.js'), 'utf8') });
+    return seen.length === 1 ? ['SET.oven is not a function'] : [];
+  };
+  // Both attempts also rewrite shared.js, delete chapter 1 and add a chapter 5 of their own.
+  const sneaky = { 'shared.js': 'const SET = { oven() {} };', 'ch/c05.js': '// five' };
+  await runner([{ files: { ...sneaky, 'ch/c03.js': '// three' }, remove: ['ch/c01.js'] }, { files: { ...sneaky, 'ch/c03.js': '// three, fixed' }, remove: ['ch/c01.js'] }], validate)(j, ctx());
+  const original = { shared: 'const SET = { real: 1 };', c01: '// one', c05: false };
+  expect(seen).toEqual([{ ...original, c03: '// three' }, { ...original, c03: '// three, fixed' }]);
+  expect(db.getFile('v', 'ch/c03.js').content).toBe('// three, fixed');
+  expect(db.getFile('v', 'shared.js').content).toBe('const SET = { real: 1 };');
+  expect(logs.join('')).toContain('Reverted changes outside ch/c03.js before the check: ch/c01.js, ch/c05.js, shared.js');
 });
 
 test('validation errors get one fix attempt', async () => {
