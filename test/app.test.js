@@ -301,6 +301,22 @@ test('changing an example is refused everywhere it would write: storyboard, meta
   await denied(await send2('POST', `/api/revisions/${rev.id}/restore`));
 });
 
+test('retrying a storyboard, shared or chapter job of an example is refused; render and thumbs retry', async () => {
+  const retried = [];
+  const { db: db2 } = withExamples();
+  const app2 = createApp({ db: db2, root, data, token: 'tok', queue: { retry: id => { retried.push(id); return 10; } }, events: createEvents(), port: 8080 });
+  const retry = jid => app2.fetch(new Request(`http://localhost:8080/api/jobs/${jid}/retry`, { method: 'POST', headers: W }));
+  const failed = kind => { const jid = db2.addJob({ kind, versionId: 'original', params: { chapter: 1 } }); db2.updateJob(jid, { status: 'failed' }); return jid; };
+  for (const kind of ['storyboard', 'shared', 'chapter']) {
+    const res = await retry(failed(kind));
+    expect([res.status, (await res.json()).error]).toEqual([403, 'examples are read-only — remix it first']);
+  }
+  expect(retried).toEqual([]);
+  const allowed = ['render', 'thumbs'].map(failed);
+  for (const jid of allowed) expect((await retry(jid)).status).toBe(200);
+  expect(retried).toEqual(allowed);
+});
+
 test('render and thumbs jobs are allowed on examples', async () => {
   const { send: send2 } = withExamples();
   expect((await send2('POST', '/api/jobs', { kind: 'render', versionId: 'original' })).status).toBe(201);
@@ -328,6 +344,22 @@ test('promote moves a user version into default.db, and refuses when it cannot',
 
   const again = await send2('POST', '/api/versions/mine/promote');
   expect(again.status).toBe(409);
+});
+
+test('promote waits for the version\'s storyboard, shared and chapter jobs to finish', async () => {
+  const { db: db2, send: send2 } = withExamples(tempDefaultDb());   // its own copy: promote writes to default.db
+  db2.createVersion({ id: 'mine' });
+  for (const kind of ['storyboard', 'shared', 'chapter']) for (const status of ['queued', 'running']) {
+    const jid = db2.addJob({ kind, versionId: 'mine', params: { chapter: 1 } }); db2.updateJob(jid, { status });
+    const res = await send2('POST', '/api/versions/mine/promote');
+    expect([res.status, (await res.json()).error]).toEqual([409, `a ${kind} job for this version is still ${status} — let it finish or cancel it first`]);
+    expect(db2.getVersion('mine').example).toBe(false);
+    db2.updateJob(jid, { status: 'failed' });
+  }
+  db2.updateJob(db2.addJob({ kind: 'render', versionId: 'mine' }), { status: 'running' });   // renders don't block
+  const res = await send2('POST', '/api/versions/mine/promote');
+  expect(res.status).toBe(200);
+  expect(db2.getVersion('mine').example).toBe(true);
 });
 
 test('work folders are served while a job runs', async () => {

@@ -11,6 +11,7 @@ import { isValidPath } from './db.js';
 const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/];
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
+const CLAUDE_KINDS = ['storyboard', 'shared', 'chapter'];   // the kinds that write the version's files
 const NO_STORE = { 'cache-control': 'no-store' };
 
 // Two kinds of origin. The studio's own (localhost, 127.0.0.1, [::1]) serves the page that carries the token and the
@@ -119,6 +120,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     }],
     ['POST', /^\/api\/versions\/([a-z0-9-]+)\/promote$/, (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;
+      // A Claude job still to finish would write into what is by then a read-only example: it has to end first.
+      const [busy] = db.findJobs({ versionId: id, kinds: CLAUDE_KINDS, statuses: ['queued', 'running'] });
+      if (busy) return error(409, `a ${busy.kind} job for this version is still ${busy.status} — let it finish or cancel it first`);
       try {
         const v = db.promoteVersion(id);
         events.publish('version', { id: v.id });
@@ -169,7 +173,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const b = await body(req);
       if (!JOB_KINDS.includes(b.kind)) return error(400, `kind must be one of ${JOB_KINDS.join(', ')}`);
       const missing = needVersion(b.versionId); if (missing) return missing;
-      if (['storyboard', 'shared', 'chapter'].includes(b.kind)) { const blocked = guardExample(b.versionId); if (blocked) return blocked; }
+      if (CLAUDE_KINDS.includes(b.kind)) { const blocked = guardExample(b.versionId); if (blocked) return blocked; }
       if (b.kind === 'render') {
         const chapters = new Set(db.listFiles(b.versionId).map(f => /^ch\/c0(\d)/.exec(f.path)?.[1]).filter(Boolean)).size;
         if (chapters < 9) return error(409, `a final render needs all nine chapters (${chapters} of 9 are written)`);
@@ -179,7 +183,11 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       return json({ id: queue.enqueue({ kind: b.kind, versionId: b.versionId, params: b.params || {}, model: b.model || null }) }, 201);
     }],
     ['POST', /^\/api\/jobs\/(\d+)\/cancel$/, (req, [, jid]) => json({ ok: queue.cancel(+jid) })],
-    ['POST', /^\/api\/jobs\/(\d+)\/retry$/, (req, [, jid]) => json({ id: queue.retry(+jid) })],
+    ['POST', /^\/api\/jobs\/(\d+)\/retry$/, (req, [, jid]) => {
+      const j = db.getJob(+jid);
+      if (j && CLAUDE_KINDS.includes(j.kind)) { const blocked = guardExample(j.version_id); if (blocked) return blocked; }
+      return json({ id: queue.retry(+jid) });
+    }],
     ['GET', /^\/api\/work\/(\d+)$/, (req, [, jid]) => {
       const j = db.getJob(+jid), dir = join(dirs.work, jid);
       return j && existsSync(dir) ? json(workManifest(dir, db.getVersion(j.version_id))) : error(404, 'no such work folder');

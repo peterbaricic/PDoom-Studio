@@ -102,6 +102,9 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
   env = {}, validate = checkWithRenderer, timeoutMs = 30 * 60 * 1000 }) {
   return async (job, ctx) => {
     const { kind, version_id: vid, params } = job, version = db.getVersion(vid);
+    // The API refuses these jobs for examples, but one queued (or retried) before its version was promoted still
+    // reaches here: refuse it before making a work folder or spending anything on Claude, not at the import.
+    if (version?.example) throw new Error('examples are read-only — remix it first');
     const dir = join(data, '.studio/work', String(job.id)), settings = join(data, '.studio/settings', `${job.id}.json`);
     const target = kind === 'storyboard' ? 'STORYBOARD.md' : kind === 'shared' ? 'shared.js' : chapterPath(db, vid, params.chapter);
 

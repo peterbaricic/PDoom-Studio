@@ -1,11 +1,11 @@
 // test/claude-job.test.js
 import { test, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
 import { createClaudeRunner, chapterPath, permissionSettings } from '../studio/claude-job.js';
-import { goodStoryboard } from './helpers.js';
+import { goodStoryboard, tempDefaultDb } from './helpers.js';
 
 // root is the real repo (the fake CLI script, the brief's paths); data is a throwaway data root for the runner's
 // .studio/work and .studio/settings folders, so a runner test can never touch, let alone delete, a real studio
@@ -192,6 +192,21 @@ test('cancelling during a slow check throws and imports nothing', async () => {
   setTimeout(() => ctrl.abort(), 100);
   await expect(p).rejects.toThrow('cancelled');
   expect(db.getFile('v', 'ch/c01.js')).toBeNull();
+});
+
+test('a job on an example is refused before any work folder or Claude run', async () => {
+  // e.g. a job queued (or retried) on a version that has since been promoted: it must never spend money on Claude
+  // only to fail at the import.
+  db = openDb(':memory:', { defaultPath: tempDefaultDb() });
+  const log = join(mkdtempSync(join(tmpdir(), 'fc-')), 'argv.jsonl');
+  for (const [kind, params] of [['storyboard', {}], ['shared', {}], ['chapter', { chapter: 1 }]]) {
+    const j = db.getJob(db.addJob({ kind, versionId: 'original', params }));
+    await expect(runner([{ files: { 'STORYBOARD.md': goodStoryboard() } }], async () => [], { env: { FAKE_CLAUDE_LOG: log } })(j, ctx()))
+      .rejects.toThrow('examples are read-only — remix it first');
+  }
+  expect(existsSync(log)).toBe(false);
+  expect(existsSync(join(data, '.studio')) ? readdirSync(join(data, '.studio'), { recursive: true }) : []).toEqual([]);
+  expect(costs).toEqual([]);
 });
 
 test('an already-cancelled signal fails fast without running the CLI', async () => {
