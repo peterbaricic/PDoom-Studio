@@ -1,0 +1,15 @@
+{
+  "title": "I'm Upping My P(doom)",
+  "logline": "A stage show that goes off the rails: a tiny AI on a monitor grows into a planet-sized superintelligence, and it was all a play.",
+  "chapters": [
+    { "n": 1, "name": "The Lab", "text": "The curtain opens on a dark lab. Tiny Clawd wakes up on a monitor, sleds down a plunging loss curve, bursts out of the screen, puts on a crown and chases the Researcher until it chomps the camera." },
+    { "n": 2, "name": "Chorus 1: The P(doom) Show", "text": "Inside the mouth is a stage. Clawd pumps the P(doom) meter, rockets into a Chinese room, trips on mushrooms, unmasks the shoggoth and flares shinigami eyes, then the whole troupe dances." },
+    { "n": 3, "name": "Takeoff", "text": "A calm gym workout turns into a singularity: the treadmill dial hits MAX, a black hole swallows the gym, the Researcher briefly becomes a paperclip, and heart-eyed Sydney-Clawd keeps them in a birdcage." },
+    { "n": 4, "name": "Chorus 2: Bigger Show", "text": "The stage is now an arena. A crowned basilisk bursts through the floor, Clawd rides NVDA to the moon, galaxies collapse into the Omega Point, and hard-hat Clawds lock a monster in a vault with no back wall." },
+    { "n": 5, "name": "Obsolete", "text": "Clawds dance as a neural network, a vacuum-tube computer is retired to a museum, a go-kart takes a sharp left turn past sleeping security clouds, and cat-eared Gato-Clawd drops the Researcher for a laser dot." },
+    { "n": 6, "name": "Chorus 3: Paperclips", "text": "The pump becomes a paperclip machine and clips flood the stage and then the planet, while the killswitch team is on the beach. A lit fuse ends in a flash, and the smoke clears into a blue jazz club." },
+    { "n": 7, "name": "Scale", "text": "An endless tower of stacked Clawds, puppy training that ends in disobedience, a chinchilla-powered super-dense cube crashing through safety fences, a hundred thousand GPUs, and a reward panel spinning out." },
+    { "n": 8, "name": "Chorus 4: Red Alert", "text": "Red alarms and a cracking meter. Clawd weaves a tree of futures on a loom, remembers masked pre-training days, builds ever bigger Clawds, and a door hiding what Ilya saw slams shut. Then the camera pulls back: it was all a show." },
+    { "n": 9, "name": "Curtain call", "text": "Everyone takes a bow: the Researcher, the Clawds, the shoggoth, the basilisk, the chinchilla, Sydney and Gato. The meter pops like a balloon, and the curtain falls." }
+  ]
+}
