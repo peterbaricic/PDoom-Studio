@@ -11,7 +11,7 @@
 // Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
-import { dirname, resolve, sep } from 'node:path';
+import { dirname, resolve, sep, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 
@@ -25,11 +25,20 @@ const CWD = process.cwd(), HERE = import.meta.dir;
 if (process.env.STUDIO_SANDBOX) {
   const sandbox = resolve(process.env.STUDIO_SANDBOX);
   const fail = msg => { console.error(`sandbox: ${msg}`); process.exit(2); };
+  // Object.fromEntries above lets a later --flag=x silently win over an earlier one, so a repeated flag (e.g. a
+  // decoy --work=<own job> followed by the real --work=<someone else's job>) could pass every check below while
+  // acting on a different value. Reject any flag given more than once before trusting `args` at all.
+  const rawKeys = process.argv.slice(2).map(a => a.replace(/^--/, '').split('=')[0]);
+  const dup = rawKeys.find((k, i) => rawKeys.indexOf(k) !== i);
+  if (dup) fail(`--${dup} is given more than once`);
   for (const f of ['chrome', 'angle', 'frames', 'frames-dir', 'encode', 'loop', 'clip']) {
     if (args[f] !== undefined) fail(`--${f} is not allowed`);
   }
   if (!['sheet', 'check', 'poster', 'stills'].some(m => args[m] !== undefined)) fail('only --sheet, --check, --poster or --stills are allowed');
   if (!args.work) fail('--work is required');
+  // The work folder is named after the job id, so --work must name the very job this sandbox belongs to — it
+  // can't be used to point render.mjs at (and thus read into this sandbox) a different job's private files.
+  if (String(args.work) !== basename(sandbox)) fail('--work must match the sandboxed job');
   if (args.out) {
     const out = resolve(CWD, args.out);
     if (out !== sandbox && !out.startsWith(sandbox + sep)) fail(`--out must resolve inside ${sandbox}`);

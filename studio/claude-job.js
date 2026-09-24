@@ -32,9 +32,14 @@ export async function checkWithRenderer({ root, baseUrl, jobId, kind, versionId,
   const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, ...(baseUrl ? [`--base=${baseUrl}`] : []),
     ...(thumb ? [`--out=${thumb}`, '--cols=3', '--w=320'] : [])];
   const p = Bun.spawn(argv, { cwd: root, stdout: 'ignore', stderr: 'pipe' });
-  const kill = () => p.kill();
+  let escalateTimer = null;
+  const kill = () => {
+    p.kill();
+    escalateTimer = setTimeout(() => { if (p.exitCode === null) p.kill(9); }, 5000);
+  };
   signal?.addEventListener('abort', kill);
   const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+  if (escalateTimer) clearTimeout(escalateTimer);
   signal?.removeEventListener('abort', kill);
   if (signal?.aborted) throw new Error('cancelled');
   return code === 0 ? [] : err.split('\n').map(l => l.trim()).filter(l => l && l !== 'CHECK FAILED').slice(0, 20);

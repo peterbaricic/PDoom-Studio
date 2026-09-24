@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { mkdtempSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const T = { timeout: 300000 };
@@ -52,7 +52,7 @@ test('renders a short range of frames and encodes it', async () => {
 test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const outside = join(tmpdir(), 'outside-sheet.jpg');
-  const r = await runSandboxed(sandbox, '--work=1', '--sheet=5', `--out=${outside}`);
+  const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--sheet=5', `--out=${outside}`);
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
   expect(existsSync(outside)).toBe(false);
@@ -60,14 +60,29 @@ test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
 
 test('sandbox: --chrome is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
-  const r = await runSandboxed(sandbox, '--work=1', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, '--chrome=/bin/echo');
+  const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, '--chrome=/bin/echo');
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
 });
 
 test('sandbox: a non-localhost --base is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
-  const r = await runSandboxed(sandbox, '--work=1', '--check=5', '--base=https://example.com');
+  const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--check=5', '--base=https://example.com');
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
+});
+
+test('sandbox: a --work that does not match the sandboxed job is refused', async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
+  const r = await runSandboxed(sandbox, '--work=some-other-job', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain('sandbox');
+});
+
+test('sandbox: a duplicated --work is refused even if the last value matches', async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
+  const r = await runSandboxed(sandbox, '--work=some-other-job', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, `--work=${basename(sandbox)}`);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain('sandbox');
+  expect(existsSync(join(sandbox, 'sheet.jpg'))).toBe(false);
 });
