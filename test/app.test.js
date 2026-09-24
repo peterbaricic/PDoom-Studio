@@ -73,9 +73,28 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   expect(csp['img-src']).toEqual(["'self'", 'data:', 'blob:']);
   expect(csp['connect-src']).toEqual(["'self'"]);
   expect(csp['media-src']).toEqual(["'self'"]);
+  expect(csp['worker-src']).toEqual(["'none'"]);
+  expect(csp['frame-src']).toEqual(["'none'"]);
+  expect(csp['object-src']).toEqual(["'none'"]);
   expect(csp['form-action']).toEqual(["'none'"]);
   expect(csp['base-uri']).toEqual(["'none'"]);
   expect(csp['frame-ancestors']).toEqual(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://*.localhost:8080']);
+});
+
+test('renderer hosts never serve a service worker or shared worker script, whatever the path', async () => {
+  const { db: db2, app: app2 } = withExamples();
+  db2.createVersion({ id: 'a' });
+  db2.writeFiles('a', [{ path: 'ch/c01.js', content: '// one' }], { source: 'manual' });
+  const fetchAs = (host, p, dest) => app2.fetch(new Request(`http://${host}${p}`, { headers: { host, ...(dest ? { 'sec-fetch-dest': dest } : {}) } }));
+  const paths = ['/studio.html', '/v/a/ch/c01.js', '/v/original/ch/c01_lab.js', '/src/lyrics.js', '/api/versions/a', '/nope'];
+  for (const host of ['w0.localhost:8080', 'w5.localhost:8080']) {
+    for (const p of paths) for (const dest of ['serviceworker', 'sharedworker']) expect((await fetchAs(host, p, dest)).status).toBe(404);
+    // the same files still load as what they are
+    for (const p of ['/studio.html', '/v/a/ch/c01.js', '/src/lyrics.js', '/api/versions/a']) {
+      expect((await fetchAs(host, p, null)).status).toBe(200);
+      expect((await fetchAs(host, p, p.endsWith('.js') ? 'script' : p === '/studio.html' ? 'document' : 'empty')).status).toBe(200);
+    }
+  }
 });
 
 test('worker hosts answer only the two API endpoints the loader needs; the rest of /api is 404 there', async () => {

