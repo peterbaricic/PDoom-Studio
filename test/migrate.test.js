@@ -172,6 +172,71 @@ test('prints what it did', () => {
   expect(logs).toContain('Moved studio.db to user.db (the Original now comes from studio/default.db).');
 });
 
+test('an Original with edits of the user\'s own is kept, renamed to original-edited, with all its history', () => {
+  const root = tempRoot(), userPath = join(root, 'user.db'), legacyPath = join(root, 'studio.db');
+  const legacy = openDb(legacyPath);
+  legacy.createVersion({ id: 'original', title: 'Orig', logline: 'L', concept: 'the original', options: { wipes: false } });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }, { path: 'ch/c01.js', content: '// original ch1' }],
+    { source: 'import', note: 'imported from the repository' });
+  legacy.writeFiles('original', [{ path: 'ch/c01.js', content: '// my better ch1' }], { source: 'claude', note: 'make it pop' });
+  legacy.updateVersion('original', { status: 'ready' });
+  const history = legacy.history('original', null);
+  const jid = legacy.addJob({ kind: 'chapter', versionId: 'original', params: { chapter: 1 } });
+  legacy.close();
+
+  const logs = [], orig = console.log;
+  console.log = (...a) => logs.push(a.join(' '));
+  try { expect(migrateLegacyDb(root, { userPath })).toBe(true); } finally { console.log = orig; }
+  expect(logs).toEqual(['Moved studio.db to user.db (the Original now comes from studio/default.db).',
+    'Your edits to the Original were kept, as the version "original-edited".']);
+
+  const migrated = openDb(userPath);
+  expect(migrated.getVersion('original')).toBeNull();
+  expect(migrated.getVersion('original-edited')).toMatchObject({ title: 'Orig', logline: 'L', concept: 'the original', options: { wipes: false }, status: 'ready' });
+  expect(migrated.getFile('original-edited', 'ch/c01.js').content).toBe('// my better ch1');
+  expect(migrated.getFile('original-edited', 'STORYBOARD.md').content).toBe('orig storyboard');
+  expect(migrated.history('original-edited', null)).toEqual(history.map(r => ({ ...r, version_id: 'original-edited' })));
+  expect(migrated.getJob(jid).version_id).toBe('original');   // jobs keep pointing at the Original
+  migrated.close();
+});
+
+test('the kept Original takes the next free name when original-edited is already taken', () => {
+  const root = tempRoot(), userPath = join(root, 'user.db');
+  const legacy = openDb(join(root, 'studio.db'));
+  legacy.createVersion({ id: 'original' });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig' }], { source: 'import' });
+  legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'edited' }], { source: 'manual' });
+  legacy.createVersion({ id: 'original-edited', title: 'Taken' });
+  legacy.close();
+  const orig = console.log;
+  console.log = () => {};
+  try { migrateLegacyDb(root, { userPath }); } finally { console.log = orig; }
+  const migrated = openDb(userPath);
+  expect(migrated.getVersion('original-edited').title).toBe('Taken');
+  expect(migrated.getFile('original-edited-2', 'STORYBOARD.md').content).toBe('edited');
+  migrated.close();
+});
+
+test('a user.db-wal or user.db-shm without its user.db is refused, and nothing is touched', () => {
+  for (const ext of ['-wal', '-shm']) {
+    const root = tempRoot(), userPath = join(root, 'user.db'), legacyPath = join(root, 'studio.db');
+    const legacy = openDb(legacyPath);
+    legacy.createVersion({ id: 'original', title: 'Orig' });
+    legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }], { source: 'import' });
+    legacy.close();
+    writeFileSync(userPath + ext, 'left over from some other database');
+    expect(() => migrateLegacyDb(root, { userPath })).toThrow(`${userPath}${ext} exists without ${userPath}`);
+    expect(existsSync(userPath)).toBe(false);
+    const untouched = openDb(legacyPath);
+    expect(untouched.getVersion('original')).toMatchObject({ id: 'original', title: 'Orig' });
+    untouched.close();
+  }
+  // also when there is nothing to migrate: a new user.db would take the stray file for its own just the same
+  const root = tempRoot(), userPath = join(root, 'user.db');
+  writeFileSync(userPath + '-wal', 'stray');
+  expect(() => migrateLegacyDb(root, { userPath })).toThrow('exists without');
+});
+
 test('does nothing when studio.db does not exist', () => {
   const root = tempRoot(), userPath = join(root, 'user.db');
   expect(migrateLegacyDb(root, { userPath })).toBe(false);
