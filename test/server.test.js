@@ -31,3 +31,14 @@ test('starts, imports the original and marks unfinished jobs as interrupted', as
     expect(job.status).toBe('interrupted');
   } finally { p.kill(); }
 }, { timeout: 30000 });
+
+test('a second server on the same database refuses to start', async () => {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'srv-')), 'studio.db');
+  const first = await start(dbPath);
+  try {
+    const second = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: { ...process.env, STUDIO_DB: dbPath }, stdout: 'ignore', stderr: 'pipe' });
+    const [err, code] = await Promise.all([new Response(second.stderr).text(), second.exited]);
+    expect(code).toBe(1);
+    expect(err).toContain('another studio is already running');
+  } finally { first.p.kill(); }
+}, { timeout: 30000 });

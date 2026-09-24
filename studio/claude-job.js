@@ -13,12 +13,14 @@ export function chapterPath(db, versionId, n) {
 }
 
 // Claude Code runs with --permission-mode dontAsk, so only what's allowed here can happen: reading the project,
-// writing in the work folder (its working directory), and rendering contact sheets of this job's work folder.
-// Claude may not touch .claude/ in its own work folder either, so it can't plant settings for its own fix attempt.
-export function permissionSettings({ root, jobId }) {
+// writing in the work folder, and rendering contact sheets of this job's work folder. Rules use absolute paths
+// (not './...') because Claude's own Bash tool can `cd` elsewhere during the run, after which a rule relative to
+// its *original* working directory would no longer cover the work folder. Claude may not touch .claude/ in its
+// own work folder either, so it can't plant settings for its own fix attempt.
+export function permissionSettings({ root, jobId, dir }) {
   return { permissions: {
-    allow: [`Read(/${root}/**)`, 'Glob', 'Grep', 'Edit(./**)', 'Write(./**)', `Bash(bun ${root}/render.mjs --work=${jobId} *)`],
-    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(./.claude/**)', 'Write(./.claude/**)'],
+    allow: [`Read(/${root}/**)`, 'Glob', 'Grep', `Edit(/${dir}/**)`, `Write(/${dir}/**)`, `Bash(bun ${root}/render.mjs --work=${jobId} *)`],
+    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', `Edit(/${dir}/.claude/**)`, `Write(/${dir}/.claude/**)`],
   } };
 }
 
@@ -109,7 +111,7 @@ export function createClaudeRunner({ db, root, baseUrl, events = null, claudeCmd
     }
     writeFileSync(join(dir, 'TASK.md'), taskBrief({ kind, version, params, target, root, jobId: job.id, baseUrl, exists: before.has(target) }));
     mkdirSync(dirname(settings), { recursive: true });
-    writeFileSync(settings, JSON.stringify(permissionSettings({ root, jobId: job.id }), null, 2));
+    writeFileSync(settings, JSON.stringify(permissionSettings({ root, jobId: job.id, dir }), null, 2));
 
     let spent = 0;
     const attempt = async prompt => {

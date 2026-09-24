@@ -105,9 +105,9 @@ test('chapter files keep existing names, and permissions stay in the work folder
   db.writeFiles('v', [{ path: 'ch/c01_lab.js', content: '' }], { source: 'import' });
   expect(chapterPath(db, 'v', 1)).toBe('ch/c01_lab.js');
   expect(chapterPath(db, 'v', 2)).toBe('ch/c02.js');
-  const s = permissionSettings({ root: '/p', jobId: 7 });
-  expect(s.permissions.allow).toEqual(['Read(//p/**)', 'Glob', 'Grep', 'Edit(./**)', 'Write(./**)', 'Bash(bun /p/render.mjs --work=7 *)']);
-  expect(s.permissions.deny).toEqual(['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(./.claude/**)', 'Write(./.claude/**)']);
+  const s = permissionSettings({ root: '/p', jobId: 7, dir: '/p/.studio/work/7' });
+  expect(s.permissions.allow).toEqual(['Read(//p/**)', 'Glob', 'Grep', 'Edit(//p/.studio/work/7/**)', 'Write(//p/.studio/work/7/**)', 'Bash(bun /p/render.mjs --work=7 *)']);
+  expect(s.permissions.deny).toEqual(['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(//p/.studio/work/7/.claude/**)', 'Write(//p/.studio/work/7/.claude/**)']);
 });
 
 test('cancelling during a slow check throws and imports nothing', async () => {

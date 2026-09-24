@@ -9,12 +9,21 @@ import { createQueue } from './queue.js';
 import { createClaudeRunner } from './claude-job.js';
 import { createRenderRunner } from './render-job.js';
 import { serve } from './serve.js';
+import { acquireLock } from './lock.js';
 
 const root = resolve(import.meta.dir, '..');
 let port = +(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] ?? process.env.PORT ?? 8080);
 if (port === 0) { const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() }); port = probe.port; probe.stop(true); }
 
-const db = openDb(process.env.STUDIO_DB || join(root, 'studio.db'));
+const dbPath = process.env.STUDIO_DB || join(root, 'studio.db');
+let release;
+try { release = acquireLock(dbPath, port); }
+catch (err) { console.error(err.message); process.exit(1); }
+process.on('exit', release);
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+
+const db = openDb(dbPath);
 if (importOriginal(db, root)) console.log('Imported the original version.');
 const interrupted = db.markInterrupted();
 if (interrupted) console.log(`${interrupted} unfinished job${interrupted === 1 ? '' : 's'} marked as interrupted (retry them in the studio).`);
