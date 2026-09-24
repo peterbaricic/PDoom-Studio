@@ -14,14 +14,15 @@ export function chapterPath(db, versionId, n) {
 
 // Claude Code runs with --permission-mode dontAsk, so only what's allowed here can happen: reading the project,
 // writing in the work folder (its working directory), and rendering contact sheets of this job's work folder.
+// Claude may not touch .claude/ in its own work folder either, so it can't plant settings for its own fix attempt.
 export function permissionSettings({ root, jobId }) {
   return { permissions: {
     allow: [`Read(/${root}/**)`, 'Glob', 'Grep', 'Edit(./**)', 'Write(./**)', `Bash(bun ${root}/render.mjs --work=${jobId} *)`],
-    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit'],
+    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(./.claude/**)', 'Write(./.claude/**)'],
   } };
 }
 
-export async function checkWithRenderer({ root, baseUrl, jobId, kind, versionId, chapter }) {
+export async function checkWithRenderer({ root, baseUrl, jobId, kind, versionId, chapter, signal }) {
   let times = 'load', thumb = null;
   if (kind === 'chapter') {
     const [a, b] = CHAPTER_WINDOWS[chapter - 1];
@@ -30,20 +31,30 @@ export async function checkWithRenderer({ root, baseUrl, jobId, kind, versionId,
   }
   const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, ...(baseUrl ? [`--base=${baseUrl}`] : []),
     ...(thumb ? [`--out=${thumb}`, '--cols=3', '--w=320'] : [])];
-  const p = Bun.spawn(argv, { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  const p = Bun.spawn(argv, { cwd: root, stdout: 'ignore', stderr: 'pipe' });
+  const kill = () => p.kill();
+  signal?.addEventListener('abort', kill);
   const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+  signal?.removeEventListener('abort', kill);
+  if (signal?.aborted) throw new Error('cancelled');
   return code === 0 ? [] : err.split('\n').map(l => l.trim()).filter(l => l && l !== 'CHECK FAILED').slice(0, 20);
 }
 
 const short = input => JSON.stringify(input ?? {}).slice(0, 160);
 
 async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, timeoutMs }) {
+  if (ctx.signal.aborted) throw new Error('cancelled');
   const argv = [...cmd, '-p', prompt, '--output-format', 'stream-json', '--verbose', '--permission-mode', 'dontAsk',
     '--settings', settings, '--setting-sources', 'project', '--strict-mcp-config', '--no-session-persistence',
     '--add-dir', root, ...(model ? ['--model', model] : [])];
-  const proc = Bun.spawn(argv, { cwd: dir, env: { ...process.env, ...env }, stdout: 'pipe', stderr: 'pipe' });
-  let timedOut = false;
-  const kill = () => proc.kill();
+  // STUDIO_SANDBOX lets render.mjs restrict itself when Claude's own Bash tool runs it (see render.mjs); this is
+  // the job's work folder, not the project root, so a render call can only touch this job's own files.
+  const proc = Bun.spawn(argv, { cwd: dir, env: { ...process.env, ...env, STUDIO_SANDBOX: dir }, stdout: 'pipe', stderr: 'pipe' });
+  let timedOut = false, escalateTimer = null;
+  const kill = () => {
+    proc.kill();
+    escalateTimer = setTimeout(() => { if (proc.exitCode === null) proc.kill(9); }, 5000);
+  };
   ctx.signal.addEventListener('abort', kill);
   const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
   const stderr = new Response(proc.stderr).text();
@@ -63,7 +74,8 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
   }
   if (buf.trim()) handle(buf);
   const code = await proc.exited;
-  clearTimeout(timer); ctx.signal.removeEventListener('abort', kill);
+  clearTimeout(timer); if (escalateTimer) clearTimeout(escalateTimer);
+  ctx.signal.removeEventListener('abort', kill);
   if (ctx.signal.aborted) throw new Error('cancelled');
   if (timedOut) throw new Error(`Claude did not finish within ${Math.round(timeoutMs / 60000)} minutes`);
   if (code !== 0 || !result || result.is_error) {
@@ -96,6 +108,9 @@ export function createClaudeRunner({ db, root, baseUrl, events = null, claudeCmd
 
     let spent = 0;
     const attempt = async prompt => {
+      // A previous attempt could have planted its own .claude/settings.json; remove it before every attempt so a
+      // fix attempt can't load permissions Claude wrote for itself (--setting-sources project reads the cwd).
+      rmSync(join(dir, '.claude'), { recursive: true, force: true });
       const r = await runClaude({ cmd: claudeCmd, prompt, dir, settings, root, model: job.model, env, ctx, timeoutMs });
       spent += r.cost; ctx.cost(spent);
     };
@@ -103,21 +118,24 @@ export function createClaudeRunner({ db, root, baseUrl, events = null, claudeCmd
       const file = join(dir, target);
       if (!existsSync(file)) return [`${target} was not written`];
       if (kind === 'storyboard') return parseStoryboard(readFileSync(file, 'utf8')).errors;
-      return validate({ root, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter });
+      return validate({ root, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter, signal: ctx.signal });
     };
 
     await attempt('Read TASK.md in the current folder and do what it says.');
     let errors = await check();
+    if (ctx.signal.aborted) throw new Error('cancelled');
     if (errors.length) {
       ctx.log(`\nThe check failed, asking Claude for a fix:\n${errors.join('\n')}\n`);
       await attempt(`Your work does not pass the studio's check yet:\n${errors.join('\n')}\n\nFix ${target}. TASK.md still applies.`);
       errors = await check();
+      if (ctx.signal.aborted) throw new Error('cancelled');
       if (errors.length) throw new Error('validation failed: ' + errors.join('; '));
     }
 
     const after = readWorkFiles(dir);
     const ignored = [...after.keys()].filter(p => p !== target && after.get(p) !== before.get(p)).sort();
     if (ignored.length) ctx.log(`\nIgnored changes outside ${target}: ${ignored.join(', ')}\n`);
+    if (ctx.signal.aborted) throw new Error('cancelled');
     db.writeFiles(vid, [{ path: target, content: after.get(target) }], { source: 'claude', note: params.feedback || `${kind} job`, jobId: job.id });
 
     if (kind === 'storyboard') {

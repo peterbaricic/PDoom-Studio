@@ -1,25 +1,31 @@
 // test/claude-job.test.js
-import { test, expect, beforeEach } from 'bun:test';
-import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
+import { test, expect, beforeEach, afterEach } from 'bun:test';
+import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
 import { createClaudeRunner, chapterPath, permissionSettings } from '../studio/claude-job.js';
 import { goodStoryboard } from './helpers.js';
 
-const root = process.cwd();
-let db, logs, costs;
+// projectRoot locates the real repo (for the fake CLI script); root is a throwaway temp folder used as the
+// runner's own "project root" for its .studio/work and .studio/settings folders, so a runner test can never
+// touch — let alone delete — a real studio job's work folder.
+const projectRoot = process.cwd();
+let db, logs, costs, root;
 const ctx = (signal = new AbortController().signal) => ({ signal, log: t => logs.push(t), progress: () => {}, cost: c => costs.push(c) });
 const runner = (runs, validate = async () => [], extra = {}) => createClaudeRunner({
-  db, root, baseUrl: 'http://localhost:1', claudeCmd: ['bun', join(root, 'test/fake-claude.js')],
+  db, root, baseUrl: 'http://localhost:1', claudeCmd: ['bun', join(projectRoot, 'test/fake-claude.js')],
   validate, ...extra, env: { FAKE_CLAUDE_PLAN: JSON.stringify({ runs }), ...extra.env },
 });
 const job = (kind, params = {}, model = null) => db.getJob(db.addJob({ kind, versionId: 'v', params, model }));
 
 beforeEach(() => {
   db = openDb(':memory:'); logs = []; costs = [];
+  root = mkdtempSync(join(tmpdir(), 'studio-root-'));
   db.createVersion({ id: 'v', concept: 'A cooking show where Clawd is dough that rises.' });
 });
+
+afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
 test('a storyboard job writes the brief, imports the storyboard and updates the version', async () => {
   const j = job('storyboard', {}, 'opus');
@@ -101,5 +107,23 @@ test('chapter files keep existing names, and permissions stay in the work folder
   expect(chapterPath(db, 'v', 2)).toBe('ch/c02.js');
   const s = permissionSettings({ root: '/p', jobId: 7 });
   expect(s.permissions.allow).toEqual(['Read(//p/**)', 'Glob', 'Grep', 'Edit(./**)', 'Write(./**)', 'Bash(bun /p/render.mjs --work=7 *)']);
-  expect(s.permissions.deny).toContain('WebFetch');
+  expect(s.permissions.deny).toEqual(['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(./.claude/**)', 'Write(./.claude/**)']);
+});
+
+test('cancelling during a slow check throws and imports nothing', async () => {
+  const ctrl = new AbortController();
+  const j = job('chapter', { chapter: 1 });
+  const validate = async () => { await new Promise(r => setTimeout(r, 500)); return []; };
+  const p = runner([{ files: { 'ch/c01.js': 'ok' } }], validate)(j, ctx(ctrl.signal));
+  setTimeout(() => ctrl.abort(), 100);
+  await expect(p).rejects.toThrow('cancelled');
+  expect(db.getFile('v', 'ch/c01.js')).toBeNull();
+});
+
+test('an already-cancelled signal fails fast without running the CLI', async () => {
+  const ctrl = new AbortController();
+  ctrl.abort();
+  const p = runner([{ files: { 'STORYBOARD.md': goodStoryboard() } }])(job('storyboard'), ctx(ctrl.signal));
+  await expect(p).rejects.toThrow('cancelled');
+  expect(db.getFile('v', 'STORYBOARD.md')).toBeNull();
 });

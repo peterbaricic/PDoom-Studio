@@ -9,6 +9,11 @@ const run = async (...a) => {
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
 };
+const runSandboxed = async (sandbox, ...a) => {
+  const p = Bun.spawn(['bun', 'render.mjs', ...a], { env: { ...process.env, STUDIO_SANDBOX: sandbox }, stdout: 'pipe', stderr: 'pipe' });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { out, err, code };
+};
 
 test('check passes for the original and writes a sheet', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'chk-'));
@@ -43,3 +48,26 @@ test('renders a short range of frames and encodes it', async () => {
   expect(e.code).toBe(0);
   expect(existsSync(out)).toBe(true);
 }, T);
+
+test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
+  const outside = join(tmpdir(), 'outside-sheet.jpg');
+  const r = await runSandboxed(sandbox, '--work=1', '--sheet=5', `--out=${outside}`);
+  expect(r.code).toBe(2);
+  expect(r.err).toContain('sandbox');
+  expect(existsSync(outside)).toBe(false);
+});
+
+test('sandbox: --chrome is refused', async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
+  const r = await runSandboxed(sandbox, '--work=1', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, '--chrome=/bin/echo');
+  expect(r.code).toBe(2);
+  expect(r.err).toContain('sandbox');
+});
+
+test('sandbox: a non-localhost --base is refused', async () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
+  const r = await runSandboxed(sandbox, '--work=1', '--check=5', '--base=https://example.com');
+  expect(r.code).toBe(2);
+  expect(r.err).toContain('sandbox');
+});

@@ -11,13 +11,34 @@
 // Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
 // Relative paths the caller gives are theirs; everything else is relative to the project.
 const CWD = process.cwd(), HERE = import.meta.dir;
+
+// Claude Code's Bash tool runs this with STUDIO_SANDBOX set to its job's work folder (see studio/claude-job.js).
+// In that case, before doing anything else: only the read-only check/preview modes are allowed, no alternate
+// browser binary, no output outside the work folder, and no --base except the studio's own localhost server.
+if (process.env.STUDIO_SANDBOX) {
+  const sandbox = resolve(process.env.STUDIO_SANDBOX);
+  const fail = msg => { console.error(`sandbox: ${msg}`); process.exit(2); };
+  for (const f of ['chrome', 'angle', 'frames', 'frames-dir', 'encode', 'loop', 'clip']) {
+    if (args[f] !== undefined) fail(`--${f} is not allowed`);
+  }
+  if (!['sheet', 'check', 'poster', 'stills'].some(m => args[m] !== undefined)) fail('only --sheet, --check, --poster or --stills are allowed');
+  if (!args.work) fail('--work is required');
+  if (args.out) {
+    const out = resolve(CWD, args.out);
+    if (out !== sandbox && !out.startsWith(sandbox + sep)) fail(`--out must resolve inside ${sandbox}`);
+  }
+  if (args.base && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+\/?$/.test(args.base)) {
+    fail('--base must be http://localhost, http://127.0.0.1 or http://[::1] with a port');
+  }
+}
+
 process.chdir(HERE);
 const outPath = def => args.out ? resolve(CWD, args.out) : resolve(HERE, def);
 const DUR = 156.6, fps = +(args.fps || 24);
