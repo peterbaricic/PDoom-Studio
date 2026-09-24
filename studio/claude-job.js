@@ -5,7 +5,7 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node
 import { join, dirname } from 'node:path';
 import { readWorkFiles } from './versions.js';
 import { parseStoryboard, CHAPTER_WINDOWS } from './storyboard.js';
-import { taskBrief } from './prompts.js';
+import { taskBrief, renderCommand } from './prompts.js';
 
 export function chapterPath(db, versionId, n) {
   const re = new RegExp(`^ch/c0${n}(_[a-z0-9_]+)?\\.js$`);
@@ -16,11 +16,13 @@ export function chapterPath(db, versionId, n) {
 // writing in the work folder, and rendering contact sheets of this job's work folder. Rules use absolute paths
 // (not './...') because Claude's own Bash tool can `cd` elsewhere during the run, after which a rule relative to
 // its *original* working directory would no longer cover the work folder. Claude may not touch .claude/ in its
-// own work folder either, so it can't plant settings for its own fix attempt.
+// own work folder either, so it can't plant settings for its own fix attempt, nor bunfig.toml or .env files, which
+// Bun would read from the work folder (the render command ignores them anyway; see renderCommand).
 export function permissionSettings({ root, jobId, dir }) {
+  const denyFiles = ['.claude/**', '**/bunfig.toml', '**/.env*'].flatMap(p => [`Edit(/${dir}/${p})`, `Write(/${dir}/${p})`]);
   return { permissions: {
-    allow: [`Read(/${root}/**)`, 'Glob', 'Grep', `Edit(/${dir}/**)`, `Write(/${dir}/**)`, `Bash(bun ${root}/render.mjs --work=${jobId} *)`],
-    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', `Edit(/${dir}/.claude/**)`, `Write(/${dir}/.claude/**)`],
+    allow: [`Read(/${root}/**)`, 'Glob', 'Grep', `Edit(/${dir}/**)`, `Write(/${dir}/**)`, `Bash(${renderCommand(root, jobId)} *)`],
+    deny: ['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', ...denyFiles],
   } };
 }
 

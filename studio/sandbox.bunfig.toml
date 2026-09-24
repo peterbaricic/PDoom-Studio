@@ -1,0 +1,2 @@
+# Config for the render command studio jobs let Claude run (see renderCommand in studio/prompts.js): passing it
+# with --config= keeps Bun from reading a bunfig.toml (preload scripts) from the job's work folder. Keep it empty.

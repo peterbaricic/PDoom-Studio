@@ -1,6 +1,11 @@
 // prompts.js: the briefs Claude gets in TASK.md. Everything a job needs is in the brief or one Read away.
 import { CHAPTER_WINDOWS } from './storyboard.js';
 
+// The one command a job's Claude may run (its Bash allow rule is this plus " *"). Bun reads bunfig.toml (preload
+// scripts) and .env from the working directory, Claude's own work folder, before running any script; the empty
+// studio config and --no-env-file turn both off. Keep --config= with "=": "-c <path>" is parsed differently.
+export const renderCommand = (root, jobId) => `bun --no-env-file --config=${root}/studio/sandbox.bunfig.toml ${root}/render.mjs --work=${jobId}`;
+
 const common = ({ root, jobId, baseUrl }) => `
 ## The project
 
@@ -22,7 +27,7 @@ ${CHAPTER_WINDOWS.map(([a, b], i) => `${i + 1}. ${a}–${b}`).join('\n')}
 
 Render a contact sheet of any times you like and look at it with the Read tool:
 
-    bun ${root}/render.mjs --work=${jobId} --base=${baseUrl} --sheet=40,45,50 --out=sheet.jpg
+    ${renderCommand(root, jobId)} --base=${baseUrl} --sheet=40,45,50 --out=sheet.jpg
 
 Always check before you finish. Fix anything that is broken, blank, off-screen or hidden behind the karaoke bar.
 `;

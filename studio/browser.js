@@ -1,6 +1,6 @@
 // browser.js: find a Chromium-based browser and launch it headless with the GPU flags the renderer needs.
-// Order: an explicit path, $CHROME_PATH, an installed Chrome/Chromium/Edge/Brave, then a standalone
-// chrome-headless-shell (`bun run get-browser` puts one in .browsers/; Puppeteer's and Playwright's caches too).
+// Order: an explicit path, $CHROME_PATH (unless fromEnv is false), an installed Chrome/Chromium/Edge/Brave, then a
+// standalone chrome-headless-shell (`bun run get-browser` puts one in .browsers/; Puppeteer's and Playwright's caches too).
 import puppeteer from 'puppeteer-core';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -8,9 +8,9 @@ import { homedir } from 'node:os';
 
 const ROOT = resolve(import.meta.dir, '..');
 
-export function findBrowser(explicit) {
+export function findBrowser(explicit, { fromEnv = true } = {}) {
   if (explicit) return explicit;
-  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  if (fromEnv && process.env.CHROME_PATH) return process.env.CHROME_PATH;
   const pf = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean);
   const installed = {
     darwin: ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Google Chrome Canary']
@@ -39,9 +39,9 @@ export function findBrowser(explicit) {
 // GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere.
 export const ANGLE = { darwin: 'metal', win32: 'd3d11' }[process.platform];
 
-export function launchBrowser({ chrome, angle = ANGLE } = {}) {
+export function launchBrowser({ chrome, angle = ANGLE, fromEnv = true } = {}) {
   return puppeteer.launch({
-    executablePath: findBrowser(chrome), headless: true, protocolTimeout: 0,
+    executablePath: findBrowser(chrome, { fromEnv }), headless: true, protocolTimeout: 0,
     args: ['--ignore-gpu-blocklist', ...(angle ? ['--use-angle=' + angle] : []), '--enable-gpu-rasterization', '--window-size=1920,1080',
       '--disable-renderer-backgrounding', '--disable-background-timer-throttling'],
   });

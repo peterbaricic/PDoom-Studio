@@ -11,8 +11,8 @@
 // Pages come from a running studio at --base=<url>; without it, an in-process server over studio.db is started
 // ($STUDIO_DB picks another database, $STUDIO_DATA another folder for .studio/ and library/, as for the studio).
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from 'node:fs';
-import { dirname, resolve, sep, basename } from 'node:path';
+import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 
@@ -22,10 +22,15 @@ const CWD = process.cwd(), HERE = import.meta.dir;
 
 // Claude Code's Bash tool runs this with STUDIO_SANDBOX set to its job's work folder (see studio/claude-job.js).
 // In that case, before doing anything else: only the read-only check/preview modes are allowed, no alternate
-// browser binary, no output outside the work folder, and no --base except the studio's own localhost server.
-if (process.env.STUDIO_SANDBOX) {
-  const sandbox = resolve(process.env.STUDIO_SANDBOX);
+// browser binary (neither --chrome nor $CHROME_PATH), no output outside the work folder (and no default output
+// path, which would be out/ in the project), and no --base except the studio's own localhost server.
+const SANDBOX = !!process.env.STUDIO_SANDBOX;
+if (SANDBOX) {
   const fail = msg => { console.error(`sandbox: ${msg}`); process.exit(2); };
+  // Paths are compared with symlinks resolved (the part that exists so far), so a symlinked folder on the way
+  // (macOS's /var and /tmp, or a link inside the work folder) can neither wrongly refuse nor let an --out escape.
+  const real = p => { const rest = []; while (!existsSync(p) && dirname(p) !== p) { rest.unshift(basename(p)); p = dirname(p); } return join(realpathSync(p), ...rest); };
+  const sandbox = real(resolve(process.env.STUDIO_SANDBOX));
   // Object.fromEntries above lets a later --flag=x silently win over an earlier one, so a repeated flag (e.g. a
   // decoy --work=<own job> followed by the real --work=<someone else's job>) could pass every check below while
   // acting on a different value. Reject any flag given more than once before trusting `args` at all.
@@ -40,8 +45,9 @@ if (process.env.STUDIO_SANDBOX) {
   // The work folder is named after the job id, so --work must name the very job this sandbox belongs to — it
   // can't be used to point render.mjs at (and thus read into this sandbox) a different job's private files.
   if (String(args.work) !== basename(sandbox)) fail('--work must match the sandboxed job');
+  if (!args.out && ['sheet', 'poster', 'stills'].some(m => args[m] !== undefined)) fail('--out is required (a path inside the work folder)');
   if (args.out) {
-    const out = resolve(CWD, args.out);
+    const out = real(resolve(CWD, args.out));
     if (out !== sandbox && !out.startsWith(sandbox + sep)) fail(`--out must resolve inside ${sandbox}`);
   }
   if (args.base && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d+\/?$/.test(args.base)) {
@@ -81,7 +87,7 @@ if (!base) {
 }
 const PAGE = `${base}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
-const browser = await launchBrowser({ chrome: args.chrome, angle: args.angle });
+const browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
 let exitCode = 0;
 async function openPage(tag = '', errors = null) {
   const page = await browser.newPage();

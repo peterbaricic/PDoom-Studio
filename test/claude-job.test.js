@@ -46,6 +46,8 @@ test('the brief and the CLI arguments', async () => {
   }, { env: { FAKE_CLAUDE_LOG: log } })(j, ctx());
   expect(brief).toContain('ch/c03.js');
   expect(brief).toContain('38.5–59');
+  // The documented check command is exactly the form Claude's Bash rule allows.
+  expect(brief).toContain(`bun --no-env-file --config=${root}/studio/sandbox.bunfig.toml ${root}/render.mjs --work=${j.id} --base=http://localhost:1 --sheet=`);
   expect(brief).toContain('make the oven bigger');
   const argv = JSON.parse(readFileSync(log, 'utf8').trim());
   expect(argv).toContain('--permission-mode'); expect(argv).toContain('dontAsk');
@@ -106,8 +108,12 @@ test('chapter files keep existing names, and permissions stay in the work folder
   expect(chapterPath(db, 'v', 1)).toBe('ch/c01_lab.js');
   expect(chapterPath(db, 'v', 2)).toBe('ch/c02.js');
   const s = permissionSettings({ root: '/p', jobId: 7, dir: '/p/.studio/work/7' });
-  expect(s.permissions.allow).toEqual(['Read(//p/**)', 'Glob', 'Grep', 'Edit(//p/.studio/work/7/**)', 'Write(//p/.studio/work/7/**)', 'Bash(bun /p/render.mjs --work=7 *)']);
-  expect(s.permissions.deny).toEqual(['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit', 'Edit(//p/.studio/work/7/.claude/**)', 'Write(//p/.studio/work/7/.claude/**)']);
+  expect(s.permissions.allow).toEqual(['Read(//p/**)', 'Glob', 'Grep', 'Edit(//p/.studio/work/7/**)', 'Write(//p/.studio/work/7/**)',
+    'Bash(bun --no-env-file --config=/p/studio/sandbox.bunfig.toml /p/render.mjs --work=7 *)']);
+  expect(s.permissions.deny).toEqual(['WebFetch', 'WebSearch', 'Agent', 'Task', 'NotebookEdit',
+    'Edit(//p/.studio/work/7/.claude/**)', 'Write(//p/.studio/work/7/.claude/**)',
+    'Edit(//p/.studio/work/7/**/bunfig.toml)', 'Write(//p/.studio/work/7/**/bunfig.toml)',
+    'Edit(//p/.studio/work/7/**/.env*)', 'Write(//p/.studio/work/7/**/.env*)']);
 });
 
 test('cancelling during a slow check throws and imports nothing', async () => {
