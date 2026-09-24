@@ -39,6 +39,35 @@
 
 ---
 
+### Task 0: Lock down the render browser's network, and fix the retry fallback
+
+Carried over from the studio plan's final review (Ruling 13 in that plan's ledger). Chapter code runs in the engine page
+(`studio.html` on `w<n>.localhost`). The page's CSP blocks fetch, XHR and subresources, but not top-level navigation,
+`window.open`, form submission or WebRTC. So during a sandboxed render, chapter code could still send out data it can see.
+
+**Files:** `render.mjs`, `studio/browser.js`, `studio/app.js`, `studio/queue.js`, tests (`test/render.test.js`, `test/app.test.js`, `test/queue.test.js`).
+
+**Requirements:**
+- [ ] In `render.mjs`'s `openPage`, turn on request interception. Abort every request whose origin isn't the page's own
+  origin, except `https://fonts.googleapis.com` and `https://fonts.gstatic.com`; this includes top-level navigations away.
+  Close any new target (popup) the page opens.
+- [ ] `launchBrowser` adds `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` and `--webrtc-ip-handling-policy=disable_non_proxied_udp`.
+- [ ] The `studio.html` CSP adds `form-action 'none'` and `base-uri 'none'`.
+- [ ] On `w<n>.localhost` hosts, `/api/*` answers 404 except `GET /api/versions/<id>` and `GET /api/work/<id>`, the only
+  endpoints `src/loader.js` needs.
+- [ ] `queue.retry`: when `params.after` points at a job that can no longer finish and there is no `shared.js`, fall back
+  to the newest shared job of that version in any status, so retrying that shared job again frees the chapter. Add a test
+  for the review's scenario: S1 fails, chapters cancelled, S1 retried as S2, S2 fails, chapter retried, S2 retried as S3,
+  S3 done → the chapter runs.
+- [ ] Tests:
+  - A render test with a chapter that tries `location.href = 'http://example.com/?x=1'`, a `fetch` to an external host,
+    and `window.open`. The render still completes, and a local capture server listening on a second loopback port as a
+    stand-in external host receives nothing. Use a `127.0.0.2` or `localhost:<other port>` target that counts as a
+    different origin.
+  - App tests for the `/api` restriction on worker hosts.
+
+---
+
 ### Task 1: Store over two databases, and build default.db
 
 **Files:** `studio/db.js` (and tests), new `studio/build-default.js`, new `studio/default.db` (built and committed), `test/db.test.js`, `.gitignore`.
