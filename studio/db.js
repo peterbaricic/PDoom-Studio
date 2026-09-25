@@ -6,7 +6,7 @@
 // it, when given and present, as the read-only schema "def"; StudioDb then reads across both and keeps every write
 // (other than Promote) on user.db, refusing to touch an example.
 import { Database } from 'bun:sqlite';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 // A revision's content hash, stored in revisions.sha256 (filled on write, backfilled below for a database created
@@ -62,13 +62,49 @@ const readOnlyUri = path => `file:${path.replace(/[%?#]/g, c => '%' + c.charCode
 // path = user.db. { defaultPath } = studio/default.db: attached read-only as schema "def" when given and present.
 // Without defaultPath (or when the file doesn't exist yet), behavior is exactly the single-database store this was.
 export function openDb(path = 'studio.db', { defaultPath } = {}) {
+  const hasDef = !!(defaultPath && existsSync(defaultPath));
   const db = new Database(path, { create: true, strict: true });
+  // Before the first write this connection makes (the WAL pragma right below, unconditionally): refuse a path
+  // that would make defaultPath unsafe to treat as read-only. This can't use a separate `{ readonly: true }`
+  // connection — a plain, already-checkpointed WAL-mode database with no -wal/-shm beside it (exactly the state
+  // migrate.js leaves the freshly renamed user.db in, and the ordinary state of any user.db between clean
+  // restarts) fails to open read-only in this SQLite build (SQLITE_CANTOPEN), even though the very same file opens
+  // fine the normal way, which is what every write path here already does. So the checks below run as read-only
+  // queries on this same connection instead: opening a file that already exists doesn't write anything by itself,
+  // so as long as nothing here issues a write before either check has passed, this is exactly as safe as a
+  // separate read-only connection would have been, without that failure mode.
+  if (hasDef) {
+    try { assertSafeUserDb(db, path, defaultPath); }
+    catch (e) { db.close(); throw e; }
+  }
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
   migrateShaColumn(db);
-  const hasDef = !!(defaultPath && existsSync(defaultPath));
   if (hasDef) db.query('ATTACH DATABASE ? AS def').run(readOnlyUri(defaultPath));
   return new StudioDb(db, { defaultPath, hasDef });
+}
+
+// Whether a and b are the same file on disk, however each path is spelled (relative, via a symlink, a hardlink, …):
+// same device and inode, which is what "the same file" means regardless of the path strings used to reach it.
+const sameFile = (a, b) => {
+  try { const [x, y] = [statSync(a), statSync(b)]; return x.dev === y.dev && x.ino === y.ino; } catch { return false; }
+};
+
+// Refuses db (path's connection, defaultPath already confirmed to exist) when defaultPath would be misused this
+// way: the same file as path — attaching it later would alias the very database this connection is about to put
+// into WAL mode and migrate, so the "read-only examples" file would in fact be the one live, mutable database — or
+// path itself already looks like an examples database (any revision id >= EXAMPLE_REVISION_FLOOR, the range
+// build-default.js and promoteVersion use), which would mean treating an examples database as the user's own,
+// migrating and checkpointing it in place.
+function assertSafeUserDb(db, path, defaultPath) {
+  if (path !== ':memory:' && sameFile(path, defaultPath)) {
+    throw new Error(`${path} and ${defaultPath} are the same file — refusing to open it as both the user database and the attached examples database`);
+  }
+  const hasRevisions = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revisions'").get();
+  const bad = hasRevisions && db.query('SELECT id FROM revisions WHERE id >= $floor LIMIT 1').get({ floor: EXAMPLE_REVISION_FLOOR });
+  if (bad) {
+    throw new Error(`${path} looks like an examples database (it has revision id ${bad.id} >= ${EXAMPLE_REVISION_FLOOR}) — refusing to open it as the user database`);
+  }
 }
 
 // Adds revisions.sha256 to a database created before this column existed (CREATE TABLE IF NOT EXISTS above is a
@@ -78,6 +114,10 @@ export function openDb(path = 'studio.db', { defaultPath } = {}) {
 function migrateShaColumn(db) {
   const hasColumn = db.query('PRAGMA table_info(revisions)').all().some(c => c.name === 'sha256');
   if (!hasColumn) db.exec('ALTER TABLE revisions ADD COLUMN sha256 TEXT');
+  // Not in SCHEMA above: SCHEMA runs before this point, so on a database migrated just now by the ALTER above, the
+  // column (and so this index) wouldn't exist yet when SCHEMA ran — CREATE INDEX IF NOT EXISTS still errors on a
+  // missing column, that clause only covers the index's own name. Idempotent, so safe to run on every open.
+  db.exec('CREATE INDEX IF NOT EXISTS revisions_by_sha ON revisions (sha256)');
   const missing = db.query('SELECT id, content FROM revisions WHERE sha256 IS NULL').all();
   if (missing.length) {
     db.transaction(() => {

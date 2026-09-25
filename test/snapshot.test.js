@@ -89,6 +89,9 @@ test('opening an older database backfills sha256 for its existing revisions', ()
   // migration wrote it, rather than merely that fileSha can still compute it on the fly.
   expect(opened.getRevision(1).sha256).toBe(sha256('legacy content'));
   expect(opened.fileSha('old', 'ch/c01.js')).toBe(sha256('legacy content'));
+  // the sha256 index is added along with the column, for a database that only gets it through this migration
+  const indexes = opened.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'revisions'").all().map(r => r.name);
+  expect(indexes).toContain('revisions_by_sha');
 });
 
 test('remembers at most 500 snapshots, evicting the least recently used', () => {

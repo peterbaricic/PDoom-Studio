@@ -1,5 +1,5 @@
 import { test, expect, beforeEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, cpSync, readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, cpSync, readdirSync, statSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
@@ -283,8 +283,56 @@ test('a default.db path with URI-special characters (#, ?, %) is attached as is,
   expect(readFileSync(defaultPath).equals(bytes)).toBe(true);
 });
 
-test('opening with defaultPath never modifies studio/default.db, and creates no -wal/-shm', () => {
-  const defaultPath = join(root, 'studio/default.db');
+test('openDb refuses a userPath that is the same file as defaultPath, and never touches it', () => {
+  const defaultPath = freshDefaultPath();   // a private copy: a real WAL switch here would be this test's own fault
+  expect(() => openDb(defaultPath, { defaultPath })).toThrow(/same file/);
+  expect(existsSync(`${defaultPath}-wal`)).toBe(false);
+  expect(existsSync(`${defaultPath}-shm`)).toBe(false);
+});
+
+test('openDb refuses a userPath that is the same file as defaultPath by way of a symlink', () => {
+  const defaultPath = freshDefaultPath();
+  const linked = join(mkdtempSync(join(tmpdir(), 'alias-')), 'user.db');
+  symlinkSync(defaultPath, linked);
+  expect(() => openDb(linked, { defaultPath })).toThrow(/same file/);
+  expect(existsSync(`${defaultPath}-wal`)).toBe(false);
+  expect(existsSync(`${defaultPath}-shm`)).toBe(false);
+});
+
+test('openDb refuses to open an examples database as the user database', () => {
+  // A copy of the examples database, opened here as if it were user.db: same shape default.db itself has (revision
+  // ids >= EXAMPLE_REVISION_FLOOR), which is exactly what a stray env-var mix-up (USER_DB pointed at a default.db
+  // copy) would look like.
+  const asUser = freshDefaultPath(), defaultPath = freshDefaultPath();
+  expect(() => openDb(asUser, { defaultPath })).toThrow(/examples database/);
+  // never switched to WAL, and never migrated: the sha256 index only exists once migrateShaColumn has run
+  expect(existsSync(`${asUser}-wal`)).toBe(false);
+  expect(existsSync(`${asUser}-shm`)).toBe(false);
+  const untouched = new Database(asUser, { readonly: true });
+  const indexes = untouched.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'revisions'").all().map(r => r.name);
+  expect(indexes).not.toContain('revisions_by_sha');
+  untouched.close();
+});
+
+test('a database with no revisions table yet (or none at all) is not mistaken for an examples database', () => {
+  // openDb's own SCHEMA creates the table on first use, so a brand-new user.db never has one until then — this
+  // proves the probe used to guard against that doesn't itself choke on a table that isn't there yet.
+  const empty = tempDbPath('empty-'), d = new Database(empty, { create: true });
+  d.close();
+  const udb = openDb(empty, { defaultPath: freshDefaultPath() });
+  expect(udb.getVersion('original')).toMatchObject({ example: true });
+  udb.close();
+});
+
+test('revisions.sha256 is indexed', () => {
+  const udb = openDb(':memory:');
+  const indexes = udb.db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'revisions'").all().map(r => r.name);
+  expect(indexes).toContain('revisions_by_sha');
+  udb.close();
+});
+
+test('opening with defaultPath never modifies the examples database, and creates no -wal/-shm', () => {
+  const defaultPath = freshDefaultPath();   // a private copy — never open the repo's own studio/default.db directly
   const before = statSync(defaultPath);
   const beforeBytes = readFileSync(defaultPath);
 
