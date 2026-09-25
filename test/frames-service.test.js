@@ -5,7 +5,7 @@ import { openDb } from '../studio/db.js';
 import { serve } from '../studio/serve.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
-import { snapshotOf } from '../studio/snapshot.js';
+import { snapshotOf, rememberSnapshot } from '../studio/snapshot.js';
 import { createCache } from '../studio/frames/cache.js';
 import { createPool } from '../studio/frames/pool.js';
 import { createFrameService } from '../studio/frames/service.js';
@@ -72,6 +72,9 @@ beforeAll(async () => {
     { path: 'ch/c08.js', content: fastChapter(8, 'CAST.wrapper();') },
     { path: 'ch/c09.js', content: "const { guest } = CAST;\n" + fastChapter(9, 'guest();') },
   ], { source: 'manual' });
+  // a chapter that never finishes painting, on its own (the timeout-break clock test)
+  db.createVersion({ id: 'spin' });
+  db.writeFiles('spin', [{ path: 'ch/c06.js', content: "chapter('c6', 95.4, 109.4, [[95.4, t => { for (;;) {} }]]);" }], { source: 'manual' });
   // a chapter whose script never finishes loading
   db.createVersion({ id: 'hangload' });
   db.writeFiles('hangload', [
@@ -271,24 +274,34 @@ test('reading a CAST entry nobody defined, or listing them, depends on the whole
 
 test('a chapter that throws, one that never finishes and one whose script throws while loading each break only their own segment', async () => {
   const t0 = Date.now();
+  // A timeout's break lasts brokenTtlMs (4 s here) from when its answer arrives, so it's looked at right then: the
+  // other four requests can finish any time later (a slow machine loads and paints slowly; the timeout is wall-clock).
+  let loopingNow, coverageNow;
+  const whenLoopsAnswers = r => { loopingNow = service.frame('bad', 1201, 'prefetch'); coverageNow = service.coverage('bad'); return r; };
   // (prefetch: several previews at once would supersede each other)
-  const [loops, throws, failsToLoad, fine, alsoFine] = await Promise.all([1200, 600, 1500, 24, 1780].map(i => frameOf('bad', i, 'prefetch')));
+  const [loops, throws, failsToLoad, fine, alsoFine] = await Promise.all([1200, 600, 1500, 24, 1780]
+    .map(i => i === 1200 ? frameOf('bad', i, 'prefetch').then(whenLoopsAnswers) : frameOf('bad', i, 'prefetch')));
   expect(loops.broken).toBe('painting frame 1200 took over 2 s');
+  // then another frame of that chapter answered broken at once, without painting
+  expect(loopingNow.broken).toBe('painting frame 1200 took over 2 s');
+  expect(loopingNow.pending).toBeUndefined();
+  expect(coverageNow.broken.map(b => b.chapter)).toContain(3);
   expect(throws.broken).toBe('chapter two is broken');
   expect(failsToLoad.broken).toContain('chapter four failed to load');
   expect(fine.file).toBeDefined();
   expect(alsoFine.file).toBeDefined();
   expect(Date.now() - t0).toBeLessThan(30000);
 
-  // broken segments answer at once, without painting, until their key changes
+  // a chapter's own errors answer at once, without painting, until their key changes
   const before = pool.stats().painted + pool.stats().failures;
   expect(service.frame('bad', 601).broken).toContain('chapter two is broken');
-  expect(service.frame('bad', 1201).broken).toContain('took over 2 s');
+  expect(service.frame('bad', 1501).broken).toContain('chapter four failed to load');
   const res = await fetch(`${srv.url}/api/frames/bad/601.jpg`);
   expect(res.status).toBe(409);
   expect((await res.json()).error).toContain('chapter two is broken');
   expect(pool.stats().painted + pool.stats().failures).toBe(before);
-  expect(service.coverage('bad').broken.map(b => b.chapter)).toEqual([2, 3, 4]);
+  // (chapter 3's break may have run out by now, however long the others took)
+  expect(service.coverage('bad').broken.map(b => b.chapter).filter(n => n !== 3)).toEqual([2, 4]);
 
   // the pool still paints, the hung page replaced
   expect((await frameOf('bad', 25)).file).toBeDefined();
@@ -302,6 +315,18 @@ test('a chapter that throws, one that never finishes and one whose script throws
   // fixed, the chapter paints again
   db.writeFiles('bad', [{ path: 'ch/c02.js', content: fastChapter(2) }], { source: 'manual' });
   expect((await frameOf('bad', 601)).file).toBeDefined();
+}, T);
+
+test('a paint that times out stays broken for brokenTtlMs from when its answer arrives, not from the timeout', async () => {
+  // Closing the stuck page comes first (Chrome takes about half a second to end a looping renderer here, up to the 5 s
+  // closePage allows); that time used to come off the break, so a slow close could hand over a break already over.
+  const snap = snapshotOf(db, 'spin');
+  rememberSnapshot(snap);
+  const r = await pool.request({ versionId: 'spin', snapshotId: snap.id, key: keysOf('spin')[6], frame: 2400, prio: 'prefetch', currentShas: currentShas(snap) });
+  const left = r.until - Date.now();
+  expect(r).toMatchObject({ ok: false, broken: true, error: 'painting frame 2400 took over 2 s' });
+  expect(left).toBeGreaterThan(4000 - 100);
+  expect(left).toBeLessThanOrEqual(4000);
 }, T);
 
 test('a chapter that never finishes loading breaks only itself, fails fast after that, and holds no more than one page', async () => {

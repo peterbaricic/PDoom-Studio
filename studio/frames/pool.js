@@ -259,7 +259,9 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
           return { url: document.getElementById('out').toDataURL('image/jpeg', .94), castReads: r?.castReads || [] };
         }, frame / FPS), paintTimeoutMs, () => new Broken(`painting frame ${frame} took over ${paintTimeoutMs / 1000} s`, Date.now() + brokenTtlMs));
       } catch (e) {
-        if (e instanceof Broken) { await closePage(slot); throw e; }   // stuck: the page goes, the slot gets a fresh one next time
+        // Stuck: the page goes, and the slot gets a fresh one next time. The break's time counts from now, once the
+        // page is closed (that can take seconds), so it's never handed over already partly or wholly used up.
+        if (e instanceof Broken) { await closePage(slot); throw new Broken(e.message, Date.now() + brokenTtlMs); }
         // The browser going away (or the pool closing) isn't the chapter's doing.
         if (closed || !page.browser().connected) throw e;
         // A crashed renderer might be a one-off; an error the chapter threw isn't.
