@@ -2,7 +2,7 @@
 // Exactly the spec's "Data flow" list (docs/superpowers/specs/2026-09-25-react-studio-design.md, section 2):
 //   version -> invalidate ['versions'] and ['version', id]
 //   job     -> invalidate ['jobs'] and ['job', id]
-//   log     -> append to ['job', id]'s log via setQueryData
+//   log     -> append to ['job', id]'s log via setQueryData (at the event's offset; else refetch it)
 //   library -> invalidate ['renders']
 //   frames  -> merge ranges into ['coverage', id] via setQueryData
 import { useEffect } from 'react';
@@ -18,6 +18,8 @@ interface JobEvent {
 }
 interface LogEvent {
   id: number;
+  // Where in the job's log `text` starts: the log's length before this append (UTF-16 code units, as JS counts).
+  offset: number;
   text: string;
 }
 interface FramesEvent {
@@ -62,8 +64,13 @@ export function handleStudioEvent(queryClient: QueryClient, type: string, data: 
       break;
     }
     case 'log': {
-      const { id, text } = data as LogEvent;
-      queryClient.setQueryData<JobWithLog>(['job', id], prev => (prev ? { ...prev, log: prev.log + text } : prev));
+      // Appended only where it belongs: a log fetched while lines were arriving may already hold this text, or lack
+      // lines before it, and then only a refetch makes the copy right.
+      const { id, offset, text } = data as LogEvent;
+      const prev = queryClient.getQueryData<JobWithLog>(['job', id]);
+      if (!prev) break;
+      if (prev.log.length === offset) queryClient.setQueryData<JobWithLog>(['job', id], { ...prev, log: prev.log + text });
+      else queryClient.invalidateQueries({ queryKey: ['job', id] });
       break;
     }
     case 'library': {

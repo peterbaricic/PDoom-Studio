@@ -2,7 +2,10 @@
 // (renders share the one GPU, so one at a time). A job can wait for another (chapters wait for the shared setup).
 export const LANES = { storyboard: 'claude', shared: 'claude', chapter: 'claude', render: 'render', thumbs: 'render' };
 
-export function createQueue({ db, events, runners, limits = { claude: 3, render: 1 } }) {
+// progressEveryMs: the least time between two progress-only `job` events for one job. A final render reports progress
+// once per painted frame, and every `job` event makes each open page refetch its job lists, so progress is published
+// at most this often (the latest value always goes out, at the end of the wait). Status changes are never held back.
+export function createQueue({ db, events, runners, limits = { claude: 3, render: 1 }, progressEveryMs = 250 }) {
   const running = new Map();                      // job id → { lane, ctrl }
   let started = false, waiters = [];
   const publish = id => events.publish('job', db.getJob(id));
@@ -73,10 +76,26 @@ export function createQueue({ db, events, runners, limits = { claude: 3, render:
     running.set(job.id, { lane, ctrl });
     db.updateJob(job.id, { status: 'running', started_at: Date.now(), progress: 0, error: null });
     publish(job.id);
+    // offset: where in the job's log this text starts (its length before the append, in UTF-16 code units, as the
+    // page's JSON-decoded copy counts it), so a page that fetched the log meanwhile can tell whether it already has it.
+    let logLength = (job.log ?? '').length;
+    let progressAt = -Infinity, progressTimer = null;
+    const publishProgress = () => { clearTimeout(progressTimer); progressTimer = null; progressAt = Date.now(); publish(job.id); };
     const ctx = {
       signal: ctrl.signal,
-      log: text => { db.appendLog(job.id, text); events.publish('log', { id: job.id, text }); },
-      progress: p => { db.updateJob(job.id, { progress: Math.max(0, Math.min(1, p)) }); publish(job.id); },
+      log: text => {
+        const offset = logLength;
+        logLength += text.length;
+        db.appendLog(job.id, text);
+        events.publish('log', { id: job.id, offset, text });
+      },
+      progress: p => {
+        const progress = Math.max(0, Math.min(1, p));
+        db.updateJob(job.id, { progress });
+        const wait = progressAt + progressEveryMs - Date.now();
+        if (wait <= 0 || progress === 1) publishProgress();
+        else progressTimer ??= setTimeout(publishProgress, wait);
+      },
       cost: usd => { db.updateJob(job.id, { cost_usd: usd }); publish(job.id); },
     };
     try {
@@ -87,6 +106,7 @@ export function createQueue({ db, events, runners, limits = { claude: 3, render:
         ? { status: 'cancelled', finished_at: Date.now() }
         : { status: 'failed', error: String(e?.message || e), finished_at: Date.now() });
     }
+    clearTimeout(progressTimer);   // the final publish below carries the latest progress anyway
     running.delete(job.id);
     publish(job.id);
     schedule();

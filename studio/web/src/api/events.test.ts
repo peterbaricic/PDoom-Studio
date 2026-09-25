@@ -82,14 +82,33 @@ describe('handleStudioEvent', () => {
     expect(seen).toEqual([[['jobs']], [['job', 7]]]);
   });
 
-  test('log appends to the job\'s cached log, and does nothing when it is not cached', () => {
+  test('log appends to the job\'s cached log at its offset, and does nothing when it is not cached', () => {
     const qc = client();
     qc.setQueryData(['job', 7], { id: 7, log: 'hello ' } as JobWithLog);
-    handleStudioEvent(qc, 'log', { id: 7, text: 'world' });
+    handleStudioEvent(qc, 'log', { id: 7, offset: 6, text: 'world' });
     expect(qc.getQueryData<JobWithLog>(['job', 7])?.log).toBe('hello world');
 
-    handleStudioEvent(qc, 'log', { id: 8, text: 'nope' });
+    handleStudioEvent(qc, 'log', { id: 8, offset: 0, text: 'nope' });
     expect(qc.getQueryData(['job', 8])).toBeUndefined();
+  });
+
+  // The cached log and the event stream can disagree when a GET /api/jobs/<id> was in flight while lines arrived: the
+  // fetched log may already hold the event's text (appending would duplicate it) or miss lines before it (appending
+  // would drop them). Either way the cached copy is refetched instead.
+  test.each([
+    ['already holds the text', 'hello world', 6],
+    ['misses lines before the text', 'hello ', 11],
+  ])('log refetches instead of appending when the cached log %s', (_, cached, offset) => {
+    const qc = client();
+    qc.setQueryData(['job', 7], { id: 7, log: cached } as JobWithLog);
+    const seen: unknown[] = [];
+    qc.invalidateQueries = (filters => {
+      seen.push(filters?.queryKey);
+      return Promise.resolve();
+    }) as typeof qc.invalidateQueries;
+    handleStudioEvent(qc, 'log', { id: 7, offset, text: 'world' });
+    expect(qc.getQueryData<JobWithLog>(['job', 7])?.log).toBe(cached);
+    expect(seen).toEqual([['job', 7]]);
   });
 
   test('library invalidates the renders list', () => {

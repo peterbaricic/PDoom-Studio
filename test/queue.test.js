@@ -139,3 +139,51 @@ test('a chapter chases the shared job through repeated failed retries until one 
   expect(started).toContain(`chapter#${chapter}`);
   open(chapter); await q.idle();
 });
+
+test('log events carry the offset the text was appended at', async () => {
+  const logs = [];
+  events.subscribe(e => e.type === 'log' && logs.push(e.data));
+  const q = createQueue({ db, events, runners: { storyboard: async (job, ctx) => { ctx.log('héllo 🙂\n'); ctx.log('world\n'); } } });
+  q.start();
+  const id = q.enqueue({ kind: 'storyboard', versionId: 'a' });
+  await q.idle();
+  // Offsets count what JSON-decoded strings count (UTF-16 code units), so a client can compare them with its copy.
+  expect(logs).toEqual([{ id, offset: 0, text: 'héllo 🙂\n' }, { id, offset: 'héllo 🙂\n'.length, text: 'world\n' }]);
+  expect(db.getJob(id).log.length).toBe(logs[1].offset + 'world\n'.length);
+});
+
+test('progress events are throttled per job, but the latest progress and every state change still go out', async () => {
+  const jobEvents = [];
+  events.subscribe(e => e.type === 'job' && jobEvents.push(e.data));
+  let release;
+  const q = createQueue({ db, events, progressEveryMs: 50, runners: { render: async (job, ctx) => {
+    for (let i = 1; i <= 100; i++) ctx.progress(i / 200);    // one report per painted frame
+    await new Promise(r => { release = r; });
+  } } });
+  q.start();
+  const id = q.enqueue({ kind: 'render', versionId: 'a' });
+  await tick();
+  // queued, running, and the first progress report; the other 99 are held back.
+  expect(jobEvents.map(j => [j.status, j.progress])).toEqual([['queued', 0], ['running', 0], ['running', .005]]);
+  await new Promise(r => setTimeout(r, 80));
+  // One trailing event, carrying the latest progress.
+  expect(jobEvents.map(j => [j.status, j.progress])).toEqual([['queued', 0], ['running', 0], ['running', .005], ['running', .5]]);
+  release(); await q.idle();
+  expect(jobEvents.at(-1)).toMatchObject({ status: 'done', progress: 1 });
+  expect(jobEvents).toHaveLength(5);
+});
+
+test('a final progress report of 1 is published at once', async () => {
+  const jobEvents = [];
+  events.subscribe(e => e.type === 'job' && jobEvents.push(e.data));
+  let release;
+  const q = createQueue({ db, events, progressEveryMs: 10_000, runners: { render: async (job, ctx) => {
+    ctx.progress(.1); ctx.progress(.2); ctx.progress(1);
+    await new Promise(r => { release = r; });
+  } } });
+  q.start();
+  q.enqueue({ kind: 'render', versionId: 'a' });
+  await tick();
+  expect(jobEvents.map(j => j.progress)).toEqual([0, 0, .1, 1]);
+  release(); await q.idle();
+});
