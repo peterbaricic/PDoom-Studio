@@ -8,15 +8,28 @@ import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { findBrowser, gpuArgs } from '../studio/browser.js';
 import puppeteer from 'puppeteer-core';
-import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch } from './helpers.js';
+import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch, slowTest } from './helpers.js';
 
 // Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
+// Each render.mjs run is a process with a Chrome of its own (nothing to share across processes), and most of its
+// time goes on waiting for the page's network to go idle, so the tests up to the SIGTERM ones are test.concurrent,
+// with at most RUNS_AT_ONCE runs going at a time. Every test keeps its own data, output folders and capture hosts.
+// The SIGTERM tests, which time how fast things stop, run on their own afterwards.
 const root = process.cwd(), T = { timeout: 300000 };
 const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
-const spawn = async (argv, opts) => {
+const RUNS_AT_ONCE = 6;
+let running = 0;
+const waiting = [];
+const spawnNow = async (argv, opts) => {
   const p = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe', ...opts });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
+};
+// A run that launches Chrome waits for a free slot first.
+const spawn = async (argv, opts) => {
+  if (running >= RUNS_AT_ONCE) await new Promise(r => waiting.push(r));
+  running++;
+  try { return await spawnNow(argv, opts); } finally { running--; waiting.shift()?.(); }
 };
 const run = (...a) => spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv() });
 // An MP4's video frame count and each stream's length, from ffprobe.
@@ -32,7 +45,8 @@ const expectExactly = (file, n) => {
   expect(Math.abs(p.video - n / 24)).toBeLessThan(.01);
   expect(Math.abs(p.audio - n / 24)).toBeLessThan(.03);
 };
-const runSandboxed = (sandbox, ...a) => spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv(undefined, { STUDIO_SANDBOX: sandbox }) });
+// (Refused before any browser starts: no slot needed.)
+const runSandboxed = (sandbox, ...a) => spawnNow(['bun', 'render.mjs', ...a], { env: isolatedEnv(undefined, { STUDIO_SANDBOX: sandbox }) });
 
 // A studio job as Claude's Bash tool sees it: a job in a throwaway database, its work folder holding the original's
 // files, and STUDIO_SANDBOX set to that folder.
@@ -47,7 +61,7 @@ function sandboxJob() {
   return { data, jid, dir, env: isolatedEnv(data, { STUDIO_SANDBOX: dir }) };
 }
 
-test('check passes for the original and writes a sheet', async () => {
+slowTest.concurrent('check passes for the original and writes a sheet', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'chk-'));
   const r = await run('--check=5,40,150', `--out=${join(dir, 'sheet.jpg')}`);
   expect(r.out).toContain('CHECK OK');
@@ -55,27 +69,27 @@ test('check passes for the original and writes a sheet', async () => {
   expect(statSync(join(dir, 'sheet.jpg')).size).toBeGreaterThan(10000);
 }, T);
 
-test('check fails for a missing version', async () => {
+slowTest.concurrent('check fails for a missing version', async () => {
   const r = await run('--check=5', '--v=does-not-exist');
   expect(r.code).toBe(1);
   expect(r.err).toContain('CHECK FAILED');
   expect(r.err).toContain('no such version');
 }, T);
 
-test('check fails cleanly instead of crashing when the page cannot be reached', async () => {
+slowTest.concurrent('check fails cleanly instead of crashing when the page cannot be reached', async () => {
   const r = await run('--check=5', '--base=http://127.0.0.1:1');
   expect(r.code).toBe(1);
   expect(r.err).toContain('CHECK FAILED');
 }, T);
 
-test('check fails when the bundled fonts fail to load', async () => {
+slowTest.concurrent('check fails when the bundled fonts fail to load', async () => {
   const r = await spawn(['bun', 'render.mjs', '--check=load'], { env: isolatedEnv(undefined, { STUDIO_TEST_BREAK_FONTS: '1' }) });
   expect(r.code).toBe(1);
   expect(r.err).toContain('CHECK FAILED');
   expect(r.err).toContain('font not loaded');
 }, T);
 
-test('renders a short range of frames and encodes it', async () => {
+slowTest.concurrent('renders a short range of frames and encodes it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'frames-'));
   const f = await run('--frames=40:40.5', '--workers=2', `--frames-dir=${dir}`);
   expect(f.out).toContain('12 frames to render (0 already done)');
@@ -88,21 +102,30 @@ test('renders a short range of frames and encodes it', async () => {
   expectExactly(out, 12);
 }, T);
 
-test('a clip is exactly its frames, with the song cut to match', async () => {
+slowTest.concurrent('a clip is exactly its frames, with the song cut to match', async () => {
   const out = join(mkdtempSync(join(tmpdir(), 'clip-')), 'clip.mp4');
   const c = await run('--clip=40:40.25', `--out=${out}`);
   expect(c.code).toBe(0);
   expectExactly(out, 6);
 }, T);
 
-test('the synthetic key press that arms the navigation guard does not perturb the picture', async () => {
+// The Original's stills as render.mjs paints them, locked down and with its guard gesture: one run, compared by the
+// two tests below (the gesture's, at 5, 40 and 90 s; the lockdown's, at all four).
+let lockedStills = null;
+const stillsAsRendered = () => lockedStills ??= (async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'locked-')), times = [5, 40, 90, 150];
+  return { dir, times, ...await run(`--stills=${times.join(',')}`, `--out=${dir}`) };
+})();
+
+slowTest.concurrent('the synthetic key press that arms the navigation guard does not perturb the picture', async () => {
   // p5 tracks mouse state and would fire mousePressed() from a synthetic click; nothing today reads that, but a
   // keyboard gesture (see render.mjs) was chosen specifically so this holds regardless of what a chapter does.
   // Proof: render the same stills with and without the gesture (RENDER_TEST_NO_GESTURE is a test-only escape
   // hatch) and diff the decoded pixels (see expectPixelsMatch in test/helpers.js for why not raw bytes).
-  const armed = mkdtempSync(join(tmpdir(), 'gesture-on-')), unarmed = mkdtempSync(join(tmpdir(), 'gesture-off-'));
-  const withGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${armed}`], { env: isolatedEnv() });
-  const withoutGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${unarmed}`], { env: isolatedEnv(undefined, { RENDER_TEST_NO_GESTURE: '1' }) });
+  const unarmed = mkdtempSync(join(tmpdir(), 'gesture-off-'));
+  const [withGesture, withoutGesture] = await Promise.all([stillsAsRendered(),
+    spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${unarmed}`], { env: isolatedEnv(undefined, { RENDER_TEST_NO_GESTURE: '1' }) })]);
+  const armed = withGesture.dir;
   expect(withGesture.code).toBe(0);
   expect(withoutGesture.code).toBe(0);
   for (const f of ['t5_00.png', 't40_00.png', 't90_00.png']) {
@@ -112,13 +135,12 @@ test('the synthetic key press that arms the navigation guard does not perturb th
   }
 }, T);
 
-test('the network lockdown leaves the picture as it was: stills match the same frames painted without it', async () => {
+slowTest.concurrent('the network lockdown leaves the picture as it was: stills match the same frames painted without it', async () => {
   // render.mjs's browser (dead proxy, WebRTC policy, resolver rules, request interception, the guard gesture) against a
   // browser launched with the GPU flags alone, both painting the Original from the same server code. If anything in
   // the lockdown kept something the picture needs from loading (the bundled fonts, above all), the typefaces would differ.
   // Pixels are compared with a small tolerance, not byte for byte — see expectPixelsMatch in test/helpers.js for why.
-  const dir = mkdtempSync(join(tmpdir(), 'locked-')), times = [5, 40, 90, 150];
-  const r = await run(`--stills=${times.join(',')}`, `--out=${dir}`);
+  const r = await stillsAsRendered(), { dir, times } = r;
   expect(r.code).toBe(0);
   const db = openDb(join(tempDir(), 'user.db'), { defaultPath: defaultDbPath });
   const srv = serve({ db, root, data: tempDir(), token: 't', events: createEvents(), port: 0 });
@@ -140,7 +162,7 @@ test('the network lockdown leaves the picture as it was: stills match the same f
   }
 }, T);
 
-test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
+test.concurrent('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const outside = join(tmpdir(), 'outside-sheet.jpg');
   const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--sheet=5', `--out=${outside}`);
@@ -149,28 +171,28 @@ test('sandbox: an --out outside STUDIO_SANDBOX is refused', async () => {
   expect(existsSync(outside)).toBe(false);
 });
 
-test('sandbox: --chrome is refused', async () => {
+test.concurrent('sandbox: --chrome is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, '--chrome=/bin/echo');
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
 });
 
-test('sandbox: a non-localhost --base is refused', async () => {
+test.concurrent('sandbox: a non-localhost --base is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, '--check=5', '--base=https://example.com');
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
 });
 
-test('sandbox: a --work that does not match the sandboxed job is refused', async () => {
+test.concurrent('sandbox: a --work that does not match the sandboxed job is refused', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const r = await runSandboxed(sandbox, '--work=some-other-job', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`);
   expect(r.code).toBe(2);
   expect(r.err).toContain('sandbox');
 });
 
-test('sandbox: a duplicated --work is refused even if the last value matches', async () => {
+test.concurrent('sandbox: a duplicated --work is refused even if the last value matches', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   const r = await runSandboxed(sandbox, '--work=some-other-job', '--sheet=5', `--out=${join(sandbox, 'sheet.jpg')}`, `--work=${basename(sandbox)}`);
   expect(r.code).toBe(2);
@@ -178,7 +200,7 @@ test('sandbox: a duplicated --work is refused even if the last value matches', a
   expect(existsSync(join(sandbox, 'sheet.jpg'))).toBe(false);
 });
 
-test('sandbox: --sheet, --poster and --stills need an --out', async () => {
+test.concurrent('sandbox: --sheet, --poster and --stills need an --out', async () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'sbx-'));
   for (const mode of ['--sheet=5', '--poster=5', '--stills=5']) {
     const r = await runSandboxed(sandbox, `--work=${basename(sandbox)}`, mode);
@@ -187,7 +209,7 @@ test('sandbox: --sheet, --poster and --stills need an --out', async () => {
   }
 });
 
-test('sandbox: CHROME_PATH is ignored', async () => {
+slowTest.concurrent('sandbox: CHROME_PATH is ignored', async () => {
   const { jid, dir, env } = sandboxJob();
   const r = await spawn(['bun', 'render.mjs', `--work=${jid}`, '--sheet=5', `--out=${join(dir, 'sheet.jpg')}`], { env: { ...env, CHROME_PATH: '/usr/bin/false' } });
   expect(r.err).toBe('');
@@ -195,7 +217,7 @@ test('sandbox: CHROME_PATH is ignored', async () => {
   expect(statSync(join(dir, 'sheet.jpg')).size).toBeGreaterThan(10000);
 }, T);
 
-test("sandbox: the command Claude may run ignores a bunfig.toml and .env planted in its work folder", async () => {
+slowTest.concurrent("sandbox: the command Claude may run ignores a bunfig.toml and .env planted in its work folder", async () => {
   const { data, jid, dir, env } = sandboxJob(), marker = join(data, 'PWNED_BY_PRELOAD.txt');
   writeFileSync(join(dir, 'p.js'), `require('fs').writeFileSync(${JSON.stringify(marker)}, 'pwned');`);
   writeFileSync(join(dir, 'bunfig.toml'), 'preload = ["./p.js"]\n');
@@ -215,7 +237,7 @@ test("sandbox: the command Claude may run ignores a bunfig.toml and .env planted
   expect(statSync(join(dir, 'sheet.jpg')).size).toBeGreaterThan(10000);
 }, T);
 
-test('frames: a chapter that fails to load fails the render instead of painting it as missing', async () => {
+slowTest.concurrent('frames: a chapter that fails to load fails the render instead of painting it as missing', async () => {
   const data = tempDir(), db = openDb(join(data, 'user.db')), frames = join(data, 'frames');
   db.createVersion({ id: 'broken' });
   db.writeFiles('broken', [{ path: 'ch/c01.js', content: "throw new Error('boom');" }], { source: 'manual' });
@@ -226,7 +248,7 @@ test('frames: a chapter that fails to load fails the render instead of painting 
   expect(existsSync(frames) ? readdirSync(frames).filter(n => n.endsWith('.jpg')) : []).toEqual([]);
 }, T);
 
-test('a chapter cannot navigate away, fetch out, or pop a window to an external host', async () => {
+slowTest.concurrent('a chapter cannot navigate away, fetch out, or pop a window to an external host', async () => {
   // A stand-in "external host": a second loopback port, so it's a different origin than the renderer's own
   // w0.localhost, with nothing else pointing at it. (Not 127.0.0.2: macOS doesn't alias the whole 127.0.0.0/8 like
   // Linux does, so only 127.0.0.1 is bindable without extra setup — a different port is a different origin too.)
@@ -255,7 +277,7 @@ test('a chapter cannot navigate away, fetch out, or pop a window to an external 
   expect(hits).toEqual([]);
 }, T);
 
-test('a chapter cannot reach an external host through a service worker, a shared worker or a worker', async () => {
+slowTest.concurrent('a chapter cannot reach an external host through a service worker, a shared worker or a worker', async () => {
   // Workers are separate targets: their requests never pass through render.mjs's page-level interception, and a
   // worker script served from /v/ carries no CSP of its own. So each variant below re-runs this very chapter file
   // as a worker, which then fetches the capture server. That includes registering a service worker from a
@@ -297,7 +319,7 @@ test('a chapter cannot reach an external host through a service worker, a shared
   expect(hits).toEqual([]);
 }, T);
 
-test('a chapter cannot reach another host through a popup, speculation rules, a link hint or WebRTC', async () => {
+slowTest.concurrent('a chapter cannot reach another host through a popup, speculation rules, a link hint or WebRTC', async () => {
   // Each attempt aims at its own stand-in host (see captureHosts), so a hit names the attempt that got through:
   // (a) document.open with three arguments, which is window.open by another name; (b) a target=_blank link, clicked;
   // (c) a same-origin popup of a page served without studio.html's policy, then that window's fetch, Image and
@@ -360,22 +382,22 @@ else {
   expect(cap.hits).toEqual({});
 }, T);
 
-test('without USER_DB, the in-process server reads user.db in STUDIO_DATA, or a not-yet-migrated studio.db there', async () => {
+slowTest.concurrent('without USER_DB, the in-process server reads user.db in STUDIO_DATA, or a not-yet-migrated studio.db there', async () => {
   const chapter = "chapter('one', 0, 23, [[0, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);";
-  for (const name of ['user.db', 'studio.db']) {
+  await Promise.all(['user.db', 'studio.db'].map(async name => {
     const data = tempDir(), db = openDb(join(data, name));
     db.createVersion({ id: 'in-data-folder' });
     db.writeFiles('in-data-folder', [{ path: 'ch/c01.js', content: chapter }], { source: 'manual' });
     db.close();
     const { USER_DB, STUDIO_DB, ...env } = isolatedEnv(data);
     const r = await spawn(['bun', 'render.mjs', '--v=in-data-folder', '--check=5'], { env });
-    expect(r.out).toContain('CHECK OK');
-    expect(r.code).toBe(0);
+    expect([name, r.out]).toEqual([name, expect.stringContaining('CHECK OK')]);
+    expect([name, r.code]).toEqual([name, 0]);
     expect(readdirSync(data).filter(n => n.endsWith('.db'))).toEqual([name]);   // and made no other database there
-  }
+  }));
 }, T);
 
-test('a data: URI image still renders under request interception', async () => {
+slowTest.concurrent('a data: URI image still renders under request interception', async () => {
   // Chrome reports a data: URI as a "request" to Fetch-domain interception (so it does reach the handler below),
   // but it never actually goes over the network — abort()/continue() has no effect on it either way, and it loads
   // regardless. Verified directly against a bare interception handler before writing this; this test proves it
@@ -411,7 +433,7 @@ async function startUntil(argv, env, line) {
   return p;
 }
 
-test('SIGTERM during encoding stops ffmpeg too', async () => {
+slowTest('SIGTERM during encoding stops ffmpeg too', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'enc-'));
   // A minute of 1080p frames: encoding them takes ffmpeg several seconds even on a fast machine.
   Bun.spawnSync(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=24', '-frames:v', '1440', '-q:v', '31',
@@ -425,7 +447,7 @@ test('SIGTERM during encoding stops ffmpeg too', async () => {
   expect(await gone(kids[0], 1500)).toBe(true);
 }, T);
 
-test('SIGTERM while painting frames closes the browser and exits', async () => {
+slowTest('SIGTERM while painting frames closes the browser and exits', async () => {
   const frames = mkdtempSync(join(tmpdir(), 'frames-'));
   const p = await startUntil(['bun', 'render.mjs', '--frames=0:156.6', '--workers=1', `--frames-dir=${frames}`], isolatedEnv(), 'frames to render');
   const kids = children(p.pid);

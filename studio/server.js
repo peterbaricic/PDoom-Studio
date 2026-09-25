@@ -85,7 +85,10 @@ if (dev) {
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root });
-const claude = createClaudeRunner({ db, root, data, baseUrl, events });
+// STUDIO_TEST_SKIP_CHECK exists only for test/ui.test.js, whose fake Claude writes trivial chapters: its jobs import
+// without render.mjs's check (a Chrome of its own per job), which test/claude-job.test.js runs for real instead.
+const skipCheck = process.env.STUDIO_TEST_SKIP_CHECK ? { validate: async () => [] } : {};
+const claude = createClaudeRunner({ db, root, data, baseUrl, events, ...skipCheck });
 const { render, thumbs } = createRenderRunner({ db, root, data, events, frames });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 const srv = serve({ db, root, data, token, queue, events, port, frames, dev });

@@ -1,8 +1,33 @@
+import { test } from 'bun:test';
 import { mkdtempSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { inflateSync } from 'node:zlib';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
+
+// `bun run test:fast` sets STUDIO_FAST_TESTS: every test that launches Chrome (directly, through render.mjs, or
+// through a painting pool) or encodes with ffmpeg is written as slowTest, and skipped then; bun's summary counts them
+// under "skip" (test/preload.js says so up front too). A plain `bun test` runs them all. A beforeAll that launches
+// Chrome for such tests returns early under FAST_TESTS.
+export const FAST_TESTS = !!process.env.STUDIO_FAST_TESTS;
+export const slowTest = test.skipIf(FAST_TESTS);
+
+// Closes a test file's browser (or the promise of one) without letting a hung Chrome hang the run: after `ms` its
+// process is killed instead.
+export async function closeBrowser(browser, ms = 20000) {
+  const b = await Promise.resolve(browser).catch(() => null);
+  if (!b) return;
+  await Promise.race([b.close(), Bun.sleep(ms)]).catch(() => {});
+  b.process()?.kill('SIGKILL');
+}
+
+// One browser shared by the tests of a file that need the same launch flags: launched on first use (so a file whose
+// tests are all skipped never starts it), closed by closeBrowser in the file's afterAll. Tests take fresh pages of
+// it and close them; nothing is kept in a shared page.
+export function sharedBrowser(launch) {
+  let launched = null;
+  return { get: () => (launched ??= launch()), close: () => closeBrowser(launched) };
+}
 
 export const goodStoryboard = () => [
   '---', 'title: The P(doom) Bake-Off', 'logline: Clawd and the Researcher bake a superintelligence.', '---', '',

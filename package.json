@@ -10,6 +10,7 @@
     "test:web": "VITE_CONFIG_NATIVE_IGNORE_WARNING=true vitest run --config studio/web/vitest.config.ts",
     "render": "bun render.mjs",
     "test": "bun test",
+    "test:fast": "STUDIO_FAST_TESTS=1 bun test",
     "get-browser": "bunx @puppeteer/browsers install chrome-headless-shell@stable --path .browsers"
   },
   "keywords": [],

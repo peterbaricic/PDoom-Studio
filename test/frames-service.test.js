@@ -11,7 +11,7 @@ import { createPool } from '../studio/frames/pool.js';
 import { createFrameService } from '../studio/frames/service.js';
 import { N, engineHash, segmentKeys, currentShas, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { tempDir, tempDefaultDb, captureHosts } from './helpers.js';
+import { tempDir, tempDefaultDb, captureHosts, slowTest } from './helpers.js';
 
 // One sealed painting pool for the file, over a throwaway data root and user database holding small versions whose
 // chapters paint in a few tens of milliseconds (the Original's take up to a second a frame).
@@ -106,7 +106,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await pool?.close(); srv?.stop(); cap?.stop(); });
 
-test('a frame is painted once, then served from the cache', async () => {
+slowTest('a frame is painted once, then served from the cache', async () => {
   const before = pool.stats().painted;
   // two requests at once coalesce into one paint
   const [a, b] = await Promise.all([frameOf('tiny', 48), frameOf('tiny', 48)]);
@@ -145,7 +145,7 @@ test('a frame is painted once, then served from the cache', async () => {
   expect(Math.abs(cache.usedBytes() - used)).toBeLessThan(used / 100);
 }, T);
 
-test('revising a chapter resets only that chapter\'s coverage; the other chapters stay cached (Review Focus 2)', async () => {
+slowTest('revising a chapter resets only that chapter\'s coverage; the other chapters stay cached (Review Focus 2)', async () => {
   const seen = [];
   const off = events.subscribe(e => { if (e.type === 'frames' && e.data.versionId === 'rev') seen.push({ at: Date.now(), ...e.data }); });
   try {
@@ -184,7 +184,7 @@ test('revising a chapter resets only that chapter\'s coverage; the other chapter
   } finally { off(); }
 }, T);
 
-test('the Original\'s curtain call records its CAST reads as dependencies; changing one of those chapters invalidates only the frames that read it', async () => {
+slowTest('the Original\'s curtain call records its CAST reads as dependencies; changing one of those chapters invalidates only the frames that read it', async () => {
   // t = 145 s: the whole cast bows (entries of chapters 2, 3, 4, 5 and 7); t = 140.625 s: only the shoggoth has run on
   // (chapter 2's); t = 153 s: the curtain, no guests; t = 138 s: chapter 8's basilisk puppet (chapter 4's).
   const [bows, runOn, curtain, puppet] = [3480, 3375, 3672, 3312];
@@ -241,7 +241,7 @@ test('the Original\'s curtain call records its CAST reads as dependencies; chang
   expect(pool.stats().painted - before).toBe(2);
 }, T);
 
-test('CAST entries a chapter takes while loading are dependencies of its frames, through wrappers too', async () => {
+slowTest('CAST entries a chapter takes while loading are dependencies of its frames, through wrappers too', async () => {
   const [nine, eight, two] = [3500, 3100, 600];
   for (const r of await Promise.all([nine, eight, two].map(i => frameOf('loadcast', i, 'prefetch')))) expect(r.file).toBeDefined();
   const keys = keysOf('loadcast'), shas = currentShas(snapshotOf(db, 'loadcast'));
@@ -257,7 +257,7 @@ test('CAST entries a chapter takes while loading are dependencies of its frames,
   expect(service.coverage('loadcast').ranges).toEqual([]);   // chapter 2's own key changed, the rest depended on it
 }, T);
 
-test('reading a CAST entry nobody defined, or listing them, depends on the whole set of chapters', async () => {
+slowTest('reading a CAST entry nobody defined, or listing them, depends on the whole set of chapters', async () => {
   const [nine, eight] = [3500, 3100];
   for (const r of await Promise.all([nine, eight].map(i => frameOf('casty', i, 'prefetch')))) expect(r.file).toBeDefined();
   const keys = keysOf('casty'), shas = currentShas(snapshotOf(db, 'casty'));
@@ -272,8 +272,7 @@ test('reading a CAST entry nobody defined, or listing them, depends on the whole
   expect(service.coverage('casty').ranges).toEqual([[600, 600]]);
 }, T);
 
-test('a chapter that throws, one that never finishes and one whose script throws while loading each break only their own segment', async () => {
-  const t0 = Date.now();
+slowTest('a chapter that throws, one that never finishes and one whose script throws while loading each break only their own segment', async () => {
   // A timeout's break lasts brokenTtlMs (4 s here) from when its answer arrives, so it's looked at right then: the
   // other four requests can finish any time later (a slow machine loads and paints slowly; the timeout is wall-clock).
   let loopingNow, coverageNow;
@@ -290,7 +289,8 @@ test('a chapter that throws, one that never finishes and one whose script throws
   expect(failsToLoad.broken).toContain('chapter four failed to load');
   expect(fine.file).toBeDefined();
   expect(alsoFine.file).toBeDefined();
-  expect(Date.now() - t0).toBeLessThan(30000);
+  // (No wall-clock bound on all this: the looping chapter's answer above is the 2 s paint timeout's own, and a busy
+  // machine can take any time over the others.)
 
   // a chapter's own errors answer at once, without painting, until their key changes
   const before = pool.stats().painted + pool.stats().failures;
@@ -317,7 +317,7 @@ test('a chapter that throws, one that never finishes and one whose script throws
   expect((await frameOf('bad', 601)).file).toBeDefined();
 }, T);
 
-test('a paint that times out stays broken for brokenTtlMs from when its answer arrives, not from the timeout', async () => {
+slowTest('a paint that times out stays broken for brokenTtlMs from when its answer arrives, not from the timeout', async () => {
   // Closing the stuck page comes first (Chrome takes about half a second to end a looping renderer here, up to the 5 s
   // closePage allows); that time used to come off the break, so a slow close could hand over a break already over.
   const snap = snapshotOf(db, 'spin');
@@ -329,7 +329,7 @@ test('a paint that times out stays broken for brokenTtlMs from when its answer a
   expect(left).toBeLessThanOrEqual(4000);
 }, T);
 
-test('a chapter that never finishes loading breaks only itself, fails fast after that, and holds no more than one page', async () => {
+slowTest('a chapter that never finishes loading breaks only itself, fails fast after that, and holds no more than one page', async () => {
   // a pool of its own, with a short load timeout (the shared one keeps the default, so a slow machine's loads aren't
   // taken for hangs)
   const own = createPool({ port, baseUrl: `http://localhost:${port}`, painters: PAINTERS, loadTimeoutMs: 5000,
@@ -337,34 +337,35 @@ test('a chapter that never finishes loading breaks only itself, fails fast after
   const svc = createFrameService({ db, cache, pool: own, events, root });
   const get = async (v, i, prio = 'prefetch') => { const r = svc.frame(v, i, prio); return r.pending ? r.pending : r; };
   try {
-    const t0 = Date.now();
     // more requests for the snapshot than there are painters, queued in one go (a prefetch run, then one more)
     expect(svc.prefetch('hangload', 1200, 6)).toBe(6);
     const hangs = get('hangload', 1206), fine = get('hangload', 24, 'render');
+    let hangAnswered = false;
+    hangs.then(() => { hangAnswered = true; });
     // its first load runs alone, on one page
     await until(() => own.stats().loads > 0);
     await Bun.sleep(500);
     expect(own.stats().loads).toBe(1);
     expect(own.stats().painting).toBe(1);
-    // meanwhile another version's preview paints: the hanging load holds one page, not every one
-    const p0 = Date.now();
+    // meanwhile another version's preview paints: the hanging load holds one page, not every one, so the preview is
+    // answered while that load still hangs (were every page held, it would be answered only once the load timed out)
     expect((await get('tiny', 130, 'preview')).file).toBeDefined();
-    expect(Date.now() - p0).toBeLessThan(4000);
+    expect(hangAnswered).toBe(false);
     expect((await hangs).broken).toBe('chapter 3 did not finish loading within 5 s');
     // the version's other chapters load without it and paint
     expect((await fine).file).toBeDefined();
-    expect(Date.now() - t0).toBeLessThan(30000);
-    // and from now on the chapter fails at once, without loading a page
-    const loads = own.stats().loads, t1 = Date.now();
-    expect((await get('hangload', 1201)).broken).toBe('chapter 3 did not finish loading within 5 s');
-    expect(svc.frame('hangload', 1202).broken).toBe('chapter 3 did not finish loading within 5 s');
-    expect(Date.now() - t1).toBeLessThan(500);
+    // and from now on the chapter fails at once, without loading a page: answered broken there and then, not pending
+    const loads = own.stats().loads;
+    for (const i of [1201, 1202]) {
+      const r = svc.frame('hangload', i);
+      expect([i, r.pending, r.broken]).toEqual([i, undefined, 'chapter 3 did not finish loading within 5 s']);
+    }
     expect(own.stats().loads).toBe(loads);
     expect(svc.coverage('hangload').broken).toEqual([{ chapter: 3, error: 'chapter 3 did not finish loading within 5 s' }]);
   } finally { await own.close(); }
 }, T);
 
-test('a version whose page fails to load fails on its own, not other versions sharing its segments', async () => {
+slowTest('a version whose page fails to load fails on its own, not other versions sharing its segments', async () => {
   expect(keysOf('sound')[1]).toBe(keysOf('sabotaged')[1]);
   // (chapter 1 is the same as other versions' here, so frames other tests painted are cached for it already: these
   // two aren't)
@@ -377,13 +378,13 @@ test('a version whose page fails to load fails on its own, not other versions sh
   expect(service.frame('sabotaged', 70).file).toBeDefined();
 }, T);
 
-test('a chapter cannot reach another host from a painting page, while loading or painting', async () => {
+slowTest('a chapter cannot reach another host from a painting page, while loading or painting', async () => {
   expect((await frameOf('leaky', 30, 'prefetch')).file).toBeDefined();
   await Bun.sleep(1500);
   expect(cap.hits).toEqual({});
 }, T);
 
-test('rapid preview requests supersede each other: at most one queued per version, and the latest painted first (Review Focus 3)', async () => {
+slowTest('rapid preview requests supersede each other: at most one queued per version, and the latest painted first (Review Focus 3)', async () => {
   const from = painted.length, requests = [];
   for (let i = 200; i < 250; i++) requests.push(service.frame('tiny', i, 'preview'));
   const queued = pool.stats().queued.filter(q => q.versionId === 'tiny' && q.prio === 'preview');
@@ -398,7 +399,7 @@ test('rapid preview requests supersede each other: at most one queued per versio
   expect(outcomes[49].file).toBeDefined();
 }, T);
 
-test('a render backlog delays a preview request by at most the frame being painted', async () => {
+slowTest('a render backlog delays a preview request by at most the frame being painted', async () => {
   // one painter, so the order is exact
   const onePainted = [];
   const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
@@ -445,7 +446,7 @@ test('a render backlog delays a preview request by at most the frame being paint
   } finally { await one.close(); }
 }, T);
 
-test('a paint-ahead sweep paints at the lowest priority, a few frames queued at a time, and a new one re-aims it', async () => {
+slowTest('a paint-ahead sweep paints at the lowest priority, a few frames queued at a time, and a new one re-aims it', async () => {
   // one painter, so the order is exact
   const order = [];
   const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
@@ -486,7 +487,7 @@ test('a paint-ahead sweep paints at the lowest priority, a few frames queued at 
   } finally { await one.close(); }
 }, T);
 
-test('a paint-ahead sweep goes on through writes: past one that leaves its keys alone, and under a changed chapter\'s new key', async () => {
+slowTest('a paint-ahead sweep goes on through writes: past one that leaves its keys alone, and under a changed chapter\'s new key', async () => {
   const painted = [];
   const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
     onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
@@ -511,7 +512,7 @@ test('a paint-ahead sweep goes on through writes: past one that leaves its keys 
   } finally { await one.close(); }
 }, T);
 
-test('a paint-ahead sweep replaces every version\'s earlier one: only the page being viewed needs it', async () => {
+slowTest('a paint-ahead sweep replaces every version\'s earlier one: only the page being viewed needs it', async () => {
   const painted = [];
   const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
     onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
@@ -531,7 +532,7 @@ test('a paint-ahead sweep replaces every version\'s earlier one: only the page b
   } finally { await one.close(); }
 }, T);
 
-test('a deleted version\'s queued paints are dropped at every priority, and its sweep stops; other versions\' stay', async () => {
+slowTest('a deleted version\'s queued paints are dropped at every priority, and its sweep stops; other versions\' stay', async () => {
   const painted = [];
   const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
     onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
@@ -560,7 +561,7 @@ test('a deleted version\'s queued paints are dropped at every priority, and its 
   } finally { await one.close(); }
 }, T);
 
-test('a paint-ahead sweep stops at the first chapter that is not written or is broken', async () => {
+slowTest('a paint-ahead sweep stops at the first chapter that is not written or is broken', async () => {
   db.createVersion({ id: 'sweepy' });
   db.writeFiles('sweepy', [
     { path: 'ch/c01.js', content: fastChapter(1) },
@@ -576,7 +577,7 @@ test('a paint-ahead sweep stops at the first chapter that is not written or is b
   await until(() => !pool.stats().queued.some(q => q.prio === 'background'), 60000);
 }, T);
 
-test('POST /api/frames/<v>/paint-ahead: UI hosts, the token, a known version and a frame index', async () => {
+slowTest('POST /api/frames/<v>/paint-ahead: UI hosts, the token, a known version and a frame index', async () => {
   const post = (body, { host = `localhost:${port}`, tok = token, id = 'tiny' } = {}) => at(host, `/api/frames/${id}/paint-ahead`, {
     method: 'POST', body: JSON.stringify(body),
     headers: { origin: `http://localhost:${port}`, 'content-type': 'application/json', ...(tok && { 'x-studio-token': tok }) },
@@ -591,7 +592,7 @@ test('POST /api/frames/<v>/paint-ahead: UI hosts, the token, a known version and
   await until(() => service.coverage('tiny').ranges.some(([a, b]) => a <= 3740 && b >= 3758), 60000);
 }, T);
 
-test('a request held past the hold time is answered 202, to be asked again', async () => {
+slowTest('a request held past the hold time is answered 202, to be asked again', async () => {
   const app = createApp({ db, root, data, token, events, port, frames: service, frameHoldMs: 100 });
   const get = path => app.fetch(new Request(`http://localhost:${port}${path}`, { headers: { host: `localhost:${port}` } }));
   const res = await get('/api/frames/slow/48.jpg');
@@ -608,7 +609,7 @@ test('missing versions, chapters and frames are 404s', async () => {
   expect((await fetch(`${srv.url}/api/coverage/nope`)).status).toBe(404);
 }, T);
 
-test('the frame, coverage and cache routes are served on UI hosts only', async () => {
+slowTest('the frame, coverage and cache routes are served on UI hosts only', async () => {
   const w0 = `w0.localhost:${port}`, headers = { origin: `http://localhost:${port}`, 'x-studio-token': token };
   for (const path of ['/api/frames/tiny/48.jpg', '/api/coverage/tiny', '/api/cache']) {
     expect((await at(w0, path)).status).toBe(404);
@@ -617,7 +618,7 @@ test('the frame, coverage and cache routes are served on UI hosts only', async (
   expect((await at(w0, '/api/cache/clear', { method: 'POST', headers })).status).toBe(404);
 }, T);
 
-test('clearing the cache needs the token', async () => {
+slowTest('clearing the cache needs the token', async () => {
   const url = `${srv.url}/api/cache/clear`, origin = srv.url;
   expect((await fetch(url, { method: 'POST', headers: { origin } })).status).toBe(403);
   expect((await fetch(url, { method: 'POST', headers: { origin, 'x-studio-token': 'wrong' } })).status).toBe(403);

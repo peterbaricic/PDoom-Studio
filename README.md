@@ -141,9 +141,14 @@ the GPU backend (Metal on macOS, D3D11 on Windows).
 
 ```bash
 bun test               # the server, engine, renderer and end-to-end tests (a few minutes: they drive Chrome)
+bun run test:fast      # the same without the tests that launch Chrome or encode with ffmpeg (seconds)
 bun run test:web       # the web UI's component tests (Vitest)
 bun run typecheck      # the web UI's TypeScript
 ```
+
+`test:fast` is for quick iteration: it sets `STUDIO_FAST_TESTS=1`, which skips every test written as `slowTest`
+(see `test/helpers.js`), and says so when it starts; bun's summary counts them under "skip". Run the full `bun test`
+before you commit.
 
 The tests never call the real Claude: every `bun test` process uses `test/fake-claude.js` (see `test/preload.js`).
 They run on throwaway data folders and copies of the databases, never on your own.

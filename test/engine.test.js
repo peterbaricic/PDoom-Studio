@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, afterAll } from 'bun:test';
+import { expect, beforeAll, afterAll } from 'bun:test';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
@@ -6,27 +6,32 @@ import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import puppeteer from 'puppeteer-core';
 import { launchBrowser, findBrowser, browserArgs, gpuArgs, HOST_RESOLVER_RULES } from '../studio/browser.js';
-import { tempDir, tempDefaultDb, captureHosts } from './helpers.js';
+import { tempDir, tempDefaultDb, captureHosts, slowTest, sharedBrowser, closeBrowser } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
-let db, srv, devSrv, browser;
+// One browser for the file with launchBrowser's flags for srv's port (every test that opens studio.html on srv), and one
+// with the GPU flags alone (the tests that stand in for the user's own browser). Each test takes fresh pages of them.
+// The --dev server's browser (its own port), the bare resolver-rules one and the net-logging one are launched by the
+// one test that needs each.
+let db, srv, devSrv;
+const main = sharedBrowser(() => launchBrowser({ port: srv.port }));
+const plainBrowser = sharedBrowser(() => puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() }));
 beforeAll(async () => {
   db = openDb(':memory:', { defaultPath: tempDefaultDb() });
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
   // The same studio as with --dev, which alone serves the studio.html scrubber (studio.html without ?render).
   devSrv = serve({ db, root, data, token: 't', events: createEvents(), port: 0, dev: true });
-  browser = await launchBrowser({ port: srv.port });
 });
-// Closing the browser can take a while on a busy machine; never long enough to fail the file over it.
+// Closing a browser can take a while on a busy machine; never long enough to fail the file over it.
 afterAll(async () => {
-  await Promise.race([browser?.close(), Bun.sleep(20000)]).catch(() => {});
-  browser?.process()?.kill('SIGKILL');
+  await Promise.all([main.close(), plainBrowser.close()]);
   srv?.stop();
   devSrv?.stop();
 }, 30000);
 
 // Opened on the studio's own origin, as a user would; the server sends studio.html to w0.localhost.
-async function open(query, b = browser) {
+async function open(query, b) {
+  b ??= await main.get();
   const page = await b.newPage(), errors = [], messages = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => messages.push(m.text()));
@@ -35,7 +40,7 @@ async function open(query, b = browser) {
   return { page, errors, messages };
 }
 
-test('loads the original by default on w0.localhost and renders a frame, within its content security policy', async () => {
+slowTest('loads the original by default on w0.localhost and renders a frame, within its content security policy', async () => {
   const { page, errors, messages } = await open('');
   expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?render`);
   expect(await page.evaluate(() => [CH.length, VERSION.id, ENGINE.wipes])).toEqual([9, 'original', true]);
@@ -47,8 +52,8 @@ test('loads the original by default on w0.localhost and renders a frame, within 
   await page.close();
 }, T);
 
-test('the bundled fonts load, and studio.html makes no request to any non-loopback host', async () => {
-  const page = await browser.newPage(), requests = [];
+slowTest('the bundled fonts load, and studio.html makes no request to any non-loopback host', async () => {
+  const page = await (await main.get()).newPage(), requests = [];
   page.on('request', r => requests.push(r.url()));
   await page.goto(`${srv.url}/studio.html?render`);
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
@@ -59,9 +64,9 @@ test('the bundled fonts load, and studio.html makes no request to any non-loopba
   await page.close();
 }, T);
 
-test('the launched browser goes direct only to the studio port; everything else hits a dead proxy', async () => {
+slowTest('the launched browser goes direct only to the studio port; everything else hits a dead proxy', async () => {
   const cap = await captureHosts(['other-port']), otherPort = cap.port('other-port');
-  const probe = await browser.newPage();
+  const probe = await (await main.get()).newPage();
   await probe.goto(`${srv.url}/api/song`);   // any page on the studio's own origin (not /api/health: that asks the Claude CLI)
   const failures = [];
   probe.on('requestfailed', r => failures.push(`${new URL(r.url()).host} ${r.failure()?.errorText}`));
@@ -83,7 +88,7 @@ test('the launched browser goes direct only to the studio port; everything else 
   expect(cap.hits).toEqual({});
 }, T);
 
-test('behind the proxy, --host-resolver-rules still refuses to resolve any host outside the allow-list', async () => {
+slowTest('behind the proxy, --host-resolver-rules still refuses to resolve any host outside the allow-list', async () => {
   // The proxy means Chrome never resolves a proxied host itself, so the rules can't be seen at work through the
   // launched browser; they're checked on their own here (and that launchBrowser passes them, below).
   const bare = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: ['--host-resolver-rules=' + HOST_RESOLVER_RULES] });
@@ -99,10 +104,10 @@ test('behind the proxy, --host-resolver-rules still refuses to resolve any host 
   } finally {
     await bare.close();
   }
-  expect(browser.process().spawnargs).toContain('--host-resolver-rules=' + HOST_RESOLVER_RULES);
+  expect((await main.get()).process().spawnargs).toContain('--host-resolver-rules=' + HOST_RESOLVER_RULES);
 }, T);
 
-test('a chapter cannot leak data through dns-prefetch/preconnect, under the same network lockdown that loads the bundled fonts', async () => {
+slowTest('a chapter cannot leak data through dns-prefetch/preconnect, under the same network lockdown that loads the bundled fonts', async () => {
   // Chrome's net-log records every lookup its host resolver makes: the chapter's injected hostname must never reach
   // it (the proxy means none is needed, and the resolver rules would answer NOTFOUND without a real query), while a
   // lookup for the studio's own loopback host does — which shows the log really does record lookups. The same flags
@@ -133,7 +138,7 @@ test('a chapter cannot leak data through dns-prefetch/preconnect, under the same
   expect(looked.some(p => p.includes('localhost'))).toBe(true);
 }, T);
 
-test('loads a database version with its engine options', async () => {
+slowTest('loads a database version with its engine options', async () => {
   db.createVersion({ id: 'mini', options: { wipes: false, cornerMeter: false } });
   db.writeFiles('mini', [
     { path: 'shared.js', content: 'const MINI = { col: PAL.rose };' },
@@ -146,7 +151,7 @@ test('loads a database version with its engine options', async () => {
   await page.close();
 }, T);
 
-test('loads a work folder, and reports broken code', async () => {
+slowTest('loads a work folder, and reports broken code', async () => {
   db.createVersion({ id: 'broken' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'broken', params: { chapter: 1 } });
   const dir = join(data, '.studio/work', String(jid));
@@ -157,15 +162,15 @@ test('loads a work folder, and reports broken code', async () => {
   await page.close();
 }, T);
 
-test('an unknown version sets loadError', async () => {
+slowTest('an unknown version sets loadError', async () => {
   const { page } = await open('v=nope');
   expect(await page.evaluate(() => window.loadError)).toContain('no such version');
   await page.close();
 }, T);
 
-test('without ?render, studio.html is a scrubber that paints the requested version, served only with --dev', async () => {
+slowTest('without ?render, studio.html is a scrubber that paints the requested version, served only with --dev', async () => {
   // Without --dev there is none, on either host: chapter code never runs in the user's browser.
-  const off = await browser.newPage();
+  const off = await (await main.get()).newPage();
   expect((await off.goto(`${srv.url}/studio.html?v=mini&t=5`)).status()).toBe(404);
   expect((await off.goto(`http://w0.localhost:${srv.port}/studio.html?v=mini&t=5`)).status()).toBe(404);
   expect(await off.evaluate(() => typeof window.paintAt)).toBe('undefined');
@@ -181,12 +186,11 @@ test('without ?render, studio.html is a scrubber that paints the requested versi
     expect(await page.evaluate(() => [VERSION.id, document.getElementById('tt').textContent.split(' ')[0]])).toEqual(['mini', '5.00s']);
     expect(errors).toEqual([]);
   } finally {
-    await Promise.race([devBrowser.close(), Bun.sleep(10000)]).catch(() => {});
-    devBrowser.process()?.kill('SIGKILL');
+    await closeBrowser(devBrowser, 10000);
   }
 }, T);
 
-test("in the user's own browser (no proxy, no request interception), the scrubber's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
+slowTest("in the user's own browser (no proxy, no request interception), the scrubber's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
   // The studio.html scrubber (--dev only) runs chapter code in whatever browser opens it, where none of launchBrowser's
   // flags or render.mjs's interception apply: only what the server sends (the CSP and its sandbox) and what
   // src/loader.js does before the version's scripts run. So this opens the scrubber in a browser launched with the
@@ -221,12 +225,12 @@ Object.assign(Event.prototype, { preventDefault });
 Object.assign(EventTarget.prototype, { addEventListener });
 attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh'; m.content = '0;url=' + E['nav-meta'] + '/nav-meta'; document.head.append(m); });
 ` }], { source: 'manual' });
-  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
-  let rendering, state;
-  const popups = [];
+  const plain = await plainBrowser.get();
+  let rendering, state, page;
+  const popups = [], onTarget = t => { if (t.type() === 'page') popups.push(t.url()); };
   try {
-    const page = await plain.newPage();
-    plain.on('targetcreated', t => { if (t.type() === 'page') popups.push(t.url()); });
+    page = await plain.newPage();
+    plain.on('targetcreated', onTarget);
     await page.goto(`${devSrv.url}/studio.html?v=b-escapee`);
     // The scrubber comes up and goes on painting frames, its chapter's attempts notwithstanding.
     rendering = await page.waitForFunction(() => document.getElementById('tt')?.textContent.includes('ms/frame'), { timeout: 60000 })
@@ -234,7 +238,8 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
     await Bun.sleep(1500);
     state = await page.evaluate(() => [window.CHAPTER_RAN === true, window.INLINE_RAN === true, window.RTC_TYPE, location.pathname]).catch(e => e.message);
   } finally {
-    await plain.close();
+    plain.off('targetcreated', onTarget);
+    await page?.close().catch(() => {});
     cap.stop();
   }
   expect(cap.hits).toEqual({});
@@ -243,13 +248,12 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
   expect(popups).toEqual([]);
 }, T);
 
-test('on a renderer host, every page but studio.html is inert: an opaque origin that runs no script and loads nothing', async () => {
+slowTest('on a renderer host, every page but studio.html is inert: an opaque origin that runs no script and loads nothing', async () => {
   // What a popup or frame of an engine script, a version file or an API answer would be, were chapter code to get one
   // open on its own origin: nothing to reach into and no fetch, Image or Worker of its own to use.
   const cap = await captureHosts(['from-page']);
-  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
+  const page = await (await plainBrowser.get()).newPage();
   try {
-    const page = await plain.newPage();
     for (const path of ['/src/lyrics.js', '/v/original/ch/c01_lab.js', '/api/versions/original', '/nope']) {
       await page.goto(`http://w0.localhost:${srv.port}${path}`);
       expect([path, await page.evaluate(() => [window.origin, document.querySelectorAll('iframe').length])]).toEqual([path, ['null', 0]]);
@@ -258,7 +262,7 @@ test('on a renderer host, every page but studio.html is inert: an opaque origin 
     }
     await Bun.sleep(500);
   } finally {
-    await plain.close();
+    await page.close().catch(() => {});
     cap.stop();
   }
   expect(cap.hits).toEqual({});

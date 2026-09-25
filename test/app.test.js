@@ -7,7 +7,7 @@ import { createEvents } from '../studio/events.js';
 import { createQueue } from '../studio/queue.js';
 import { buildWebIfStale } from '../studio/build-web.js';
 import { launchBrowser } from '../studio/browser.js';
-import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv } from './helpers.js';
+import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv, FAST_TESTS, slowTest, closeBrowser } from './helpers.js';
 
 const root = process.cwd();
 buildWebIfStale(root);   // studio/web/dist must exist before any test below can serve it
@@ -720,6 +720,7 @@ test('work folders are served while a job runs', async () => {
 // headless Chrome, and the browser's own CSP enforcement, not a static read of the HTML.
 let cspServer, cspBrowser;
 beforeAll(async () => {
+  if (FAST_TESTS) return;   // (only the test below uses it, and it launches Chrome and runs ffmpeg)
   const dir = tempDir('csp-');
   // Two finished renders for the watch view and the library: a small real MP4 (30 s, past the end of the Original's
   // first chapter at 23 s) and its poster, one render of the Original and one whose version is gone (it keeps its
@@ -749,9 +750,9 @@ beforeAll(async () => {
   cspServer.data = dir;
   cspBrowser = await launchBrowser({ port: new URL(cspServer.url).port });
 }, 30000);
-afterAll(async () => { await cspBrowser?.close(); cspServer?.kill(); await cspServer?.exited; });
+afterAll(async () => { await closeBrowser(cspBrowser); cspServer?.kill(); await cspServer?.exited; }, 30000);
 
-test('the built SPA loads under the SPA CSP with no violations (so, no inline scripts)', async () => {
+slowTest('the built SPA loads under the SPA CSP with no violations (so, no inline scripts)', async () => {
   const page = await cspBrowser.newPage();
   const violations = [];
   await page.evaluateOnNewDocument(() => {

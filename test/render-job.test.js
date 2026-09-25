@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, afterAll } from 'bun:test';
+import { expect, beforeAll, afterAll } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
@@ -11,7 +11,7 @@ import { createRenderRunner } from '../studio/render-job.js';
 import { snapshotOf } from '../studio/snapshot.js';
 import { FPS, segmentKeys, engineHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { tempDir, tempDefaultDb } from './helpers.js';
+import { tempDir, tempDefaultDb, slowTest } from './helpers.js';
 
 // One sealed painting pool for the file, over small versions whose one or two chapters paint in a few tens of
 // milliseconds each — the Original's take up to a second a frame, far too slow for a suite that renders whole
@@ -68,7 +68,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await pool?.close(); srv?.stop(); });
 
-test('a short-range render paints only the missing frames, and re-rendering a fully cached range paints nothing', async () => {
+slowTest('a short-range render paints only the missing frames, and re-rendering a fully cached range paints nothing', async () => {
   const first = 96, last = 105;
   // Pre-paint half of the range directly through the frame service.
   for (let i = first; i < first + 5; i++) {
@@ -86,7 +86,7 @@ test('a short-range render paints only the missing frames, and re-rendering a fu
   expect(pool.stats().painted).toBe(before2);      // the range is now fully cached: nothing new to paint
 }, T);
 
-test('the MP4 duration matches the range, and the render row carries the revisions, snapshot, title and logline', async () => {
+slowTest('the MP4 duration matches the range, and the render row carries the revisions, snapshot, title and logline', async () => {
   const first = 200, last = 223;   // 24 frames = exactly 1 second
   const job = db.getJob(db.addJob({ kind: 'render', versionId: 'short', params: { frames: rangeFor(first, last) } }));
   await runners.render(job, ctx());
@@ -113,7 +113,7 @@ test('the MP4 duration matches the range, and the render row carries the revisio
   expect(Math.abs(+format.duration - n / FPS)).toBeLessThan(.03);
 }, T);
 
-test('a render under a tiny cache cap keeps its own segments pinned until it releases them (Review Focus 5)', async () => {
+slowTest('a render under a tiny cache cap keeps its own segments pinned until it releases them (Review Focus 5)', async () => {
   const tinyCache = createCache({ dir: join(tempDir(), 'cache'), capBytes: 0.001 * 1e9 });
   const tinyPool = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 3, paintTimeoutMs: 5000,
     onPainted: p => tinyCache.put(p.key, p.frame, p.jpeg, p.deps) });
@@ -139,7 +139,7 @@ test('a render under a tiny cache cap keeps its own segments pinned until it rel
   } finally { await tinyPool.close(); }
 }, T);
 
-test('after deleting the version row, the render still lists with its stored title and logline', async () => {
+slowTest('after deleting the version row, the render still lists with its stored title and logline', async () => {
   const first = 96, last = 105;
   const job = db.getJob(db.addJob({ kind: 'render', versionId: 'delone', params: { frames: rangeFor(first, last) } }));
   await runners.render(job, ctx());
@@ -153,7 +153,7 @@ test('after deleting the version row, the render still lists with its stored tit
   expect(after).toMatchObject({ version_id: 'delone', title: 'Deleted Later', logline: 'Goes away after its render.' });
 }, T);
 
-test('cancelling during the fill rejects with "cancelled" and leaves no library entry', async () => {
+slowTest('cancelling during the fill rejects with "cancelled" and leaves no library entry', async () => {
   const before = db.listRenders().length;
   const ctrl = new AbortController();
   const job = db.getJob(db.addJob({ kind: 'render', versionId: 'slowcancel', params: { frames: '0:5' } }));
@@ -163,7 +163,7 @@ test('cancelling during the fill rejects with "cancelled" and leaves no library 
   expect(db.listRenders().length).toBe(before);
 }, T);
 
-test('cancelling a render withdraws its queued paints from the pool and releases the pins', async () => {
+slowTest('cancelling a render withdraws its queued paints from the pool and releases the pins', async () => {
   const tinyCache = createCache({ dir: join(tempDir(), 'cache'), capBytes: 1e12 });
   const tinyPool = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1, paintTimeoutMs: 5000,
     onPainted: p => tinyCache.put(p.key, p.frame, p.jpeg, p.deps) });
@@ -199,7 +199,7 @@ test('cancelling a render withdraws its queued paints from the pool and releases
   } finally { await tinyPool.close(); }
 }, T);
 
-test('thumbnails are composed from three cached frames per chapter, and a second run paints nothing new', async () => {
+slowTest('thumbnails are composed from three cached frames per chapter, and a second run paints nothing new', async () => {
   const job1 = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'boundary' }));
   const before = pool.stats().painted;
   await runners.thumbs(job1, ctx());
@@ -221,7 +221,7 @@ test('thumbnails are composed from three cached frames per chapter, and a second
   expect(pool.stats().painted).toBe(before2);      // all six frames were already cached: nothing new to paint
 }, T);
 
-test('thumbs skips a broken or missing chapter, logs why, and still succeeds', async () => {
+slowTest('thumbs skips a broken or missing chapter, logs why, and still succeeds', async () => {
   const lines = [];
   const job = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'patchy' }));
   await runners.thumbs(job, { signal: new AbortController().signal, log: t => lines.push(t), progress: () => {}, cost: () => {} });

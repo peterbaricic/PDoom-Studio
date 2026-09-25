@@ -8,7 +8,7 @@ import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
 import { serve } from '../studio/serve.js';
 import { sha256, snapshotOf, rememberSnapshot, getSnapshot, blobBySha } from '../studio/snapshot.js';
-import { tempDir, tempDefaultDb, expectPixelsMatch } from './helpers.js';
+import { tempDir, tempDefaultDb, expectPixelsMatch, slowTest } from './helpers.js';
 
 const root = process.cwd(), T = { timeout: 300000 };
 const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
@@ -135,7 +135,7 @@ test('an unknown snapshot or blob 404s on a renderer host', async () => {
   expect((await at(`/api/blob/${sha256('nope, never written')}`)).status).toBe(404);
 });
 
-test('a painting page loaded by snapshot draws the same pixels as loading the same version by id', async () => {
+slowTest('a painting page loaded by snapshot draws the same pixels as loading the same version by id', async () => {
   const snap = rememberSnapshot(snapshotOf(db, 'original'));
   const srv = serve({ db, root, data: tempDir(), token: 't', events: createEvents(), port: 0 });
   const spawnRender = async argv => {

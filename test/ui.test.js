@@ -4,14 +4,14 @@
 // painting; a short final render in the library and the watch view; Remix, Promote and Delete; and a server restart
 // under the open page. Throughout, the browser only ever loads the app's own Vite chunks as scripts: chapter code
 // never runs in the user's browser.
-import { test, expect, beforeAll, afterAll } from 'bun:test';
+import { expect, beforeAll, afterAll } from 'bun:test';
 import { rmSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
 import { dirname, join } from 'node:path';
 import { launchBrowser } from '../studio/browser.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv } from './helpers.js';
+import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv, FAST_TESTS, slowTest, closeBrowser } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), defaultDb = tempDefaultDb();
 const repoDefaultDb = join(root, 'studio/default.db');
@@ -24,8 +24,11 @@ const files = { 'STORYBOARD.md': goodStoryboard(), 'shared.js': 'const SET = {};
 CHAPTER_WINDOWS.forEach(([a, b], i) => {
   files[`ch/c0${i + 1}.js`] = `chapter('c${i + 1}', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`;
 });
-// CLAUDE_BIN comes from test/preload.js (the fake), through process.env.
-const env = isolatedEnv(data, { DEFAULT_DB: defaultDb, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }), STUDIO_PAINTERS: '2' });
+// CLAUDE_BIN comes from test/preload.js (the fake), through process.env. STUDIO_TEST_SKIP_CHECK: the Claude jobs import
+// what the fake wrote without render.mjs's check, a Chrome of its own for each of the eleven jobs (and most of this
+// file's time when it ran); test/claude-job.test.js runs that check for real, on passing and failing chapters.
+const env = isolatedEnv(data, { DEFAULT_DB: defaultDb, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }), STUDIO_PAINTERS: '2',
+  STUDIO_TEST_SKIP_CHECK: '1' });
 
 let server, url, port, browser, page, serverLog = '';
 const requests = [], scripts = [], targets = [], frameResponses = [], pageErrors = [];
@@ -82,6 +85,7 @@ const shadedIn = (first, last) => [...document.querySelectorAll('[aria-label="Pl
   .reduce((n, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return n + Math.max(0, Math.min(b, last) - Math.max(a, first) + 1); }, 0);
 
 beforeAll(async () => {
+  if (FAST_TESTS) return;   // every test here drives Chrome
   ({ proc: server, url, port } = await startServer());
   browser = await launchBrowser({ port });
   browser.on('targetcreated', t => targets.push(`${t.type()} ${t.url()}`));
@@ -96,15 +100,14 @@ beforeAll(async () => {
 }, 60000);
 
 afterAll(async () => {
-  await Promise.race([browser?.close(), Bun.sleep(20000)]).catch(() => {});
-  browser?.process()?.kill('SIGKILL');
+  await closeBrowser(browser);
   server?.kill();
   await server?.exited;
   rmSync(data, { recursive: true, force: true });
   rmSync(dirname(defaultDb), { recursive: true, force: true });
 }, 40000);
 
-test('a new version: its storyboard, approved, becomes nine ready chapter blocks', step(async () => {
+slowTest('a new version: its storyboard, approved, becomes nine ready chapter blocks', step(async () => {
   await page.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => location.pathname === '/versions/original', { timeout: 15000 });   // no version of the user's yet
   await clickButton('nav[aria-label="Versions"]', 'New version');
@@ -123,8 +126,8 @@ test('a new version: its storyboard, approved, becomes nine ready chapter blocks
   await enabledButton(inspector, 'Approve and build chapters', 30000);
   await clickButton(inspector, 'Approve and build chapters');
 
-  // Nine chapter jobs, each checked with real renders: every block ends up written, with no status (not broken,
-  // queued or being worked on).
+  // Nine chapter jobs (imported unchecked here, see STUDIO_TEST_SKIP_CHECK above): every block ends up written, with
+  // no status (not broken, queued or being worked on).
   await page.waitForFunction(() => {
     const blocks = [...document.querySelectorAll('button[aria-pressed][aria-label^="Chapter "]')];
     return blocks.length === 9 && blocks.every(b => /, \d+:\d\d–\d+:\d\d$/.test(b.getAttribute('aria-label')));
@@ -138,7 +141,7 @@ test('a new version: its storyboard, approved, becomes nine ready chapter blocks
     { timeout: 10000 });
 }), 600000);
 
-test('the preview plays: server-painted frames arrive and the coverage shading grows where it plays', step(async () => {
+slowTest('the preview plays: server-painted frames arrive and the coverage shading grows where it plays', step(async () => {
   // From chapter 8's start, the far end of the song from where the player has been painting ahead so far (from 0).
   // The shading is measured over the ten seconds played from there: the preview's own frames and its look-ahead fill
   // it, while the thumbnails job (the only other painter here) paints just two frames of it: 2971 (0.3 s into the
@@ -159,7 +162,7 @@ test('the preview plays: server-painted frames arrive and the coverage shading g
   await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
 }), 300000);
 
-test('a final render of a short range shows in the workspace, the library and the watch view', step(async () => {
+slowTest('a final render of a short range shows in the workspace, the library and the watch view', step(async () => {
   const token = await page.$eval('meta[name="studio-token"]', m => m.content);
   // Six frames (0.25 s), through the API: the UI's button always renders the whole song.
   const res = await fetch(`${url}/api/jobs`, { method: 'POST', headers: { origin: url, 'x-studio-token': token, 'content-type': 'application/json' },
@@ -180,7 +183,7 @@ test('a final render of a short range shows in the workspace, the library and th
   expect(await page.$$eval('ol[aria-label="Walkthrough"] li', l => l.length)).toBe(9);
 }), 240000);
 
-test('remix the Original, promote the remix, delete a version (its video stays in the library)', step(async () => {
+slowTest('remix the Original, promote the remix, delete a version (its video stays in the library)', step(async () => {
   // Remix, from the Original's version menu.
   await page.click('nav[aria-label="Versions"] a[href="/versions/original"]');
   await page.waitForFunction(() => location.pathname === '/versions/original', { timeout: 10000 });
@@ -221,7 +224,7 @@ test('remix the Original, promote the remix, delete a version (its video stays i
   expect((await api('/api/library')).map(r => [r.detached, r.title])).toEqual([[true, 'The P(doom) Bake-Off']]);
 }), 120000);
 
-test('after a server restart, the next change shows the reload banner; a reload brings frames back', step(async () => {
+slowTest('after a server restart, the next change shows the reload banner; a reload brings frames back', step(async () => {
   await page.click('nav[aria-label="Versions"] a[href="/versions/original"]');
   await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
   server.kill('SIGTERM');
@@ -244,7 +247,7 @@ test('after a server restart, the next change shows the reload banner; a reload 
   expect(frameResponses.slice(framesBefore).some(r => /^(200|304) \/api\/frames\/original\/\d+\.jpg$/.test(r))).toBe(true);
 }), 180000);
 
-test("chapter code never ran in the browser: it loaded only the app's own Vite chunks as scripts", () => {
+slowTest("chapter code never ran in the browser: it loaded only the app's own Vite chunks as scripts", () => {
   expect(scripts.length).toBeGreaterThan(0);
   const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const own = new RegExp(`^${escaped}/app-assets/[\\w.-]+\\.js$`);

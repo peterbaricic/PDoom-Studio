@@ -1,11 +1,14 @@
 // test/claude-job.test.js
 import { test, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, readFileSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, rmSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
-import { createClaudeRunner, chapterPath, permissionSettings } from '../studio/claude-job.js';
-import { goodStoryboard, tempDefaultDb } from './helpers.js';
+import { createClaudeRunner, chapterPath, permissionSettings, checkWithRenderer } from '../studio/claude-job.js';
+import { serve } from '../studio/serve.js';
+import { createEvents } from '../studio/events.js';
+import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
+import { goodStoryboard, tempDefaultDb, slowTest } from './helpers.js';
 
 // root is the real repo (the fake CLI script, the brief's paths); data is a throwaway data root for the runner's
 // .studio/work and .studio/settings folders, so a runner test can never touch, let alone delete, a real studio
@@ -216,3 +219,39 @@ test('an already-cancelled signal fails fast without running the CLI', async () 
   await expect(p).rejects.toThrow('cancelled');
   expect(db.getFile('v', 'STORYBOARD.md')).toBeNull();
 });
+
+// The studio's own check, for real (the runner tests above stand a function in for it; test/ui.test.js's chapter jobs
+// skip it, see STUDIO_TEST_SKIP_CHECK there): render.mjs on the job's work folder through the studio server, at three
+// times inside the chapter's window, writing the chapter's thumbnail; a failure comes back as the check's own lines.
+slowTest('checkWithRenderer checks a chapter job at three times in its window and writes its thumbnail, or returns the errors', async () => {
+  const srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
+  const workFolder = (jobId, files) => {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(join(data, '.studio/work', String(jobId), 'ch'), { recursive: true });
+      writeFileSync(join(data, '.studio/work', String(jobId), path), content);
+    }
+  };
+  const [a, b] = CHAPTER_WINDOWS[1];
+  const good = job('chapter', { chapter: 2 }), bad = job('chapter', { chapter: 2 }), uncovered = job('chapter', { chapter: 2 }), shared = job('shared');
+  workFolder(good.id, { 'ch/c02.js': `chapter('c2', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
+  workFolder(bad.id, { 'ch/c02.js': `chapter('c2', ${a}, ${b}, [[${a}, t => { throw new Error('chapter two paints nothing'); }]]);` });
+  workFolder(uncovered.id, { 'ch/c02.js': `chapter('c2', ${a}, ${a + 1}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
+  workFolder(shared.id, { 'shared.js': "throw new Error('shared.js does not load');" });
+  const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, versionId: 'v', chapter: j.params?.chapter, ...extra });
+  const thumb = join(data, '.studio/thumbs/v/c02.jpg');
+  try {
+    const [passed, threw, notCovered, notLoaded] = await Promise.all([check(good), check(bad), check(uncovered), check(shared)]);
+    expect(passed).toEqual([]);
+    expect(readFileSync(thumb).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));   // a JPEG
+    expect(threw.join('\n')).toContain('chapter two paints nothing');
+    expect(threw).not.toContain('CHECK FAILED');
+    // the three times are 0.3 s inside each end and the middle: a chapter ending early leaves the last two uncovered
+    expect(notCovered).toEqual([(a + b) / 2, b - .3].map(t => `no chapter covers t=${+t.toFixed(2)}`));
+    expect(notLoaded.join('\n')).toContain('shared.js does not load');
+    // cancelled, the check stops and says so
+    const ctrl = new AbortController();
+    const cancelled = check(good, { signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(), 200);
+    await expect(cancelled).rejects.toThrow('cancelled');
+  } finally { srv.stop(); }
+}, 120000);
