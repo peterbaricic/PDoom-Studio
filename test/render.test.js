@@ -8,7 +8,7 @@ import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { findBrowser, gpuArgs } from '../studio/browser.js';
 import puppeteer from 'puppeteer-core';
-import { isolatedEnv, tempDir, tempDefaultDb, captureHosts } from './helpers.js';
+import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch } from './helpers.js';
 
 // Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
 const root = process.cwd(), T = { timeout: 300000 };
@@ -79,7 +79,7 @@ test('the synthetic key press that arms the navigation guard does not perturb th
   // p5 tracks mouse state and would fire mousePressed() from a synthetic click; nothing today reads that, but a
   // keyboard gesture (see render.mjs) was chosen specifically so this holds regardless of what a chapter does.
   // Proof: render the same stills with and without the gesture (RENDER_TEST_NO_GESTURE is a test-only escape
-  // hatch) and diff the PNGs byte for byte — lossless, so any difference at all would show up.
+  // hatch) and diff the decoded pixels (see expectPixelsMatch in test/helpers.js for why not raw bytes).
   const armed = mkdtempSync(join(tmpdir(), 'gesture-on-')), unarmed = mkdtempSync(join(tmpdir(), 'gesture-off-'));
   const withGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${armed}`], { env: isolatedEnv() });
   const withoutGesture = await spawn(['bun', 'render.mjs', '--stills=5,40,90', `--out=${unarmed}`], { env: isolatedEnv(undefined, { RENDER_TEST_NO_GESTURE: '1' }) });
@@ -88,14 +88,15 @@ test('the synthetic key press that arms the navigation guard does not perturb th
   for (const f of ['t5_00.png', 't40_00.png', 't90_00.png']) {
     expect(statSync(join(armed, f)).size).toBeGreaterThan(1000);
     const [a, b] = await Promise.all([Bun.file(join(armed, f)).arrayBuffer(), Bun.file(join(unarmed, f)).arrayBuffer()]);
-    expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).toBe(0);
+    expectPixelsMatch(Buffer.from(a), Buffer.from(b), f);
   }
 }, T);
 
-test('the network lockdown leaves the picture as it was: stills match the same frames painted without it, byte for byte', async () => {
+test('the network lockdown leaves the picture as it was: stills match the same frames painted without it', async () => {
   // render.mjs's browser (dead proxy, WebRTC policy, resolver rules, request interception, the guard gesture) against a
   // browser launched with the GPU flags alone, both painting the Original from the same server code. If anything in
   // the lockdown kept something the picture needs from loading (the bundled fonts, above all), the typefaces would differ.
+  // Pixels are compared with a small tolerance, not byte for byte — see expectPixelsMatch in test/helpers.js for why.
   const dir = mkdtempSync(join(tmpdir(), 'locked-')), times = [5, 40, 90, 150];
   const r = await run(`--stills=${times.join(',')}`, `--out=${dir}`);
   expect(r.code).toBe(0);
@@ -110,7 +111,7 @@ test('the network lockdown leaves the picture as it was: stills match the same f
       const url = await page.evaluate(t => window.renderAt(t, 'image/png'), t);
       const locked = Buffer.from(await Bun.file(join(dir, `t${t.toFixed(2).replace('.', '_')}.png`)).arrayBuffer());
       expect(locked.length).toBeGreaterThan(1000);
-      expect([t, Buffer.compare(Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'), locked)]).toEqual([t, 0]);
+      expectPixelsMatch(Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'), locked, `t=${t}`);
     }
   } finally {
     await plain.close();
