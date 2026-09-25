@@ -174,6 +174,22 @@ describe('scheduling', () => {
     expect(requests).toHaveLength(6);
   });
 
+  test('frame requests carry the studio token: the server answers them only with it', async () => {
+    const meta = document.createElement('meta');
+    meta.name = 'studio-token';
+    meta.content = 'tok-9';
+    document.head.append(meta);
+    try {
+      mount();
+      await flush();
+      const frameCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('.jpg') || String(url).includes('.jpg?'));
+      expect(frameCalls.length).toBeGreaterThan(0);
+      for (const [, init] of frameCalls) expect((init as RequestInit).headers).toEqual({ 'x-studio-token': 'tok-9' });
+    } finally {
+      meta.remove();
+    }
+  });
+
   test('frames already on screen or in memory are not asked for again, and cached frames past the window are not asked for at all', async () => {
     const p = mount({ initialTime: 0, coverage: coverage([[0, N - 1]], keys('a')) });
     await flush();

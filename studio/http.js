@@ -29,13 +29,26 @@ export const error = (status, message) => Response.json({ error: message }, { st
 // origin and carry the per-start token, which only the studio page knows. extraOrigins: additional Origins to accept
 // besides the studio's own — used only in --dev mode (studio/server.js), to accept the Vite dev server's own origin
 // (http://localhost:5173) while it proxies its requests through to this server (see studio/web/vite.config.ts).
+// Some GETs aren't harmless either: a frame request queues a paint, and a frame or coverage answer tells whether a
+// version exists. So no /api request another site's page made (an <img>, a link, a no-cors fetch: the browser says
+// so in Sec-Fetch-Site) is answered, whatever its method, and the frame and coverage GETs need the token as well (the
+// studio page asks for them with fetch, so it can send it). What isn't under /api (the finished videos and posters,
+// the song) stays loadable from anywhere: plain files, with no effects.
+const TOKEN_GETS = [/^\/api\/frames\//, /^\/api\/coverage\//];
 export function makeGuard({ port, token, extraOrigins = [] }) {
   const hostOk = h => { const p = port(); return [`localhost:${p}`, `127.0.0.1:${p}`, `[::1]:${p}`].includes(h) || new RegExp(`^w\\d+\\.localhost:${p}$`).test(h); };
   const originOk = o => { const p = port(); return [`http://localhost:${p}`, `http://127.0.0.1:${p}`, `http://[::1]:${p}`, ...extraOrigins].includes(o); };
   return req => {
-    if (!hostOk(req.headers.get('host') || '')) return error(403, 'unknown host');
+    const host = req.headers.get('host') || '';
+    if (!hostOk(host)) return error(403, 'unknown host');
     if (req.method === 'OPTIONS') return error(403, 'cross-origin requests are not allowed');
-    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    const path = new URL(req.url).pathname, site = req.headers.get('sec-fetch-site');
+    if (path.startsWith('/api/') && site && site !== 'same-origin' && site !== 'none') return error(403, 'cross-site requests are not allowed');
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      // (Renderer hosts answer these 404 anyway: studio/app.js.)
+      if (!/^w\d+\./.test(host) && TOKEN_GETS.some(re => re.test(path)) && req.headers.get('x-studio-token') !== token) return error(403, 'missing or wrong token');
+      return null;
+    }
     if (!originOk(req.headers.get('origin') || '')) return error(403, 'wrong origin');
     if (req.headers.get('x-studio-token') !== token) return error(403, 'missing or wrong token');
     return null;

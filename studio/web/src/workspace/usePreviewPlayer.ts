@@ -32,7 +32,7 @@
 // starts, and the error is shown. A 404 (the server has no such chapter) makes the chapter unplayable, with the
 // server's reason, until the keys change.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, frameUrl } from '@/api/client';
+import { api, frameHeaders, frameUrl } from '@/api/client';
 import type { Coverage, Song } from '@/api/types';
 
 export type PlayerState = 'paused' | 'waiting' | 'playing';
@@ -455,7 +455,7 @@ export class PreviewEngine {
       if (retryInMs) this.retryAt.set(i, Date.now() + retryInMs);
       return true;
     };
-    fetch(frameUrl(this.versionId, i, prio), { signal: ctrl.signal })
+    fetch(frameUrl(this.versionId, i, prio), { signal: ctrl.signal, headers: frameHeaders() })
       .then(async res => {
         if (!mine()) return;
         if (res.status === 200) {

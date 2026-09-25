@@ -56,7 +56,8 @@ const step = fn => async () => {
   try { await fn(); } catch (e) { console.error(`--- studio output (last 6000 chars) ---\n${serverLog.slice(-6000)}`); throw e; }
 };
 
-const api = path => fetch(`${url}${path}`).then(r => r.json());
+// With the page's token: the coverage route answers only with it (studio/http.js).
+const api = async path => fetch(`${url}${path}`, { headers: { 'x-studio-token': await page.$eval('meta[name="studio-token"]', m => m.content) } }).then(r => r.json());
 const clickButton = (scope, label) => page.evaluate((s, l) => {
   const b = [...document.querySelectorAll(`${s} button`)].find(x => x.textContent.trim() === l && !x.disabled);
   if (!b) throw new Error(`no enabled button "${l}" in ${s}`);

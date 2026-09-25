@@ -55,8 +55,8 @@ async function readError(res: Response): Promise<string> {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  // Sent on every request, GET included: studio/http.js's guard only checks it on mutations, but always attaching it
-  // keeps this simple and needs no per-method special case.
+  // Sent on every request, GET included: studio/http.js's guard checks it on mutations and on the frame and coverage
+  // GETs, and always attaching it keeps this simple and needs no per-method special case.
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-studio-token': getToken() };
   const hasBody = body !== undefined;
   const res = await fetch(path, { method, headers, body: hasBody ? JSON.stringify(body) : undefined });
@@ -76,7 +76,11 @@ export const api = {
   del: <T>(path: string) => request<T>('DELETE', path),
 };
 
-// The URL for one cached (or to-be-painted) frame — studio/app.js's GET /api/frames/<versionId>/<i>.jpg.
+// The URL for one cached (or to-be-painted) frame — studio/app.js's GET /api/frames/<versionId>/<i>.jpg. Fetch it
+// with frameHeaders(): the server answers frame requests only with the token (studio/http.js's guard).
+export function frameHeaders(): Record<string, string> {
+  return { 'x-studio-token': getToken() };
+}
 export function frameUrl(versionId: string, i: number, prio?: 'preview' | 'prefetch'): string {
   return `/api/frames/${encodeURIComponent(versionId)}/${i}.jpg${prio ? `?prio=${prio}` : ''}`;
 }

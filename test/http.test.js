@@ -58,6 +58,37 @@ test('extraOrigins (--dev) accepts the Vite dev server\'s origin too, only when 
   expect(guard(req('POST', { origin: 'http://localhost:5173', 'x-studio-token': 'tok' })).status).toBe(403);
 });
 
+// Another site's page can make the user's browser send a GET here (an <img>, a link, a no-cors fetch): the browser
+// says so in Sec-Fetch-Site, and some GETs have effects (a frame request queues a paint) or tell what exists.
+test('guard refuses any /api request another site made, whatever its method', () => {
+  const at = (method, path, headers, host = 'localhost:8080') => new Request(`http://${host}${path}`, { method, headers: { host, ...headers } });
+  for (const site of ['cross-site', 'same-site']) {
+    for (const [method, path] of [['GET', '/api/versions'], ['GET', '/api/frames/a/1.jpg'], ['GET', '/api/health'], ['POST', '/api/jobs']]) {
+      const res = guard(at(method, path, { 'sec-fetch-site': site, origin: 'http://localhost:8080', 'x-studio-token': 'tok' }));
+      expect([site, method, path, res?.status]).toEqual([site, method, path, 403]);
+    }
+  }
+  // the studio's own page (same-origin), an address typed in (none), or a client that sends no such header
+  expect(guard(at('GET', '/api/versions', { 'sec-fetch-site': 'same-origin' }))).toBeNull();
+  expect(guard(at('GET', '/api/versions', { 'sec-fetch-site': 'none' }))).toBeNull();
+  expect(guard(at('GET', '/api/versions'))).toBeNull();
+  // what isn't an API (a finished video, the song) stays loadable from anywhere
+  expect(guard(at('GET', '/library/a.mp4', { 'sec-fetch-site': 'cross-site' }))).toBeNull();
+});
+
+test('guard needs the token for the frame and coverage GETs on UI hosts', () => {
+  const at = (path, headers, host = 'localhost:8080') => new Request(`http://${host}${path}`, { headers: { host, ...headers } });
+  for (const path of ['/api/frames/a/1.jpg', '/api/frames/a/1.jpg?prio=prefetch', '/api/coverage/a']) {
+    expect([path, guard(at(path))?.status]).toEqual([path, 403]);
+    expect([path, guard(at(path, { 'x-studio-token': 'wrong' }))?.status]).toEqual([path, 403]);
+    expect([path, guard(at(path, { 'x-studio-token': 'tok', 'sec-fetch-site': 'same-origin' }))]).toEqual([path, null]);
+    // (renderer hosts don't serve them at all: that's the app's 404, not the guard's)
+    expect([path, guard(at(path, {}, 'w0.localhost:8080'))]).toEqual([path, null]);
+  }
+  // other GETs stay token-free
+  expect(guard(at('/api/versions'))).toBeNull();
+});
+
 test('events reach subscribers and the SSE stream', async () => {
   const ev = createEvents(), seen = [];
   const off = ev.subscribe(e => seen.push(e));

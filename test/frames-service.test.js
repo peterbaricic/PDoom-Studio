@@ -35,6 +35,8 @@ const freePort = () => { const s = Bun.serve({ hostname: '127.0.0.1', port: 0, f
 const frameOf = async (versionId, i, prio = 'preview') => { const r = service.frame(versionId, i, prio); return r.pending ? r.pending : r; };
 const keysOf = versionId => segmentKeys(snapshotOf(db, versionId), engineHash(root));
 const until = async (check, ms = 20000) => { const end = Date.now() + ms; while (!(await check())) { if (Date.now() > end) throw new Error('timed out waiting'); await Bun.sleep(100); } };
+// The frame and coverage routes answer only with the token (studio/http.js), as the studio page sends it.
+const fetchT = (url, init = {}) => fetch(url, { ...init, headers: { 'x-studio-token': token, ...init.headers } });
 const at = (host, path, init = {}) => srv.app.fetch(new Request(`http://${host}${path}`, { ...init, headers: { host, ...init.headers } }));
 
 let cap;
@@ -120,12 +122,12 @@ slowTest('a frame is painted once, then served from the cache', async () => {
   expect(pool.stats().painted - before).toBe(1);
 
   // over HTTP: the JPEG itself, revalidated on every use, tagged with its content (segment key and dependencies)
-  const res = await fetch(`${srv.url}/api/frames/tiny/48.jpg`);
+  const res = await fetchT(`${srv.url}/api/frames/tiny/48.jpg`);
   expect(res.status).toBe(200);
   expect(res.headers.get('content-type')).toBe('image/jpeg');
   expect(res.headers.get('etag')).toBe(`"${keysOf('tiny')[1]}.-"`);
   expect(res.headers.get('cache-control')).toBe('private, no-cache');
-  const same = await fetch(`${srv.url}/api/frames/tiny/48.jpg`, { headers: { 'if-none-match': res.headers.get('etag') } });
+  const same = await fetchT(`${srv.url}/api/frames/tiny/48.jpg`, { headers: { 'if-none-match': res.headers.get('etag') } });
   expect(same.status).toBe(304);
   expect(same.headers.get('etag')).toBe(res.headers.get('etag'));
   const jpeg = new Uint8Array(await res.arrayBuffer());
@@ -133,13 +135,13 @@ slowTest('a frame is painted once, then served from the cache', async () => {
   expect(jpeg.length).toBeGreaterThan(10000);
   expect(pool.stats().painted - before).toBe(1);
   // a frame not painted yet is painted while the request waits
-  const held = await fetch(`${srv.url}/api/frames/tiny/60.jpg?prio=prefetch`);
+  const held = await fetchT(`${srv.url}/api/frames/tiny/60.jpg?prio=prefetch`);
   expect(held.status).toBe(200);
   expect(pool.stats().painted - before).toBe(2);
   // a frame file deleted behind the cache's back is painted again, not answered 202 for ever
   const shas = currentShas(snapshotOf(db, 'tiny')), used = cache.usedBytes();
   rmSync(cache.find(keysOf('tiny')[1], 60, shas).path);
-  const repainted = await fetch(`${srv.url}/api/frames/tiny/60.jpg`);
+  const repainted = await fetchT(`${srv.url}/api/frames/tiny/60.jpg`);
   expect(repainted.status).toBe(200);
   expect(pool.stats().painted - before).toBe(3);
   expect(existsSync(cache.find(keysOf('tiny')[1], 60, shas).path)).toBe(true);
@@ -154,7 +156,7 @@ slowTest('revising a chapter resets only that chapter\'s coverage; the other cha
     // coverage names each chapter's segment key, so the player can tell when a chapter's frames change
     const keysBefore = keysOf('rev');
     expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
-    const res = await fetch(`${srv.url}/api/coverage/rev`);
+    const res = await fetchT(`${srv.url}/api/coverage/rev`);
     expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
     expect(Object.keys(keysBefore)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
 
@@ -198,7 +200,7 @@ slowTest('the Original\'s curtain call records its CAST reads as dependencies; c
   expect(depsOf(9, runOn)).toEqual({ 'ch/c02_chorus1.js': files['ch/c02_chorus1.js'] });
   expect(depsOf(9, curtain)).toBeNull();
   expect(depsOf(8, puppet)).toEqual({ 'ch/c04_chorus2.js': files['ch/c04_chorus2.js'] });
-  const etagOf = async i => (await fetch(`${srv.url}/api/frames/orig/${i}.jpg`)).headers.get('etag');
+  const etagOf = async i => (await fetchT(`${srv.url}/api/frames/orig/${i}.jpg`)).headers.get('etag');
   const [bowsTag, curtainTag] = [await etagOf(bows), await etagOf(curtain)];
   expect(bowsTag).toBe(`"${keys[9]}.${depsHash(bowsDeps)}"`);
   expect(curtainTag).toBe(`"${keys[9]}.-"`);
@@ -214,12 +216,12 @@ slowTest('the Original\'s curtain call records its CAST reads as dependencies; c
   expect(ranges).toContainEqual([runOn, runOn]);
   expect(ranges.some(([a, b]) => a <= bows && bows <= b)).toBe(false);
   // a browser holding the old frame asks again and gets the new one; the curtain it may keep
-  const fresh = await fetch(`${srv.url}/api/frames/orig/${bows}.jpg`, { headers: { 'if-none-match': bowsTag } });
+  const fresh = await fetchT(`${srv.url}/api/frames/orig/${bows}.jpg`, { headers: { 'if-none-match': bowsTag } });
   expect(fresh.status).toBe(200);
   expect(fresh.headers.get('etag')).not.toBe(bowsTag);
   expect(fresh.headers.get('etag')).toStartWith(`"${keys[9]}.`);
   expect((await fresh.arrayBuffer()).byteLength).toBeGreaterThan(10000);
-  expect((await fetch(`${srv.url}/api/frames/orig/${curtain}.jpg`, { headers: { 'if-none-match': curtainTag } })).status).toBe(304);
+  expect((await fetchT(`${srv.url}/api/frames/orig/${curtain}.jpg`, { headers: { 'if-none-match': curtainTag } })).status).toBe(304);
 
   // Another version with the same chapter 9 (so the same segment key) but the old chapter 3, asking for a frame of the
   // bows (t = 146 s) at the same time: one paint can't serve both, so each gets a frame painted from its own files,
@@ -235,7 +237,7 @@ slowTest('the Original\'s curtain call records its CAST reads as dependencies; c
     expect(cache.find(keys[9], bow, currentShas(snapshotOf(db, v))).path).toBe(both[k].file);
     const deps = JSON.parse(readFileSync(both[k].file.replace(/\.jpg$/, '.deps.json'), 'utf8'));
     expect(deps['ch/c03_takeoff.js']).toBe(snapshotOf(db, v).files['ch/c03_takeoff.js']);
-    const got = await fetch(`${srv.url}/api/frames/${v}/${bow}.jpg`);
+    const got = await fetchT(`${srv.url}/api/frames/${v}/${bow}.jpg`);
     expect(got.status).toBe(200);
     expect(Buffer.from(await got.arrayBuffer())).toEqual(readFileSync(both[k].file));
   }
@@ -297,7 +299,7 @@ slowTest('a chapter that throws, one that never finishes and one whose script th
   const before = pool.stats().painted + pool.stats().failures;
   expect(service.frame('bad', 601).broken).toContain('chapter two is broken');
   expect(service.frame('bad', 1501).broken).toContain('chapter four failed to load');
-  const res = await fetch(`${srv.url}/api/frames/bad/601.jpg`);
+  const res = await fetchT(`${srv.url}/api/frames/bad/601.jpg`);
   expect(res.status).toBe(409);
   expect((await res.json()).error).toContain('chapter two is broken');
   expect(pool.stats().painted + pool.stats().failures).toBe(before);
@@ -595,7 +597,7 @@ slowTest('POST /api/frames/<v>/paint-ahead: UI hosts, the token, a known version
 
 slowTest('a request held past the hold time is answered 202, to be asked again', async () => {
   const app = createApp({ db, root, data, token, events, port, frames: service, frameHoldMs: 100 });
-  const get = path => app.fetch(new Request(`http://localhost:${port}${path}`, { headers: { host: `localhost:${port}` } }));
+  const get = path => app.fetch(new Request(`http://localhost:${port}${path}`, { headers: { host: `localhost:${port}`, 'x-studio-token': token } }));
   const res = await get('/api/frames/slow/48.jpg');
   expect(res.status).toBe(202);
   expect(res.headers.get('retry-after')).toBe('1');
@@ -644,18 +646,34 @@ slowTest('a bad CHROME_PATH fixed while the studio runs: painting recovers once 
   } finally { await pool2.close(); }
 }, T);
 
+test('frame and coverage requests another site made, or sent without the token, are refused before anything is queued', async () => {
+  const before = { ...pool.stats(), queued: pool.stats().queued.length };
+  for (const site of ['cross-site', 'same-site']) {
+    for (const path of ['/api/frames/tiny/3001.jpg', '/api/coverage/tiny', '/api/coverage/nope']) {
+      expect([site, path, (await fetchT(`${srv.url}${path}`, { headers: { 'sec-fetch-site': site } })).status]).toEqual([site, path, 403]);
+    }
+  }
+  for (const path of ['/api/frames/tiny/3001.jpg', '/api/frames/nope/1.jpg', '/api/coverage/tiny', '/api/coverage/nope']) {
+    expect([path, (await fetch(`${srv.url}${path}`)).status]).toEqual([path, 403]);
+  }
+  const after = pool.stats();
+  expect([after.queued.length, after.painting, after.painted, after.loads]).toEqual([before.queued, before.painting, before.painted, before.loads]);
+  // the studio's own page: same-origin, with the token
+  expect((await fetchT(`${srv.url}/api/coverage/tiny`, { headers: { 'sec-fetch-site': 'same-origin' } })).status).toBe(200);
+});
+
 test('missing versions, chapters and frames are 404s', async () => {
-  expect((await fetch(`${srv.url}/api/frames/partial/1500.jpg`)).status).toBe(404);
-  expect((await fetch(`${srv.url}/api/frames/nope/10.jpg`)).status).toBe(404);
-  expect((await fetch(`${srv.url}/api/frames/tiny/${N}.jpg`)).status).toBe(404);
-  expect((await fetch(`${srv.url}/api/coverage/nope`)).status).toBe(404);
+  expect((await fetchT(`${srv.url}/api/frames/partial/1500.jpg`)).status).toBe(404);
+  expect((await fetchT(`${srv.url}/api/frames/nope/10.jpg`)).status).toBe(404);
+  expect((await fetchT(`${srv.url}/api/frames/tiny/${N}.jpg`)).status).toBe(404);
+  expect((await fetchT(`${srv.url}/api/coverage/nope`)).status).toBe(404);
 }, T);
 
 slowTest('the frame, coverage and cache routes are served on UI hosts only', async () => {
   const w0 = `w0.localhost:${port}`, headers = { origin: `http://localhost:${port}`, 'x-studio-token': token };
   for (const path of ['/api/frames/tiny/48.jpg', '/api/coverage/tiny', '/api/cache']) {
-    expect((await at(w0, path)).status).toBe(404);
-    expect((await at(`localhost:${port}`, path)).status).toBe(200);
+    expect((await at(w0, path, { headers: { 'x-studio-token': token } })).status).toBe(404);
+    expect((await at(`localhost:${port}`, path, { headers: { 'x-studio-token': token } })).status).toBe(200);
   }
   expect((await at(w0, '/api/cache/clear', { method: 'POST', headers })).status).toBe(404);
 }, T);
