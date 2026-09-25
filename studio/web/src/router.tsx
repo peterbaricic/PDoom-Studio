@@ -2,17 +2,14 @@
 // based (no file-router / codegen step): four routes, none of which collide with the server's own /v/…, /work/…,
 // /api/…, /library/… or /thumbs/… — the server answers all of these with index.html (studio/app.js).
 //
-// The screen components here are placeholders; later tasks (6-9) fill them in. This task only wires up the routes,
-// their params/search, and the "/" redirect.
-import { Outlet, createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router';
+// Every screen sits inside AppShell (the root route's component: sidebar, header, overlays). The screen components
+// here are still placeholders; later tasks (7-9) fill them in.
+import { createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router';
 import { api } from './api/client';
 import type { Version } from './api/types';
+import { AppShell } from './shell/AppShell';
 
-function RootComponent() {
-  return <Outlet />;
-}
-
-const rootRoute = createRootRoute({ component: RootComponent });
+const rootRoute = createRootRoute({ component: AppShell });
 
 // "/" redirects to the most recently updated version of the user's own (not an example), else /versions/original —
 // there's nothing to render here itself.
@@ -75,7 +72,7 @@ function LibraryPlaceholder() {
 
 const libraryRoute = createRoute({ getParentRoute: () => rootRoute, path: '/library', component: LibraryPlaceholder });
 
-const routeTree = rootRoute.addChildren([indexRoute, workspaceRoute, watchRoute, libraryRoute]);
+export const routeTree = rootRoute.addChildren([indexRoute, workspaceRoute, watchRoute, libraryRoute]);
 
 export const router = createRouter({ routeTree });
 

@@ -28,15 +28,39 @@ function devTokenPlugin(): Plugin {
   };
 }
 
+// The SPA CSP's style-src 'self' blocks every <style> tag a script creates at runtime. Two dependencies make them:
+//
+// - sonner (the toasts) injects its whole stylesheet at import time. The same CSS ships as sonner/dist/styles.css,
+//   which components/ui/sonner.tsx imports into the bundle; this plugin turns the injector into a no-op. It fails the
+//   build if sonner's bundle ever stops defining the injector it expects, rather than silently shipping a violation.
+// - react-remove-scroll (Radix's scroll lock for modal layers) injects one whenever a dialog or sheet opens; the
+//   alias below swaps it for src/lib/remove-scroll.tsx, which locks scroll through the CSSOM instead.
+//
+// test/app.test.js proves the result in a real browser: the built app, with a toast and a sheet on screen, reports
+// no CSP violations. (The dev server serves no CSP, and its pre-bundled dependencies skip both, harmlessly.)
+function sonnerWithoutInjectedCss(): Plugin {
+  const injector = 'function __insertCSS(code) {';
+  return {
+    name: 'studio-sonner-without-injected-css',
+    transform(code, id) {
+      if (!/[\\/]node_modules[\\/]sonner[\\/]dist[\\/]index\.m?js$/.test(id)) return null;
+      if (!code.includes(injector)) this.error(`${id} no longer defines __insertCSS: check how this sonner injects its CSS`);
+      return { code: code.replace(injector, `${injector} return;`), map: null };
+    },
+  };
+}
+
 const webRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
 export default defineConfig({
   root: webRoot,
-  plugins: [react(), tailwindcss(), devTokenPlugin()],
+  plugins: [react(), tailwindcss(), devTokenPlugin(), sonnerWithoutInjectedCss()],
+  resolve: { alias: [{ find: /^react-remove-scroll$/, replacement: resolve(webRoot, 'src/lib/remove-scroll.tsx') }] },
   // assetsDir is 'app-assets', not the default 'assets': studio/app.js serves the repo's own /assets/ (the song,
   // the bundled fonts — PUBLIC) at that path already, and hashed build output needs a namespace that can't collide
   // with it.
-  build: { outDir: 'dist', assetsDir: 'app-assets', emptyOutDir: true },
+  // One bundle, served from localhost: there's no network to split it for, so the 500 kB warning is only noise.
+  build: { outDir: 'dist', assetsDir: 'app-assets', emptyOutDir: true, chunkSizeWarningLimit: 2000 },
   server: {
     port: 5173,
     strictPort: true,

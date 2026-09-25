@@ -76,3 +76,12 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* components/ui/scroll-area.tsx: a plain scrolling box (Radix's ScrollArea injects an inline <style>, which the CSP
+   blocks), with a thin scrollbar in the theme's colours. */
+@layer components {
+  .scroll-area {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+}

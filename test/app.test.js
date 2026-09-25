@@ -546,8 +546,24 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   // The "/" -> "/versions/<id>" client-side redirect (router.tsx) has to have actually run for this to prove
   // anything: it depends on a same-origin fetch succeeding under connect-src 'self'.
   await page.waitForFunction(() => location.pathname.startsWith('/versions/'), { timeout: 10000 });
+
+  // The pieces that bring their own runtime CSS have to be on screen too: a toast (sonner injects a <style> tag at
+  // import time) and a modal sheet (Radix locks page scroll through react-remove-scroll, which injects one when it
+  // opens). Clearing the cache from the settings popover shows a toast; the jobs indicator opens the jobs drawer.
+  await page.click('button[aria-label="Settings"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent === 'Clear cache' && !b.disabled), { timeout: 10000 });
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent === 'Clear cache').click());
+  await page.waitForSelector('[data-sonner-toast]', { timeout: 10000 });
+  // sonner's stylesheet made it into the bundle (a CSP-blocked <style> tag would have left the toaster unstyled).
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('[data-sonner-toaster]')).position)).toBe('fixed');
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Jobs:')).click());
+  await page.waitForSelector('[role="dialog"][data-slot="sheet-content"]', { timeout: 10000 });
+  await new Promise(r => setTimeout(r, 300));   // let any late violation reports arrive
+
   violations.push(...(await page.evaluate(() => window.__cspViolations || [])));
   expect(violations).toEqual([]);
   expect(pageErrors).toEqual([]);
+  // Page scroll is still locked while the sheet is open, without a <style> tag.
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).toBe('hidden');
   await page.close();
 }, 30000);

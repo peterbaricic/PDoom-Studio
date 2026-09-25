@@ -82,7 +82,7 @@ export function handleStudioEvent(queryClient: QueryClient, type: string, data: 
 
 const EVENT_TYPES = ['version', 'job', 'log', 'library', 'frames'] as const;
 
-// One EventSource per mounted app (App shell, task 6, calls this once). Reconnection is the browser's own: a plain
+// One EventSource per mounted app (main.tsx's App calls this once). Reconnection is the browser's own: a plain
 // EventSource retries with backoff on its own, so a studio restart's dropped connection comes back without any code
 // here — the client 403 handling in client.ts is what tells the user to reload for a stale token.
 export function useStudioEvents(queryClient: QueryClient): void {

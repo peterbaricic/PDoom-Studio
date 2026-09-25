@@ -73,7 +73,9 @@ const events = createEvents(), token = randomBytes(24).toString('hex'), baseUrl 
 if (dev) {
   const devTokenPath = join(data, '.studio/dev-token');
   mkdirSync(dirname(devTokenPath), { recursive: true });
-  writeFileSync(devTokenPath, token);
+  // Created 600 (never briefly readable by others between the write and the chmod); the chmod is for a file that
+  // already existed with looser permissions, which writeFileSync's mode leaves alone.
+  writeFileSync(devTokenPath, token, { mode: 0o600 });
   chmodSync(devTokenPath, 0o600);
   console.warn(`--dev: also accepting requests from http://localhost:5173 (the Vite dev server) — never run this against real data.`);
 }
