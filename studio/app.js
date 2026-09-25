@@ -21,13 +21,33 @@ const NO_STORE = { 'cache-control': 'no-store' };
 // CSP source lists (and logs an error that would fail every render check), so [::1] can't be listed as a framer.
 // No workers, frames or plugins either (p5 and p5.brush use none): a worker is a separate browser target, so its
 // requests would bypass render.mjs's page-level interception, and a frame or object could hold a same-origin document
-// served without this policy (any file under /src/), from which a worker could be started out of this policy's reach.
+// from which a worker could be started out of this policy's reach.
+// No inline script: studio.html has none, and allowing it would let chapter code add its own, speculation rules
+// included (a prefetch or prerender of any URL). Inline style stays allowed (studio.html's <style>, and p5 sets style
+// attributes); what CSS can load is still limited by img-src, font-src and style-src.
+// Sandboxed, which matters in the user's own browser, where the player's workers run chapter code with none of the
+// render browser's network isolation (studio/browser.js): no popups (not even after a user gesture), top-level
+// navigation, downloads or form submissions. It keeps scripts, its own origin (the loader's same-origin fetches, the
+// player's postMessage origin checks) and modal dialogs, without which Chrome silently skips render.mjs's
+// beforeunload guard.
 const onRenderer = req => /^w\d+\.localhost:\d+$/.test(req.headers.get('host') || '');
-const studioCsp = port => ["default-src 'self'", "script-src 'self' 'unsafe-inline'",
+const studioCsp = port => ["default-src 'self'", "script-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'", "worker-src 'none'", "frame-src 'none'", "object-src 'none'",
   "form-action 'none'", "base-uri 'none'",
-  `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`].join('; ');
+  `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`,
+  'sandbox allow-scripts allow-same-origin allow-modals'].join('; ');
+// Everything else a renderer host answers (watch.html, the engine scripts and libraries, version files, JSON, errors)
+// is only ever meant as a subresource of studio.html, but chapter code could open or frame any of it as a page of its
+// own origin, whose window would have an unrestricted fetch, Image and Worker. So each carries a policy that makes it,
+// as a page, a sandboxed opaque origin that can load nothing, and nosniff keeps a script from being taken for a page.
+// (A policy on a script, style, media or fetch response is ignored when it's loaded as what it is.)
+const LOCKED_DOWN_CSP = "default-src 'none'; sandbox; frame-ancestors 'none'";
+const lockDown = res => {
+  res.headers.set('x-content-type-options', 'nosniff');
+  if (!res.headers.has('content-security-policy')) res.headers.set('content-security-policy', LOCKED_DOWN_CSP);
+  return res;
+};
 // Whatever the CSP misses, a renderer host never serves a service worker or shared worker script: Chrome marks
 // those fetches with Sec-Fetch-Dest, and every one of them is answered 404, whatever the path.
 const WORKER_DESTS = ['serviceworker', 'sharedworker'];
@@ -201,7 +221,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     }],
   ];
 
-  app.fetch = async req => {
+  const answer = async req => {
     const denied = guard(req); if (denied) return denied;
     const path = new URL(req.url).pathname;
     if (onRenderer(req) && WORKER_DESTS.includes(req.headers.get('sec-fetch-dest'))) return error(404, 'not found');
@@ -218,5 +238,6 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC.some(r => r.test(path.slice(1)))) return file(req, root, path.slice(1));
     return error(404, 'not found');
   };
+  app.fetch = async req => onRenderer(req) ? lockDown(await answer(req)) : answer(req);
   return app;
 }

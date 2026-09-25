@@ -64,10 +64,14 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   }
   const res = await getOn('w1.localhost:8080', '/studio.html?v=a');
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain('src/loader.js');
+  const html = await res.text();
+  expect(html).toContain('src/loader.js');
+  // No inline script, so the policy needn't allow any: chapter code can't add its own (or speculation rules) either.
+  expect(html.match(/<script\b[^>]*>/g).filter(tag => !/\bsrc=/.test(tag))).toEqual([]);
+  expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   const csp = Object.fromEntries(res.headers.get('content-security-policy').split(';').map(d => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
   expect(csp['default-src']).toEqual(["'self'"]);
-  expect(csp['script-src']).toEqual(["'self'", "'unsafe-inline'"]);
+  expect(csp['script-src']).toEqual(["'self'"]);
   expect(csp['style-src']).toEqual(["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']);
   expect(csp['font-src']).toEqual(["'self'", 'https://fonts.gstatic.com']);
   expect(csp['img-src']).toEqual(["'self'", 'data:', 'blob:']);
@@ -79,6 +83,36 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   expect(csp['form-action']).toEqual(["'none'"]);
   expect(csp['base-uri']).toEqual(["'none'"]);
   expect(csp['frame-ancestors']).toEqual(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://*.localhost:8080']);
+  // Sandboxed: no popups, top-level navigation, downloads or forms, whatever user activation it gets. Scripts and its
+  // own origin stay (the loader's fetches, the player's postMessage origin checks), and so do modal dialogs, without
+  // which Chrome silently skips render.mjs's beforeunload guard.
+  expect(csp.sandbox).toEqual(['allow-scripts', 'allow-same-origin', 'allow-modals']);
+});
+
+test('everything else a renderer host serves is locked down, should it ever be opened as a page', async () => {
+  // Chapter code could open (or frame) any of these on its own origin; without a policy of their own, such a page
+  // would hand it a window with an unrestricted fetch. Sandboxed into an opaque origin with nothing allowed to load,
+  // there's nothing to reach into, and nosniff keeps a script from ever being taken for a page.
+  const { db: db2, app: app2 } = withExamples();
+  db2.createVersion({ id: 'a' });
+  db2.writeFiles('a', [{ path: 'ch/c01.js', content: '// one' }, { path: 'STORYBOARD.md', content: '# a' }], { source: 'manual' });
+  const locked = "default-src 'none'; sandbox; frame-ancestors 'none'";
+  for (const host of ['w0.localhost:8080', 'w4.localhost:8080']) {
+    const at = (p, headers = {}) => app2.fetch(new Request(`http://${host}${p}`, { headers: { host, ...headers } }));
+    for (const [p, status, type] of [['/watch.html', 200, 'text/html'], ['/src/core.js', 200, 'text/javascript'], ['/src/loader.js', 200, 'text/javascript'],
+      ['/node_modules/p5/lib/p5.min.js', 200, 'text/javascript'], ['/assets/pdoom.mp3', 200, 'audio/mpeg'], ['/v/a/ch/c01.js', 200, 'text/javascript'],
+      ['/v/a/STORYBOARD.md', 200, 'text/markdown'], ['/api/versions/a', 200, 'application/json'], ['/api/jobs', 404, 'application/json'], ['/nope.html', 404, 'application/json']]) {
+      const res = await at(p);
+      expect([p, res.status, res.headers.get('content-type').split(';')[0]]).toEqual([p, status, type]);
+      expect([p, res.headers.get('content-security-policy'), res.headers.get('x-content-type-options')]).toEqual([p, locked, 'nosniff']);
+    }
+    const range = await at('/assets/pdoom.mp3', { range: 'bytes=0-99' });
+    expect([range.status, range.headers.get('content-range')?.split('/')[0], range.headers.get('content-security-policy')]).toEqual([206, 'bytes 0-99', locked]);
+    expect((await range.arrayBuffer()).byteLength).toBe(100);
+  }
+  // The studio's own hosts, where no version code runs, are left as they were.
+  const own = await app2.fetch(new Request('http://localhost:8080/watch.html', { headers: H }));
+  expect([own.status, own.headers.get('content-security-policy')]).toEqual([200, null]);
 });
 
 test('renderer hosts never serve a service worker or shared worker script, whatever the path', async () => {

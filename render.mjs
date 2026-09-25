@@ -134,14 +134,16 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     window.open = () => null;
     // A same-tab navigation away (location.href = …, a link, a form) starts with beforeunload; cancelling it here
     // keeps the current document live, instead of racing to abort the network request after the browser already
-    // committed to unloading (which reliably wedges the renderer — the page never becomes ready).
+    // committed to unloading (which reliably wedges the renderer — the page never becomes ready). It needs
+    // studio.html's sandbox to allow modals: without allow-modals, Chrome skips the prompt and lets the page go.
     addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
   });
   // A beforeunload prompt is silently skipped for a frame that's never had real input, so it needs one gesture below
   // to make the cancellation above actually take effect.
   page.on('dialog', d => d.dismiss().catch(() => {}));
-  // Belt and suspenders for any popup that slips past the override above (e.g. a future code path that reintroduces
-  // window.open): closed immediately, and network-dead regardless.
+  // Belt and suspenders for any popup that slips past the override above (document.open(url, name, features) and a
+  // target=_blank link do, though studio.html's sandbox now refuses popups altogether): closed immediately, and
+  // network-dead regardless.
   page.on('popup', async popup => {
     await popup.setRequestInterception(true).catch(() => {});
     popup.on('request', request => request.abort('aborted').catch(() => {}));
@@ -158,6 +160,9 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
   });
   page.on('console', m => {
     if (!['error', 'warn'].includes(m.type())) return;
+    // Chrome says this of studio.html's CSP sandbox (see studio/app.js) as if it were an iframe's sandbox attribute,
+    // the kind a same-origin parent's script could remove. A header's can't be; it isn't worth printing on every render.
+    if (/both allow-scripts and allow-same-origin for its sandbox attribute/.test(m.text())) return;
     if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
     else console.log(`[page${tag}]`, m.text());
   });

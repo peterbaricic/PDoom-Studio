@@ -1,5 +1,6 @@
 // loader.js: loads one version's own scripts (shared.js, then the chapters) from the studio server and applies its
 // engine options. ?v=<id> loads a version from the database, ?work=<jobId> a job's work folder; default: the original.
+const CAST = {};  // guest characters shared between chapters (e.g. for the curtain call)
 window.ENGINE = { wipes: true, cornerMeter: true };
 // p5's own global-mode init (on window 'load', just before it calls setup()) reassigns a `VERSION` global of its
 // own, clobbering an early `window.VERSION` set here. The promise's resolved value lets core.js re-apply the
