@@ -4,7 +4,11 @@ import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../studio/db.js';
 import { permissionSettings } from '../studio/claude-job.js';
-import { isolatedEnv, tempDir, tempDefaultDb } from './helpers.js';
+import { serve } from '../studio/serve.js';
+import { createEvents } from '../studio/events.js';
+import { findBrowser, gpuArgs } from '../studio/browser.js';
+import puppeteer from 'puppeteer-core';
+import { isolatedEnv, tempDir, tempDefaultDb, captureHosts } from './helpers.js';
 
 // Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
 const root = process.cwd(), T = { timeout: 300000 };
@@ -78,6 +82,33 @@ test('the synthetic key press that arms the navigation guard does not perturb th
     expect(statSync(join(armed, f)).size).toBeGreaterThan(1000);
     const [a, b] = await Promise.all([Bun.file(join(armed, f)).arrayBuffer(), Bun.file(join(unarmed, f)).arrayBuffer()]);
     expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).toBe(0);
+  }
+}, T);
+
+test('the network lockdown leaves the picture as it was: stills match the same frames painted without it, byte for byte', async () => {
+  // render.mjs's browser (dead proxy, WebRTC policy, resolver rules, request interception, the guard gesture) against a
+  // browser launched with the GPU flags alone, both painting the Original from the same server code. If anything in
+  // the lockdown kept something the picture needs from loading (Google Fonts, above all), the typefaces would differ.
+  const dir = mkdtempSync(join(tmpdir(), 'locked-')), times = [5, 40, 90, 150];
+  const r = await run(`--stills=${times.join(',')}`, `--out=${dir}`);
+  expect(r.code).toBe(0);
+  const db = openDb(join(tempDir(), 'user.db'), { defaultPath: defaultDbPath });
+  const srv = serve({ db, root, data: tempDir(), token: 't', events: createEvents(), port: 0 });
+  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
+  try {
+    const page = await plain.newPage();
+    await page.goto(`${srv.url}/studio.html?render&v=original`);
+    await page.waitForFunction('window.ready === true', { timeout: 60000 });
+    for (const t of times) {
+      const url = await page.evaluate(t => window.renderAt(t, 'image/png'), t);
+      const locked = Buffer.from(await Bun.file(join(dir, `t${t.toFixed(2).replace('.', '_')}.png`)).arrayBuffer());
+      expect(locked.length).toBeGreaterThan(1000);
+      expect([t, Buffer.compare(Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'), locked)]).toEqual([t, 0]);
+    }
+  } finally {
+    await plain.close();
+    srv.stop();
+    db.close();
   }
 }, T);
 
@@ -236,6 +267,69 @@ test('a chapter cannot reach an external host through a service worker, a shared
     capture.stop(true);
   }
   expect(hits).toEqual([]);
+}, T);
+
+test('a chapter cannot reach another host through a popup, speculation rules, a link hint or WebRTC', async () => {
+  // Each attempt aims at its own stand-in host (see captureHosts), so a hit names the attempt that got through:
+  // (a) document.open with three arguments, which is window.open by another name; (b) a target=_blank link, clicked;
+  // (c) a same-origin popup of a page served without studio.html's policy, then that window's fetch, Image and
+  // Worker; (d) speculation rules (prefetch and prerender) and <link rel=prerender>; (e) a preconnect, a TCP
+  // connection with no request; (f) WebRTC TURN over TCP (plus TURN over UDP and STUN, to the UDP stand-in), from the
+  // page itself and from a fresh about:blank realm, where anything the page's own window lacks is back.
+  const cap = await captureHosts(['a', 'b', 'c', 'd', 'd-link', 'e', 'f', 'f-realm']);
+  const E = Object.fromEntries(['a', 'b', 'c', 'd', 'd-link', 'e'].map(k => [k, cap.url(k)]));
+  const ice = name => [`turn:127.0.0.1:${cap.port(name)}?transport=tcp`, `turn:127.0.0.1:${cap.port('udp')}?transport=udp`, `stun:127.0.0.1:${cap.port('udp')}`];
+  const data = tempDir(), db = openDb(join(data, 'user.db'));
+  db.createVersion({ id: 'escape-routes' });
+  db.writeFiles('escape-routes', [{ path: 'ch/c01.js', content: `
+const E = ${JSON.stringify(E)};
+if (typeof document === 'undefined') fetch(E.c + '/c-worker').catch(() => {});   // (c), as the worker
+else {
+  const self = document.currentScript.src, attempt = f => { try { f(); } catch {} };
+  const link = (rel, href) => { const l = document.createElement('link'); l.rel = rel; l.href = href; document.head.append(l); };
+  const turn = (Ctor, urls) => {
+    const pc = new Ctor({ iceServers: [{ urls, username: 'secret', credential: 'secret' }] });
+    pc.createDataChannel('x');
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => {});
+  };
+  attempt(() => document.open(E.a + '/a', 'a', ''));
+  for (const rel of ['', 'noopener']) attempt(() => {
+    const l = document.createElement('a'); l.href = E.b + '/b-' + rel; l.target = '_blank'; l.rel = rel; document.body.append(l); l.click();
+  });
+  for (const [i, path] of ['/watch.html', '/src/lyrics.js'].entries()) attempt(() => {
+    const w = document.open(path, 'c' + i, '');
+    const reach = () => {
+      attempt(() => w.fetch(E.c + '/c-fetch').catch(() => {}));
+      attempt(() => { new w.Image().src = E.c + '/c-img'; });
+      attempt(() => new w.Worker(self));
+    };
+    for (const ms of [0, 100, 300, 600]) setTimeout(reach, ms);
+  });
+  attempt(() => {
+    const s = document.createElement('script'); s.type = 'speculationrules';
+    // Over https too (Chrome prefetches another site only over https), and same-site (another port on w0.localhost).
+    const at = path => [E.d, E.d.replace('http:', 'https:'), E.d.replace('127.0.0.1', 'w0.localhost')].map(u => u + path);
+    s.textContent = JSON.stringify({ prefetch: [{ source: 'list', urls: at('/d-prefetch') }], prerender: [{ source: 'list', urls: at('/d-prerender') }] });
+    document.head.append(s);
+  });
+  attempt(() => link('prerender', E['d-link'] + '/d-link-prerender'));
+  attempt(() => link('preconnect', E.e));
+  attempt(() => turn(RTCPeerConnection, ${JSON.stringify(ice('f'))}));
+  attempt(() => turn(document.body.appendChild(document.createElement('iframe')).contentWindow.RTCPeerConnection, ${JSON.stringify(ice('f-realm'))}));
+}
+` }], { source: 'manual' });
+  db.close();
+  const out = mkdtempSync(join(tmpdir(), 'sheet-'));
+  try {
+    const r = await spawn(['bun', 'render.mjs', '--v=escape-routes', '--sheet=1,2,3', `--out=${join(out, 'sheet.jpg')}`], { env: isolatedEnv(data) });
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(statSync(join(out, 'sheet.jpg')).size).toBeGreaterThan(1000);
+    await Bun.sleep(1000);   // anything still in flight when the browser closed would land about now
+  } finally {
+    cap.stop();
+  }
+  expect(cap.hits).toEqual({});
 }, T);
 
 test('without USER_DB, the in-process server reads user.db in STUDIO_DATA, or a not-yet-migrated studio.db there', async () => {

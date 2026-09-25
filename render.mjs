@@ -114,13 +114,14 @@ if (!base) {
 const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
 const PAGE = `${pageOrigin.origin}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
-// The CSP blocks chapter code from fetching or XHR-ing out, but not from navigating the top-level page away, from
-// form submission, or from opening a popup — so a sandboxed render still needs its own net to catch those. Requests
-// to the page's own origin are allowed, plus the Google Fonts domains studio.html's stylesheet loads from.
+// Underneath everything here, the browser itself can reach no host but the studio's port and Google Fonts (see
+// launchBrowser in studio/browser.js). The CSP blocks chapter code from fetching or XHR-ing out, but not from
+// navigating the top-level page away or from opening a popup — so a render keeps its own net to catch those as well.
+// Requests to the page's own origin are allowed, plus the Google Fonts domains studio.html's stylesheet loads from.
 const PAGE_ORIGIN = new URL(PAGE).origin;
 const ALLOWED_ORIGINS = new Set([PAGE_ORIGIN, 'https://fonts.googleapis.com', 'https://fonts.gstatic.com']);
 
-browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX });
+browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 });
 let exitCode = 0;
 // errors: collect load and page errors there instead of logging them (--check). strict: an error while the page loads
 // (a chapter that throws, a script that can't load) is fatal instead of logged, so it can't be painted as missing.

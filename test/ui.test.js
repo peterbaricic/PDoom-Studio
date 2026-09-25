@@ -20,7 +20,7 @@ beforeAll(async () => {
   let out = '';
   while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
   url = /Studio: (http:\/\/localhost:\d+)\//.exec(out)[1];
-  browser = await launchBrowser();
+  browser = await launchBrowser({ port: new URL(url).port });
   page = await browser.newPage();
   await page.setViewport({ width: 1400, height: 1000 });
 });
