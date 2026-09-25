@@ -76,13 +76,14 @@ test('replaces an existing database only once the new one is complete', () => {
   expect(readdirSync(join(out, '..'))).toEqual(['default.db']);
 });
 
+const run = async (...args) => {
+  const p = Bun.spawn(['bun', 'studio/build-default.js', ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { out, err, code };
+};
+
 test('the command line refuses the same file twice, and says how to use it', async () => {
   const source = tempDefaultDb(), bytes = readFileSync(source);
-  const run = async (...args) => {
-    const p = Bun.spawn(['bun', 'studio/build-default.js', ...args], { stdout: 'pipe', stderr: 'pipe' });
-    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-    return { out, err, code };
-  };
   const same = await run('--from', source, source);
   expect(same.code).toBe(1);
   expect(same.err).toContain('is the source itself');
@@ -96,4 +97,13 @@ test('the command line refuses the same file twice, and says how to use it', asy
   const out = join(tempDir(), 'default.db'), ok = await run('--from', source, out);
   expect(ok.code).toBe(0);
   expect(existsSync(out)).toBe(true);
+});
+
+test('the command line builds into a folder that does not exist yet', async () => {
+  // As the documented rebuild command does with out/, which a fresh checkout doesn't have.
+  const nested = join(tempDir(), 'out', 'deeper', 'default.db'), fresh = await run('--from', tempDefaultDb(), nested);
+  expect(fresh.err).toBe('');
+  expect(fresh.code).toBe(0);
+  expect(rows(nested).versions.map(v => v.id)).toEqual(['original']);
+  expect(readdirSync(join(nested, '..'))).toEqual(['default.db']);
 });

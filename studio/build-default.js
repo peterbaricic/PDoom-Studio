@@ -14,7 +14,8 @@
 // To rebuild studio/default.db:
 //   bun studio/build-default.js --from studio/default.db out/default.db && mv out/default.db studio/default.db
 import { Database } from 'bun:sqlite';
-import { existsSync, statSync, unlinkSync, renameSync } from 'node:fs';
+import { existsSync, statSync, unlinkSync, renameSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { SCHEMA, EXAMPLE_REVISION_FLOOR } from './db.js';
 
 const VERSIONS = 'id, title, logline, concept, options, status, created_at, updated_at';
@@ -45,7 +46,8 @@ export function buildDefault(fromPath, outPath) {
   if (low) throw new Error(`${fromPath} is not an examples database (revision ${low.id} is below ${EXAMPLE_REVISION_FLOOR})`);
 
   // Beside <out.db>, so the rename is atomic; any leftover of an earlier build that died goes first. (Named so that
-  // .gitignore's studio/default.db-* covers it too.)
+  // .gitignore's studio/default.db-* covers it too.) Its folder is made if need be (e.g. out/ on a fresh checkout).
+  mkdirSync(dirname(outPath), { recursive: true });
   const tmpPath = `${outPath}-building`;
   removeWithJournals(tmpPath);
   try {
