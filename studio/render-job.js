@@ -109,20 +109,28 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
   // Three frames per chapter (0.3 s in, the middle, 0.3 s from the end) through the frame service, scaled to
   // 320 px wide and placed side by side with ffmpeg — the same cache preview and final renders share, so a chapter
   // already covered by a preview or a render costs nothing extra here, and a second run of this job paints nothing.
+  // All nine chapter slots are attempted regardless of how many the version actually has written: a chapter that
+  // isn't written yet or whose segment is broken is logged and skipped rather than failing the whole job, so the
+  // healthy chapters still get their thumbnail. Only cancellation stops the job outright.
   const thumbs = async (job, ctx) => {
-    const vid = job.version_id, chapters = db.listFiles(vid).filter(f => f.path.startsWith('ch/'));
-    for (const [k, f] of chapters.entries()) {
-      const n = +/^ch\/c0(\d)/.exec(f.path)[1], [a, b] = CHAPTER_WINDOWS[n - 1];
+    const vid = job.version_id;
+    for (let n = 1; n <= 9; n++) {
+      const [a, b] = CHAPTER_WINDOWS[n - 1];
       const frameIdx = [a + .3, (a + b) / 2, b - .3].map(t => Math.round(t * FPS));
-      const files = await Promise.all(frameIdx.map(i => frameFile(frames, vid, i, 'thumbs', ctx)));
-      const out = join(data, '.studio/thumbs', vid, `c0${n}.jpg`);
-      mkdirSync(dirname(out), { recursive: true });
-      await runFfmpeg([
-        '-y', '-loglevel', 'error', '-i', files[0], '-i', files[1], '-i', files[2],
-        '-filter_complex', '[0:v]scale=320:-1[s0];[1:v]scale=320:-1[s1];[2:v]scale=320:-1[s2];[s0][s1][s2]hstack=inputs=3',
-        '-frames:v', '1', '-q:v', '3', out,
-      ], { root, ctx });
-      ctx.progress((k + 1) / chapters.length);
+      try {
+        const files = await Promise.all(frameIdx.map(i => frameFile(frames, vid, i, 'thumbs', ctx)));
+        const out = join(data, '.studio/thumbs', vid, `c0${n}.jpg`);
+        mkdirSync(dirname(out), { recursive: true });
+        await runFfmpeg([
+          '-y', '-loglevel', 'error', '-i', files[0], '-i', files[1], '-i', files[2],
+          '-filter_complex', '[0:v]scale=320:-1[s0];[1:v]scale=320:-1[s1];[2:v]scale=320:-1[s2];[s0][s1][s2]hstack=inputs=3',
+          '-frames:v', '1', '-q:v', '3', out,
+        ], { root, ctx });
+      } catch (e) {
+        if (ctx.signal.aborted) throw new Error('cancelled');
+        ctx.log(`chapter ${n}: skipped (${e.message})\n`);
+      }
+      ctx.progress(n / 9);
     }
     events?.publish('version', { id: vid });
   };

@@ -50,6 +50,13 @@ beforeAll(async () => {
   db.createVersion({ id: 'slowcancel', title: 'Slow', logline: 'Long enough to cancel mid-fill.' });
   db.writeFiles('slowcancel', [{ path: 'ch/c01.js', content: fastChapter(1, 'const end = performance.now() + 200; while (performance.now() < end) {}') }], { source: 'manual' });
 
+  // Chapter 1 is healthy, chapter 2 throws while painting, and chapters 3-9 are never written at all.
+  db.createVersion({ id: 'patchy', title: 'Patchy' });
+  db.writeFiles('patchy', [
+    { path: 'ch/c01.js', content: fastChapter(1) },
+    { path: 'ch/c02.js', content: "chapter('c2', 23, 38.5, [[23, t => { throw new Error('chapter two is broken'); }]]);" },
+  ], { source: 'manual' });
+
   port = freePort();
   events = createEvents();
   cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: 1e12 });
@@ -204,4 +211,20 @@ test('thumbnails are composed from three cached frames per chapter, and a second
   const job2 = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'boundary' }));
   await runners.thumbs(job2, ctx());
   expect(pool.stats().painted).toBe(before2);      // all six frames were already cached: nothing new to paint
+}, T);
+
+test('thumbs skips a broken or missing chapter, logs why, and still succeeds', async () => {
+  const lines = [];
+  const job = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'patchy' }));
+  await runners.thumbs(job, { signal: new AbortController().signal, log: t => lines.push(t), progress: () => {}, cost: () => {} });
+
+  expect(existsSync(join(data, '.studio/thumbs/patchy/c01.jpg'))).toBe(true);    // the healthy chapter still gets one
+  expect(existsSync(join(data, '.studio/thumbs/patchy/c02.jpg'))).toBe(false);   // broken
+  expect(existsSync(join(data, '.studio/thumbs/patchy/c03.jpg'))).toBe(false);   // never written
+
+  const log = lines.join('');
+  expect(log).toContain('chapter 2: skipped');
+  expect(log).toContain('chapter two is broken');
+  expect(log).toContain('chapter 3: skipped');
+  expect(log).toMatch(/chapter 3 isn't written yet/);
 }, T);
