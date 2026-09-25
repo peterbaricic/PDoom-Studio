@@ -44,7 +44,9 @@ export function buildDefault(fromPath, outPath) {
   const low = revisions.find(r => r.id < EXAMPLE_REVISION_FLOOR);
   if (low) throw new Error(`${fromPath} is not an examples database (revision ${low.id} is below ${EXAMPLE_REVISION_FLOOR})`);
 
-  const tmpPath = `${outPath}.building-${process.pid}`;
+  // Beside <out.db>, so the rename is atomic; any leftover of an earlier build that died goes first. (Named so that
+  // .gitignore's studio/default.db-* covers it too.)
+  const tmpPath = `${outPath}-building`;
   removeWithJournals(tmpPath);
   try {
     const db = new Database(tmpPath, { create: true, strict: true });
