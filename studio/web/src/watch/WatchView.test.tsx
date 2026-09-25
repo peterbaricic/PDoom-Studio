@@ -197,10 +197,21 @@ describe('WatchView', () => {
     expect(await screen.findByText(/This render no longer exists/)).toBeInTheDocument();
   });
 
-  test('a version with no renders points back to its workspace', async () => {
-    watch({ answers: { 'GET /api/library': [render({ id: 4, version_id: 'other' })] } });
-    expect(await screen.findByText(/hasn't been rendered yet/)).toBeInTheDocument();
+  test('a version that was never rendered says so and points back to its workspace', async () => {
+    watch({ answers: { 'GET /api/library': [render({ id: 4, version_id: 'other' })], 'GET /api/jobs?version=mine': [job({ id: 1, kind: 'chapter' })] } });
+    expect(await screen.findByText("This version hasn't been rendered yet.")).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /back to the version/i })).toHaveAttribute('href', '/versions/mine');
+  });
+
+  test('a version whose renders were all deleted says so, not that it was never rendered', async () => {
+    watch({ answers: { 'GET /api/library': [], 'GET /api/jobs?version=mine': [job({ id: 1, kind: 'render', status: 'done' })] } });
+    expect(await screen.findByText(/This version has no renders now/)).toBeInTheDocument();
+    expect(screen.queryByText(/hasn't been rendered/)).toBeNull();
+  });
+
+  test('while it can\'t tell which, it says so neutrally', async () => {
+    watch({ answers: { 'GET /api/library': [], 'GET /api/jobs?version=mine': () => new Promise(() => {}) } });
+    expect(await screen.findByText('No render to show.')).toBeInTheDocument();
   });
 
   test('a render whose version was deleted still shows its stored title, without the version\'s parts', async () => {

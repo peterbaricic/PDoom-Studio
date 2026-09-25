@@ -13,6 +13,7 @@ import { Link } from '@tanstack/react-router';
 import { ApiError, api } from '@/api/client';
 import type { Manifest, Render, Revision, WalkthroughChapter } from '@/api/types';
 import { Skeleton } from '@/components/ui/skeleton';
+import { libraryFile, renderTitle, rendersQuery } from '@/library/renders';
 import { cn } from '@/lib/utils';
 import { jobsQuery } from '@/shell/JobsDrawer';
 import { formatDuration } from '@/shell/jobFormat';
@@ -28,19 +29,26 @@ export interface WatchViewProps {
 // The notes Claude's jobs leave when nobody gave feedback (studio/claude-job.js: `${kind} job`) say nothing about how
 // the version was made; every other note on a claude or manual revision is someone's feedback or edit.
 const PLACEHOLDER_NOTE = /^(storyboard|shared|chapter) job$/;
-const libraryFile = (file: string) => `/library/${encodeURIComponent(file)}`;
 const when = (ms: number) => new Date(ms).toLocaleString();
 
 // A version that isn't there (404) or a request the server refused won't answer differently a second later.
 const retryUnlessRefused = (count: number, e: Error) => !(e instanceof ApiError && e.status < 500) && count < 1;
 
 export function WatchView({ versionId, renderId }: WatchViewProps) {
-  const renders = useQuery({ queryKey: ['renders'], queryFn: () => api.get<Render[]>('/api/library') });
+  const renders = useQuery(rendersQuery);
   const manifest = useQuery({
     queryKey: ['version', versionId],
     queryFn: () => api.get<Manifest>(`/api/versions/${encodeURIComponent(versionId)}`),
     retry: retryUnlessRefused,
   });
+
+  // Newest first, as the library lists them.
+  const mine = (renders.data ?? []).filter(r => r.version_id === versionId).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  const render = renderId === undefined ? mine[0] : mine.find(r => r.id === renderId);
+  // With no render to play, whether the version was ever rendered (its renders deleted since) or not: a finished
+  // render job says so.
+  const nothingToPlay = !!renders.data && !render && renderId === undefined;
+  const { data: jobs } = useQuery({ ...jobsQuery(versionId), enabled: nothingToPlay });
 
   if (!renders.data) {
     if (renders.error) return <p className="text-muted-foreground p-6">{`Couldn't load the library: ${renders.error.message}`}</p>;
@@ -51,15 +59,18 @@ export function WatchView({ versionId, renderId }: WatchViewProps) {
     );
   }
 
-  // Newest first, as the library lists them.
-  const mine = renders.data.filter(r => r.version_id === versionId).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
-  const render = renderId === undefined ? mine[0] : mine.find(r => r.id === renderId);
   if (!render) {
     return (
       <div className="text-muted-foreground flex flex-col gap-2 p-6">
         {renderId === undefined ? (
           <>
-            <p>This version hasn't been rendered yet.</p>
+            <p>
+              {!jobs
+                ? 'No render to show.'
+                : jobs.some(j => j.kind === 'render' && j.status === 'done')
+                  ? 'This version has no renders now: they were deleted from the library.'
+                  : "This version hasn't been rendered yet."}
+            </p>
             <p>
               <Link to="/versions/$id" params={{ id: versionId }} className="text-foreground underline">
                 Back to the version
@@ -134,7 +145,7 @@ function Player({ render, walkthrough, side }: { render: Render; walkthrough: Wa
           onTimeUpdate={sync}
           onSeeked={sync}
         />
-        <h1 className="text-xl font-semibold">{render.title || render.version_id}</h1>
+        <h1 className="text-xl font-semibold">{renderTitle(render)}</h1>
         {render.logline && <p className="text-muted-foreground">{render.logline}</p>}
       </div>
       {walkthrough.length > 0 && <Walkthrough chapters={walkthrough} current={current} onPick={seek} />}

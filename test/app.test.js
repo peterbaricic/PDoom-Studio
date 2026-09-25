@@ -455,6 +455,15 @@ test('deleting a render removes files inside the library only', async () => {
   expect(readFileSync(join(data, 'keep.jpg'), 'utf8')).toBe('jpg');
   expect(db.listRenders()).toEqual([]);
   expect((await send('DELETE', `/api/library/${rid}`)).status).toBe(404);
+
+  // A name that climbs out is folded back into the library (safeJoin roots it there: '../inside.jpg' is
+  // <library>/inside.jpg), so it can only ever name a library file: that one goes, its namesake outside stays.
+  writeFileSync(join(lib, 'fold.mp4'), 'mp4'); writeFileSync(join(lib, 'inside.jpg'), 'in'); writeFileSync(join(data, 'inside.jpg'), 'out');
+  const folded = db.addRender({ versionId: 'a', file: 'fold.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 3, poster: '../inside.jpg' });
+  expect((await send('DELETE', `/api/library/${folded}`)).status).toBe(200);
+  expect(existsSync(join(lib, 'fold.mp4'))).toBe(false);
+  expect(existsSync(join(lib, 'inside.jpg'))).toBe(false);
+  expect(readFileSync(join(data, 'inside.jpg'), 'utf8')).toBe('out');
 });
 
 test('version responses carry storyboard errors, and the whole history', async () => {
@@ -571,17 +580,23 @@ test('work folders are served while a job runs', async () => {
 let cspServer, cspBrowser;
 beforeAll(async () => {
   const dir = tempDir('csp-');
-  // Two finished renders for the watch view and the library: a tiny real MP4 and its poster, one render of the
-  // Original and one whose version is gone (it keeps its stored title).
+  // Two finished renders for the watch view and the library: a small real MP4 (30 s, past the end of the Original's
+  // first chapter at 23 s) and its poster, one render of the Original and one whose version is gone (it keeps its
+  // stored title). A missing or failing ffmpeg fails right here.
+  const ffmpeg = (...args) => {
+    const r = Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', ...args], { stdout: 'ignore', stderr: 'pipe' });
+    if (r.exitCode !== 0) console.error(`ffmpeg ${args.join(' ')}:\n${r.stderr}`);
+    expect(r.exitCode).toBe(0);
+  };
   mkdirSync(join(dir, 'library'));
   const mp4 = join(dir, 'library/csp-original.mp4');
-  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=orange:s=320x180:d=4:r=24', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-    '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', mp4]);
-  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-i', mp4, '-frames:v', '1', join(dir, 'library/csp-original.jpg')]);
+  ffmpeg('-f', 'lavfi', '-i', 'color=c=orange:s=160x90:d=30:r=24', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+    '-t', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', mp4);
+  ffmpeg('-i', mp4, '-frames:v', '1', join(dir, 'library/csp-original.jpg'));
   cpSync(mp4, join(dir, 'library/csp-gone.mp4')); cpSync(join(dir, 'library/csp-original.jpg'), join(dir, 'library/csp-gone.jpg'));
   const userDb = openDb(join(dir, 'user.db'), { defaultPath: defaultDbPath });
-  userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 4, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
-  userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 4, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
+  userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
+  userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
   userDb.close();
   cspServer = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { cwd: root, env: isolatedEnv(dir, { DEFAULT_DB: defaultDbPath }), stdout: 'pipe', stderr: 'pipe' });
   const reader = cspServer.stdout.getReader(), dec = new TextDecoder();
@@ -661,8 +676,14 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   await page.waitForSelector('video[data-testid="watch-video"]', { timeout: 10000 });
   // its metadata loaded (media-src 'none' would leave it at HAVE_NOTHING)
   await page.waitForFunction(() => document.querySelector('video[data-testid="watch-video"]').readyState >= 1, { timeout: 10000 });
-  await page.$eval('video[data-testid="watch-video"]', v => new Promise(resolve => { v.addEventListener('seeked', resolve, { once: true }); v.currentTime = 3; }));
+  // At 0 s the first chapter is current; a seek to 25 s (chapter 2 runs from 23 s) has to move it to the second.
+  const currentChapter = () => page.$$eval('ol[aria-label="Walkthrough"] li', items => items.findIndex(li => li.getAttribute('aria-current') === 'true'));
   await page.waitForSelector('ol[aria-label="Walkthrough"] li[aria-current="true"]', { timeout: 10000 });
+  expect(await currentChapter()).toBe(0);
+  await page.$eval('video[data-testid="watch-video"]', v => new Promise(resolve => { v.addEventListener('seeked', resolve, { once: true }); v.currentTime = 25; }));
+  await page.waitForFunction(() => [...document.querySelectorAll('ol[aria-label="Walkthrough"] li')].findIndex(li => li.getAttribute('aria-current') === 'true') === 1,
+    { timeout: 10000 });
+  expect(await page.$eval('ol[aria-label="Walkthrough"] li[aria-current="true"]', li => li.textContent)).toContain('2 · ');
   await page.waitForFunction(() => document.querySelector('[aria-labelledby="how-it-was-made"]')?.textContent.includes('revisions'), { timeout: 10000 });
 
   // The pieces that bring their own runtime CSS have to be on screen too: a toast (sonner injects a <style> tag at

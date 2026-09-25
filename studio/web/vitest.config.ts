@@ -8,6 +8,9 @@ export default defineConfig({
   resolve: { alias: { '@': resolve(import.meta.dirname, 'src') } },
   test: {
     environment: 'jsdom',
+    // One jsdom per worker rather than per test file (each file still gets its own module graph and globals): the
+    // environment was most of the run's time.
+    pool: 'vmThreads',
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['./src/test-setup.ts'],
     css: false,

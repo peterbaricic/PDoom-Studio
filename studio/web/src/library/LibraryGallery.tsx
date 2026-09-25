@@ -16,12 +16,10 @@ import type { Render } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-
-const libraryFile = (file: string) => `/library/${encodeURIComponent(file)}`;
-const titleOf = (r: Render) => r.title || r.version_id;
+import { libraryFile, renderTitle, rendersQuery } from './renders';
 
 export function LibraryGallery() {
-  const { data: renders, error } = useQuery({ queryKey: ['renders'], queryFn: () => api.get<Render[]>('/api/library') });
+  const { data: renders, error } = useQuery(rendersQuery);
   const [toDelete, setToDelete] = useState<Render | null>(null);
 
   if (!renders) {
@@ -81,12 +79,12 @@ function RenderCard({ render, onDelete }: { render: Render; onDelete: () => void
             <FilmIcon aria-hidden className="size-8" />
           </div>
         )}
-        <h3 className="px-3 pt-2 font-semibold group-hover:underline">{titleOf(render)}</h3>
+        <h3 className="px-3 pt-2 font-semibold group-hover:underline">{renderTitle(render)}</h3>
       </Link>
       {render.logline && <p className="text-muted-foreground px-3 pt-1 text-sm">{render.logline}</p>}
       <div className="mt-auto flex items-center gap-2 px-3 pt-2 pb-2">
         <span className="text-muted-foreground text-xs">{`Rendered ${new Date(render.created_at).toLocaleDateString()}`}</span>
-        <Button variant="ghost" size="sm" className="ml-auto" onClick={onDelete} aria-label={`Delete the render of ${titleOf(render)}`}>
+        <Button variant="ghost" size="sm" className="ml-auto" onClick={onDelete} aria-label={`Delete the render of ${renderTitle(render)}`}>
           <Trash2Icon aria-hidden />
           Delete
         </Button>
@@ -99,6 +97,11 @@ function RenderCard({ render, onDelete }: { render: Render; onDelete: () => void
 // can be pressed and it can't be dismissed; a failure keeps it open with the reason.
 function DeleteRenderDialog({ render, onClose }: { render: Render | null; onClose: () => void }) {
   const queryClient = useQueryClient();
+  // The render being asked about, kept after `render` goes back to null so the dialog's text stays put while it
+  // animates closed.
+  const [shown, setShown] = useState(render);
+  if (render && render !== shown) setShown(render);
+  const r = render ?? shown;
   const del = useMutation({
     mutationFn: (id: number) => api.del<{ ok: true }>(`/api/library/${id}`),
     onSuccess: () => {
@@ -116,9 +119,9 @@ function DeleteRenderDialog({ render, onClose }: { render: Render | null; onClos
     <Dialog open={!!render} onOpenChange={open => !open && !del.isPending && close()}>
       <DialogContent showCloseButton={!del.isPending}>
         <DialogHeader>
-          <DialogTitle>{render ? `Delete this render of “${titleOf(render)}”?` : 'Delete this render?'}</DialogTitle>
+          <DialogTitle>{r ? `Delete this render of “${renderTitle(r)}”?` : 'Delete this render?'}</DialogTitle>
           <DialogDescription>
-            {`The video file is removed from the library for good${render ? ` (the render from ${new Date(render.created_at).toLocaleString()})` : ''}. The version itself isn't touched.`}
+            {`The video file is removed from the library for good${r ? ` (the render from ${new Date(r.created_at).toLocaleString()})` : ''}. The version itself isn't touched.`}
           </DialogDescription>
         </DialogHeader>
         {del.error && (

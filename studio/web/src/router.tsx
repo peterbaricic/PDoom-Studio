@@ -4,36 +4,12 @@
 //
 // Every screen sits inside AppShell (the root route's component: sidebar, header, overlays). The workspace is in the
 // main bundle; the watch view and the library are loaded when first visited (lazyScreen), each in its own chunk.
-import { Suspense, lazy, useCallback, useState, type ComponentType, type ReactElement } from 'react';
 import { createRootRoute, createRoute, createRouter, redirect } from '@tanstack/react-router';
 import { api } from './api/client';
 import type { Version } from './api/types';
-import { LoadBoundary } from './components/LoadBoundary';
-import { Skeleton } from './components/ui/skeleton';
+import { lazyScreen } from './lib/lazyScreen';
 import { AppShell } from './shell/AppShell';
 import { Workspace, workspaceSearch } from './workspace/Workspace';
-
-// A screen loaded on first use, with a skeleton meanwhile. If its chunk fails to load (the studio was rebuilt since
-// this page loaded, say), the failure shows in place with Retry; React.lazy keeps a failed import failed for good, so
-// Retry makes a fresh lazy component, kept at module level so later visits reuse the one that loaded.
-function lazyScreen<P extends object>(what: string, load: () => Promise<ComponentType<P>>): (props: P) => ReactElement {
-  const make = () => lazy(() => load().then(Screen => ({ default: Screen })));
-  let Lazy = make();
-  return function LazyScreen(props: P) {
-    const [Screen, setScreen] = useState(() => Lazy);
-    const retry = useCallback(() => {
-      Lazy = make();
-      setScreen(() => Lazy);
-    }, []);
-    return (
-      <LoadBoundary what={what} onRetry={retry} className="m-4">
-        <Suspense fallback={<Skeleton className="m-4 aspect-video max-w-4xl" />}>
-          <Screen {...props} />
-        </Suspense>
-      </LoadBoundary>
-    );
-  };
-}
 
 const WatchView = lazyScreen('the watch view', () => import('./watch/WatchView').then(m => m.WatchView));
 const LibraryGallery = lazyScreen('the library', () => import('./library/LibraryGallery').then(m => m.LibraryGallery));
