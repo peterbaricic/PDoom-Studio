@@ -300,6 +300,17 @@ test('version files are served from the database', async () => {
   expect((await get2('/v/original/../../studio.db')).status).toBe(404);
 });
 
+// The inspector reads a version's storyboard as written from /v/<id>/STORYBOARD.md: served on the studio hosts too.
+test('STORYBOARD.md is served as Markdown text on the studio hosts, for the inspector', async () => {
+  const { app: app2 } = withExamples();
+  for (const host of ['localhost:8080', '127.0.0.1:8080']) {
+    const res = await app2.fetch(new Request(`http://${host}/v/original/STORYBOARD.md`, { headers: { host } }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+    expect(await res.text()).toContain('## 1 · The Lab (1.5–23)');
+  }
+});
+
 test('approve checks the storyboard first', async () => {
   db.createVersion({ id: 'a' }); db.updateVersion('a', { status: 'storyboard' });
   db.writeFiles('a', [{ path: 'STORYBOARD.md', content: 'not valid' }], { source: 'manual' });
@@ -559,6 +570,27 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   expect(frames.filter(f => f.startsWith('POST')).map(f => f.split(';')[0])).toContain('POST 200 application/json');
   await page.hover('button[aria-label^="Chapter 2"]');
   await page.waitForSelector('[role="tooltip"]', { timeout: 10000 });
+
+  // The inspector (its own lazily loaded chunk), with the storyboard rendered from Markdown (tables included). On the
+  // Original it's read-only, so for its editing controls (the native model select among them) this remixes the
+  // Original and opens the remix from the sidebar, staying on this page: then the storyboard panel, and chapter 2's.
+  const inspector = '[aria-label="Inspector"]';
+  await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"] table`, { timeout: 10000 });
+  expect(await page.evaluate(async () => {
+    const token = document.querySelector('meta[name="studio-token"]').content;
+    const res = await fetch('/api/versions/original/remix', { method: 'POST', headers: { 'content-type': 'application/json', 'x-studio-token': token },
+      body: JSON.stringify({ id: 'csp-remix', title: 'CSP remix' }) });
+    return res.status;
+  })).toBe(201);
+  await page.waitForSelector('a[href="/versions/csp-remix"]', { timeout: 10000 });
+  await page.click('a[href="/versions/csp-remix"]');
+  await page.waitForSelector(`${inspector} select[aria-label="Claude model"]`, { timeout: 10000 });
+  await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"] table`, { timeout: 10000 });
+  await page.click('button[aria-label^="Chapter 2"]');
+  await page.waitForFunction(sel => document.querySelector(`${sel} h2`)?.textContent.startsWith('Chapter 2'), { timeout: 10000 }, inspector);
+  await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"]`, { timeout: 10000 });
+  await page.waitForSelector(`${inspector} select[aria-label="Claude model"]`, { timeout: 10000 });
+  await page.waitForSelector(`${inspector} [aria-label="Revisions"] li`, { timeout: 10000 });
 
   // The pieces that bring their own runtime CSS have to be on screen too: a toast (sonner injects a <style> tag at
   // import time) and a modal sheet (Radix locks page scroll through react-remove-scroll, which injects one when it

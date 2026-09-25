@@ -1,8 +1,9 @@
 // Workspace.tsx: /versions/:id — the preview player over the timeline (chapter blocks, coverage, playhead), the
-// lyrics and the render bar. The playhead and the selected chapter live in the URL (?t=<seconds>&ch=<1-9>): the URL
-// moves the player (a chapter block's link, the browser's back button, a shared link), and the player writes its
-// position back whenever it's not playing (replacing the history entry, so scrubbing doesn't fill the history).
-import { useCallback, useEffect, useRef } from 'react';
+// lyrics and the render bar, with the inspector (the storyboard, or the selected chapter) beside them. The playhead
+// and the selected chapter live in the URL (?t=<seconds>&ch=<1-9>): the URL moves the player (a chapter block's link,
+// the browser's back button, a shared link), and the player writes its position back whenever it's not playing
+// (replacing the history entry, so scrubbing doesn't fill the history).
+import { Suspense, lazy, useCallback, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { api } from '@/api/client';
@@ -15,6 +16,9 @@ import { RenderBar } from './RenderBar';
 import { Timeline } from './Timeline';
 import { songEnd } from './timelineGeometry';
 import { usePreviewPlayer } from './usePreviewPlayer';
+
+// Its own chunk: the Markdown renderer it carries is too heavy for the bundle the player waits on.
+const Inspector = lazy(() => import('./Inspector').then(m => ({ default: m.Inspector })));
 
 export interface WorkspaceSearch {
   ch?: number;
@@ -129,30 +133,43 @@ function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, job
     return () => clearTimeout(timer);
   }, [playing, t, urlTime, navigate, versionId]);
 
+  // A chapter selected, or the whole storyboard again: the inspector starts at its top.
+  const inspectorBox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (inspectorBox.current) inspectorBox.current.scrollTop = 0;
+  }, [search.ch]);
+
   const written = manifest && new Set(manifest.files.map(f => /^ch\/c0(\d)/.exec(f)?.[1]).filter(Boolean)).size;
   const duration = songEnd(song.chapters);
 
   return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-3 p-4">
-      <PreviewPlayer
-        player={player}
-        duration={duration}
-        loadError={coverageError ? `Couldn't load which frames are painted: ${coverageError}` : null}
-      />
-      <div className="flex flex-col gap-1">
-        <Timeline
-          versionId={versionId}
-          song={song}
-          coverage={coverage}
-          jobs={jobs}
-          walkthrough={manifest?.walkthrough}
-          selected={search.ch}
-          time={player.time}
-          onSeek={seekHere}
+    <div className="mx-auto flex max-w-[1600px] flex-col gap-4 p-4 xl:flex-row xl:items-start">
+      <div className="flex min-w-0 flex-1 flex-col gap-3">
+        <PreviewPlayer
+          player={player}
+          duration={duration}
+          loadError={coverageError ? `Couldn't load which frames are painted: ${coverageError}` : null}
         />
-        <LyricsTrack lyrics={song.lyrics} duration={duration} time={player.time} />
+        <div className="flex flex-col gap-1">
+          <Timeline
+            versionId={versionId}
+            song={song}
+            coverage={coverage}
+            jobs={jobs}
+            walkthrough={manifest?.walkthrough}
+            selected={search.ch}
+            time={player.time}
+            onSeek={seekHere}
+          />
+          <LyricsTrack lyrics={song.lyrics} duration={duration} time={player.time} />
+        </div>
+        <RenderBar versionId={versionId} chapters={written} jobs={jobs} />
       </div>
-      <RenderBar versionId={versionId} chapters={written} jobs={jobs} />
+      <div ref={inspectorBox} className="xl:sticky xl:top-4 xl:max-h-[calc(100dvh-6rem)] xl:w-[28rem] xl:shrink-0 xl:overflow-y-auto">
+        <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+          <Inspector versionId={versionId} manifest={manifest} jobs={jobs} chapter={search.ch} />
+        </Suspense>
+      </div>
     </div>
   );
 }

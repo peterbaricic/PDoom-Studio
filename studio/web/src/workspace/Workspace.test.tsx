@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
 import type { Coverage, Manifest, Song } from '@/api/types';
 import { mockApi, newQueryClient, renderRouteTree } from '../test-utils';
@@ -109,6 +109,20 @@ describe('Workspace', () => {
     stubApi({ 'GET /api/coverage/mine': new Response(JSON.stringify({ error: 'the frame service is down' }), { status: 500 }) });
     renderWorkspace('/versions/mine');
     expect(await screen.findByRole('alert')).toHaveTextContent('the frame service is down');
+  });
+
+  test('the inspector beside the player follows the selected chapter, and goes back to the whole storyboard', async () => {
+    stubApi({ 'GET /v/mine/STORYBOARD.md': () => new Response('## 2 · The Tent (23–38.5)\n\nTent shots.\n') });
+    const { router } = renderWorkspace('/versions/mine');
+    const inspector = await screen.findByRole('complementary', { name: 'Inspector' });
+    expect(await within(inspector).findByRole('heading', { name: 'Storyboard', level: 2 })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /^Chapter 2\b/ }));
+    expect(await within(inspector).findByRole('heading', { name: 'Chapter 2', level: 2 })).toBeInTheDocument();
+    expect(await within(inspector).findByText('Tent shots.')).toBeInTheDocument();
+    fireEvent.click(within(inspector).getByRole('button', { name: /Whole storyboard/ }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ t: 23 }));
+    expect(await within(inspector).findByRole('heading', { name: 'Storyboard', level: 2 })).toBeInTheDocument();
+    expect(screen.getByText('0:23 / 2:36')).toBeInTheDocument();
   });
 
   test('shows the lyrics and the render bar', async () => {

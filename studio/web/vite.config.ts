@@ -79,6 +79,8 @@ export default defineConfig({
       '/api': { target: backend, changeOrigin: true },
       '/library': { target: backend, changeOrigin: true },
       '/thumbs': { target: backend, changeOrigin: true },
+      // a version's files as text (the inspector reads STORYBOARD.md from here)
+      '/v/': { target: backend, changeOrigin: true },
       '/assets': { target: backend, changeOrigin: true },
     },
   },

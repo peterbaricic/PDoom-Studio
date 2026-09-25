@@ -85,3 +85,55 @@
     scrollbar-color: var(--border) transparent;
   }
 }
+
+/* workspace/inspectorControls.tsx: a rendered storyboard (react-markdown's plain elements; there's no typography
+   plugin). Compact, since it sits in the inspector beside the player; wide shot tables scroll sideways. */
+@layer components {
+  .storyboard-md {
+    @apply text-sm leading-relaxed break-words;
+  }
+  .storyboard-md > * + * {
+    @apply mt-3;
+  }
+  .storyboard-md h1 {
+    @apply text-lg font-semibold;
+  }
+  .storyboard-md h2 {
+    @apply border-b pb-1 text-base font-semibold;
+  }
+  .storyboard-md h3,
+  .storyboard-md h4 {
+    @apply text-sm font-semibold;
+  }
+  .storyboard-md ul {
+    @apply list-disc pl-5;
+  }
+  .storyboard-md ol {
+    @apply list-decimal pl-5;
+  }
+  .storyboard-md a {
+    @apply text-primary underline underline-offset-2;
+  }
+  .storyboard-md code {
+    @apply bg-muted rounded px-1 font-mono text-xs;
+  }
+  .storyboard-md pre {
+    @apply bg-muted overflow-x-auto rounded-md p-2;
+  }
+  .storyboard-md blockquote {
+    @apply text-muted-foreground border-l-2 pl-3;
+  }
+  .storyboard-md table {
+    @apply block max-w-full overflow-x-auto border-collapse text-xs;
+  }
+  .storyboard-md th,
+  .storyboard-md td {
+    @apply border px-2 py-1 text-left align-top;
+  }
+  .storyboard-md th {
+    @apply bg-muted/50 font-semibold;
+  }
+  .storyboard-md hr {
+    @apply border-t;
+  }
+}
