@@ -124,7 +124,13 @@ const PAGE = `${pageOrigin.origin}/studio.html?render&`
 // Underneath everything here, the browser itself can reach no host but the studio's port (see launchBrowser in
 // studio/browser.js); openSealedPage (studio/frames/page.js) adds the page-level guards on top: only the page's own
 // origin loads, and no popup or navigation away gets anywhere.
-browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 });
+// No browser to launch (or one that won't start): said in one line, and for --check the way its caller reads failures.
+try { browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 }); }
+catch (e) {
+  console.error((args.check ? 'CHECK FAILED\n' : '') + String(e?.message || e).trim().split('\n')[0]);
+  local?.stop();
+  process.exit(1);
+}
 let exitCode = 0;
 // errors: collect load and page errors there instead of logging them (--check). strict: an error while the page loads
 // (a chapter that throws, a script that can't load) is fatal instead of logged, so it can't be painted as missing.

@@ -9,6 +9,7 @@ import { snapshotOf, rememberSnapshot } from '../studio/snapshot.js';
 import { createCache } from '../studio/frames/cache.js';
 import { createPool } from '../studio/frames/pool.js';
 import { createFrameService } from '../studio/frames/service.js';
+import { launchBrowser } from '../studio/browser.js';
 import { N, engineHash, segmentKeys, currentShas, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 import { tempDir, tempDefaultDb, captureHosts, slowTest } from './helpers.js';
@@ -600,6 +601,47 @@ slowTest('a request held past the hold time is answered 202, to be asked again',
   expect(res.headers.get('retry-after')).toBe('1');
   // painting went on (the request was already being painted): asked again, it's there
   await until(async () => (await get('/api/frames/slow/48.jpg')).status === 200);
+}, T);
+
+test('without a painting browser the studio stays up: frame requests fail at once with the reason (503), and /api/health says why', async () => {
+  const down = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1, onPainted() {},
+    launch: () => Promise.reject(new Error('Browser was not found at the configured executablePath (/nope/chrome)')) });
+  const svc = createFrameService({ db, cache, pool: down, events, root });
+  const app = createApp({ db, root, data, token, events, port, frames: svc });
+  const get = path => app.fetch(new Request(`http://localhost:${port}${path}`, { headers: { host: `localhost:${port}`, 'x-studio-token': token } }));
+  fastVersion('no-browser', { wipes: false });   // keys of its own: nothing of it is cached
+  const reason = 'the painting browser did not start: Browser was not found at the configured executablePath (/nope/chrome)';
+  try {
+    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: true, reason: null });
+    const res = await get('/api/frames/no-browser/100.jpg');
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'the studio cannot paint frames right now', reason });
+    // the next one is answered without trying again (no 30 s hold, no 202 to ask again for ever)
+    const t0 = Date.now();
+    expect((await get('/api/frames/no-browser/101.jpg?prio=prefetch')).status).toBe(503);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: false, reason });
+    // a render can't be filled either, and says why
+    await expect(svc.fillForRender('no-browser', null, { from: 100, to: 102 })).rejects.toThrow(reason);
+  } finally { await down.close(); }
+});
+
+slowTest('a bad CHROME_PATH fixed while the studio runs: painting recovers once the retry interval has passed', async () => {
+  let path = '/nope/chrome';
+  const pool2 = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1, launchRetryMs: 500,
+    onPainted: p => cache.put(p.key, p.frame, p.jpeg, p.deps), launch: opts => launchBrowser({ ...opts, chrome: path }) });
+  const svc = createFrameService({ db, cache, pool: pool2, events, root });
+  const get = async i => { const r = svc.frame('no-browser-2', i, 'prefetch'); return r.pending ? r.pending : r; };
+  fastVersion('no-browser-2', { wipes: false, cornerMeter: false });
+  try {
+    expect(await get(100)).toMatchObject({ unavailable: expect.stringContaining('/nope/chrome') });
+    expect(svc.painter().ok).toBe(false);
+    path = undefined;   // found as usual from here on
+    expect(await get(101)).toMatchObject({ unavailable: expect.any(String) });   // not tried again yet
+    await Bun.sleep(600);
+    expect((await get(102)).file).toBeDefined();
+    expect(svc.painter()).toEqual({ ok: true, reason: null });
+  } finally { await pool2.close(); }
 }, T);
 
 test('missing versions, chapters and frames are 404s', async () => {

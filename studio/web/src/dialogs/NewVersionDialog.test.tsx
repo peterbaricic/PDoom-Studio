@@ -6,7 +6,7 @@ import { NewVersionDialog } from './NewVersionDialog';
 
 afterEach(() => vi.unstubAllGlobals());
 
-const HEALTHY: Health = { claude: true, claudeSignedIn: true, ffmpeg: true };
+const HEALTHY: Health = { claude: true, claudeSignedIn: true, ffmpeg: true, painter: { ok: true, reason: null } };
 
 function open(answers: Record<string, unknown> = {}) {
   const onClose = vi.fn();
@@ -92,7 +92,7 @@ describe('NewVersionDialog', () => {
   });
 
   test('with Claude signed out, Draft storyboard is off and says why', async () => {
-    open({ 'GET /api/health': { claude: true, claudeSignedIn: false, ffmpeg: true } });
+    open({ 'GET /api/health': { claude: true, claudeSignedIn: false, ffmpeg: true, painter: { ok: true, reason: null } } });
     fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), { target: { value: 'Bake-Off' } });
     fireEvent.change(concept(), { target: { value: 'A baking show.' } });
     await waitFor(() => expect(draft().parentElement).toHaveAttribute('tabindex', '0'));

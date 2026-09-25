@@ -62,11 +62,13 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     timer ??= setTimeout(flush, Math.max(0, lastPublished + publishEveryMs - Date.now()));
   };
 
-  // Resolves to { file, key, depsHash } once painted, { broken, key } if its segment broke, or { retry, key } if the
-  // request was superseded, cancelled or couldn't be painted (it's worth asking again).
+  // Resolves to { file, key, depsHash } once painted, { broken, key } if its segment broke, { unavailable: why, key }
+  // if the painting browser didn't start (nothing can be painted for a while), or { retry, key } if the request was
+  // superseded, cancelled or couldn't be painted (it's worth asking again).
   const paint = (versionId, cur, i, prio, { signal, near } = {}) => {
     const key = cur.keys[chapterOfFrame(i)];
     return pool.request({ versionId, snapshotId: cur.snap.id, key, frame: i, prio, currentShas: cur.shas, signal, near }).then(r => {
+      if (r.unavailable) return { unavailable: r.error, key };
       if (r.broken) {
         (r.snapshot ? failedSnapshots : broken).set(r.snapshot ? cur.snap.id : key, { error: r.error, until: r.until ?? null });
         changed(versionId);
@@ -79,7 +81,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     });
   };
 
-  // { file, key, depsHash } when cached; { pending: Promise (as paint's), key } while it's painted; { broken, key } for
+  // { file, key, depsHash } when cached; { pending: Promise (as paint's), key } while it's painted (or, with no painting
+  // browser, until that's known: at once); { broken, key } for
   // a broken segment; { missing } for a version or chapter that doesn't exist. A preview request supersedes the
   // version's older queued ones: only the newest playhead position matters. signal: aborting it withdraws the request.
   function frame(versionId, i, prio = 'preview', { signal } = {}) {
@@ -226,6 +229,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
       let done = frames.length - todo.length;
       onProgress?.(done / frames.length);
       await Promise.all(todo.map(i => paint(versionId, cur, i, 'render', { signal }).then(r => {
+        if (r.unavailable) throw new Error(r.unavailable);
         if (r.broken) throw new Error(`chapter ${chapterOfFrame(i)} is broken: ${r.broken}`);
         if (!r.file) throw new Error(`frame ${i} was not painted: ${r.retry}`);
         files.set(i, r.file);
@@ -239,5 +243,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return { snapshot: cur.snap, keys: cur.keys, files: frames.map(i => files.get(i)), release };
   }
 
-  return { frame, read, coverage, prefetch, paintAhead, dropVersion, fillForRender, cache };
+  // Whether frames can be painted at all: { ok, reason } (reason: why the painting browser didn't start).
+  const painter = () => pool.health?.() ?? { ok: true, reason: null };
+
+  return { frame, read, coverage, prefetch, paintAhead, dropVersion, fillForRender, painter, cache };
 }

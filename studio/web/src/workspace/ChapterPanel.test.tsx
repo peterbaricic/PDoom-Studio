@@ -159,7 +159,7 @@ describe('ChapterPanel', () => {
   });
 
   test('with the Claude CLI missing, Revise is off and says why', async () => {
-    renderChapter({ health: { claude: false, claudeSignedIn: null, ffmpeg: true } });
+    renderChapter({ health: { claude: false, claudeSignedIn: null, ffmpeg: true, painter: { ok: true, reason: null } } });
     await waitFor(async () => expect(await revise()).toBeDisabled());
     fireEvent.focus((await revise()).parentElement!);
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Code CLI not found');

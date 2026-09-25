@@ -171,6 +171,8 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       } finally { clearTimeout(timer); req.signal?.removeEventListener('abort', giveUp); }
       if (r.missing) return error(404, r.missing);
       if (r.broken) return error(409, r.broken);
+      // No painting browser (none installed, a bad CHROME_PATH): not worth asking again every second.
+      if (r.unavailable) return Response.json({ error: 'the studio cannot paint frames right now', reason: r.unavailable }, { status: 503, headers: NO_STORE });
       const got = r.file && await frames.read(id, +i);
       if (!got) return new Response(null, { status: 202, headers: { 'retry-after': '1', ...NO_STORE } });
       const headers = { etag: `"${got.key}.${got.depsHash}"`, 'cache-control': 'private, no-cache' };
@@ -202,7 +204,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
 
     ['GET', /^\/api\/health$/, async () => {
       const claude = !!Bun.which(claudeBin.split(' ')[0]);
-      return json({ claude, claudeSignedIn: claude ? await claudeSignedIn() : null, ffmpeg: !!Bun.which('ffmpeg') });
+      // painter: whether frames can be painted ({ ok: false, reason } when the painting browser didn't start); null
+      // without a frame service.
+      return json({ claude, claudeSignedIn: claude ? await claudeSignedIn() : null, ffmpeg: !!Bun.which('ffmpeg'), painter: frames ? frames.painter() : null });
     }],
     ['GET', /^\/api\/events$/, req => events.stream(req)],
 

@@ -115,6 +115,10 @@ export interface Health {
   claude: boolean;
   claudeSignedIn: boolean | null;
   ffmpeg: boolean;
+  // Whether the studio can paint frames: ok false (with the reason) once its painting browser failed to start (no
+  // Chromium-based browser found, a bad CHROME_PATH); it tries again every 30 s. null when the server has no frame
+  // service.
+  painter: { ok: boolean; reason: string | null } | null;
 }
 
 // GET /api/song: the engine's fixed timing plus the lyrics, for the timeline and lyrics track.

@@ -20,7 +20,10 @@
 //   without it for the other chapters, whose frames paint as long as they didn't need it;
 // - anything else that stops a snapshot from loading (a load error such as a missing font, shared.js throwing)
 //   fails its requests for snapshotFailureTtlMs without costing a page each;
-// - the browser going away, or the pool closing, fails only the requests at hand (ask again).
+// - the browser going away, or the pool closing, fails only the requests at hand (ask again);
+// - a browser that won't start at all (none installed, a bad CHROME_PATH) fails every request at hand and every one
+//   after it at once, with the reason (unavailable: true), until launchRetryMs has passed: then the next request tries
+//   to launch it again, so installing a browser (or fixing CHROME_PATH and restarting) recovers. health() says so.
 // A snapshot's first load runs alone: until one page has loaded it, its other requests wait instead of each taking
 // (and, for a hanging chapter, holding) a page of their own.
 import { launchBrowser } from '../browser.js';
@@ -34,6 +37,8 @@ const PREFETCH = 1, MAX_PREFETCH = 240;
 // The chapter's (or the version's) own fault: its segment is broken, for good (until = null) or until then.
 // snapshot: it's the whole snapshot that failed to load, not this segment.
 class Broken extends Error { constructor(message, until = null, { snapshot = false } = {}) { super(message); this.until = until; this.snapshot = snapshot; } }
+// The painting browser didn't start: nothing can be painted, whatever the chapter.
+class Unavailable extends Error {}
 // A script that was still running when the page should have been ready.
 class Hung extends Error { constructor(message, chapter) { super(message); this.chapter = chapter; } }
 
@@ -45,7 +50,7 @@ const within = (promise, ms, error) => {
 };
 
 export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeoutMs = 20000, loadTimeoutMs = 60000,
-  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000 }) {
+  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000 }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
   const pageUrl = snapshotId => `${origin.origin}/studio.html?render&record-cast&snapshot=${snapshotId}`;
   const emptySlot = () => ({ page: null, snapshotId: null, without: '', chapterErrors: {}, loadReads: {} });
@@ -57,6 +62,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   const loaded = new Set(), firstLoads = new Set();   // snapshots a page has loaded; ones whose first load is running
   const counts = { painted: 0, loads: 0, failures: 0 };
   let browser = null, seq = 0, closed = false;
+  let launchFailure = null;          // { error, at }: the last launch failed, and none has succeeded since
+  const painterDown = () => launchFailure && Date.now() - launchFailure.at < launchRetryMs ? launchFailure.error : null;
 
   const fresh = (map, k) => { const v = map.get(k); if (v && v.until != null && v.until <= Date.now()) { map.delete(k); return null; } return v || null; };
   const hungIn = snapshotId => {
@@ -82,13 +89,17 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   const finish = (w, result) => { if (w.done) return; w.done = true; w.signal?.removeEventListener('abort', w.onAbort); w.resolve(result); };
   const settle = (waiters, result) => { for (const w of waiters) finish(w, result); };
   const brokenResult = (error, until = null) => ({ ok: false, broken: true, error, ...(until != null && { until }) });
+  const unavailableResult = error => ({ ok: false, unavailable: true, error });
 
   // A request's result: { ok: true, depsHash }; { ok: false, broken: true, error, until?, snapshot? } (snapshot: the
-  // whole snapshot failed to load, not this segment); or { ok: false, error, superseded? | cancelled? } (ask again).
+  // whole snapshot failed to load, not this segment); { ok: false, unavailable: true, error } (the painting browser
+  // didn't start: error says why); or { ok: false, error, superseded? | cancelled? } (ask again).
   function request({ versionId, snapshotId, key, frame, prio = 'preview', currentShas = {}, signal, near = frame }) {
     if (!PRIORITIES.includes(prio)) throw new Error(`unknown priority: ${prio}`);
     return new Promise(resolve => {
       if (closed) return resolve({ ok: false, error: 'the painting pool is closed' });
+      const down = painterDown();
+      if (down) return resolve(unavailableResult(down));
       const b = fresh(broken, key), f = !b && fresh(failedSnapshots, snapshotId);
       if (b) return resolve(brokenResult(b.error, b.until));
       if (f) return resolve({ ...brokenResult(f.error, f.until), snapshot: true });
@@ -161,9 +172,11 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   };
 
   const getBrowser = async () => {
-    // Launched on first use; should it ever go away (a crash), the next paint starts a new one, and a failure to
-    // start isn't any segment's fault.
-    const launching = browser ??= launchBrowser({ port }).then(b => {
+    // Launched on first use; should it ever go away (a crash), the next paint starts a new one. A failure to start
+    // isn't any segment's fault: it's remembered, and nothing is tried again for launchRetryMs.
+    const down = painterDown();
+    if (down) throw new Unavailable(down);
+    const launching = browser ??= launch({ port }).then(b => {
       b.once('disconnected', () => {
         if (browser !== launching) return;
         browser = null;
@@ -171,7 +184,17 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       });
       return b;
     });
-    try { return await launching; } catch (e) { if (browser === launching) browser = null; throw new Error(`the painting browser did not start: ${e.message}`); }
+    try {
+      const b = await launching;
+      launchFailure = null;
+      return b;
+    } catch (e) {
+      if (browser === launching) browser = null;
+      if (closed) throw new Error('the painting pool is closed');
+      const why = String(e?.message || e).trim().split('\n').slice(0, 3).join(' ');
+      launchFailure = { error: `the painting browser did not start: ${why}`, at: Date.now() };
+      throw new Unavailable(launchFailure.error);
+    }
   };
 
   // The chapters (numbers) whose file has this content hash.
@@ -286,6 +309,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     } catch (e) {
       counts.failures++;
       if (closed) result = { ok: false, error: 'the painting pool is closed' };
+      else if (e instanceof Unavailable) result = unavailableResult(e.message);
       else if (e instanceof Broken) {
         if (!e.snapshot) broken.set(key, { error: e.message, until: e.until });
         result = { ...brokenResult(e.message, e.until), ...(e.snapshot && { snapshot: true }) };
@@ -301,6 +325,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       settle(waiters.filter(hit), answer);
       for (const x of waiters.filter(x => !hit(x))) enqueue(x);
       if (result.broken) for (const x of queuedWaiters()) if (whole ? x.snapshotId === snapshotId : x.key === key) drop(x, answer);
+      // No browser: nothing queued can be painted either.
+      if (result.unavailable) for (const x of queuedWaiters()) drop(x, answer);
       return;
     }
     // A requester whose current files differ from what the frame read gets a paint of its own, from its own snapshot.
@@ -321,6 +347,9 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       .flatMap(j => j.waiters.map(w => ({ versionId: w.versionId, prio: PRIORITIES[w.prio], key: j.key, frame: j.frame }))),
   });
 
+  // Whether frames can be painted: { ok: false, reason } once the painting browser failed to start, until it starts.
+  const health = () => ({ ok: !launchFailure, reason: launchFailure?.error ?? null });
+
   async function close() {
     closed = true;
     for (const job of [...jobs.values()]) if (job.state === 'queued') { jobs.delete(job.id); settle(job.waiters, { ok: false, error: 'the painting pool is closed' }); }
@@ -329,5 +358,5 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     await b?.close().catch(() => {});
   }
 
-  return { request, supersede, stats, close };
+  return { request, supersede, stats, health, close };
 }

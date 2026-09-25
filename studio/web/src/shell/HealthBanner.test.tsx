@@ -7,7 +7,7 @@ import { mockApi, renderInRouter } from '../test-utils';
 beforeEach(() => _resetRestartedForTests());
 afterEach(() => vi.unstubAllGlobals());
 
-const healthy = { claude: true, claudeSignedIn: true, ffmpeg: true };
+const healthy = { claude: true, claudeSignedIn: true, ffmpeg: true, painter: { ok: true, reason: null } };
 
 describe('HealthBanner', () => {
   test('shows nothing when all is well', async () => {
@@ -24,7 +24,7 @@ describe('HealthBanner', () => {
   });
 
   test('says when the Claude CLI is missing', async () => {
-    mockApi({ 'GET /api/health': { claude: false, claudeSignedIn: null, ffmpeg: true } });
+    mockApi({ 'GET /api/health': { claude: false, claudeSignedIn: null, ffmpeg: true, painter: { ok: true, reason: null } } });
     renderInRouter(<HealthBanner />);
     expect(await screen.findByRole('alert')).toHaveTextContent(/Claude Code CLI not found/);
   });

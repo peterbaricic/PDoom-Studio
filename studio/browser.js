@@ -9,18 +9,24 @@ import { homedir } from 'node:os';
 
 const ROOT = resolve(import.meta.dir, '..');
 
-export function findBrowser(explicit, { fromEnv = true } = {}) {
+// Where to look for an installed browser and for standalone ones (tests pass their own lists).
+const INSTALLED = {
+  darwin: ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Google Chrome Canary']
+    .flatMap(n => [`/Applications/${n}.app/Contents/MacOS/${n}`, join(homedir(), `Applications/${n}.app/Contents/MacOS/${n}`)]),
+  win32: ['Google/Chrome/Application/chrome.exe', 'Chromium/Application/chrome.exe', 'Microsoft/Edge/Application/msedge.exe',
+    'BraveSoftware/Brave-Browser/Application/brave.exe']
+    .flatMap(p => [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean).map(d => join(d, p))),
+  linux: ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+    '/snap/bin/chromium', '/usr/bin/microsoft-edge', '/usr/bin/brave-browser'],
+}[process.platform] || [];
+const CACHES = [join(ROOT, '.browsers'), join(homedir(), '.cache/puppeteer'), join(homedir(), 'Library/Caches/ms-playwright'),
+  join(homedir(), '.cache/ms-playwright'), process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ms-playwright')].filter(Boolean);
+
+// Throws when there is none: the studio server paints in-process (studio/frames/pool.js), so a missing browser must
+// fail the painting, not end the process; render.mjs reports it and exits itself.
+export function findBrowser(explicit, { fromEnv = true, installed = INSTALLED, caches = CACHES } = {}) {
   if (explicit) return explicit;
   if (fromEnv && process.env.CHROME_PATH) return process.env.CHROME_PATH;
-  const pf = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean);
-  const installed = {
-    darwin: ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Google Chrome Canary']
-      .flatMap(n => [`/Applications/${n}.app/Contents/MacOS/${n}`, join(homedir(), `Applications/${n}.app/Contents/MacOS/${n}`)]),
-    win32: ['Google/Chrome/Application/chrome.exe', 'Chromium/Application/chrome.exe', 'Microsoft/Edge/Application/msedge.exe',
-      'BraveSoftware/Brave-Browser/Application/brave.exe'].flatMap(p => pf.map(d => join(d, p))),
-    linux: ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
-      '/snap/bin/chromium', '/usr/bin/microsoft-edge', '/usr/bin/brave-browser'],
-  }[process.platform] || [];
   const found = installed.find(p => existsSync(p));
   if (found) return found;
   const names = new Set(['chrome-headless-shell', 'chrome-headless-shell.exe', 'headless_shell', 'headless_shell.exe']);
@@ -29,12 +35,9 @@ export function findBrowser(explicit, { fromEnv = true } = {}) {
     return readdirSync(dir, { withFileTypes: true }).sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }))
       .flatMap(e => e.isDirectory() ? search(join(dir, e.name), depth - 1) : names.has(e.name) ? [join(dir, e.name)] : []);
   };
-  const caches = [join(ROOT, '.browsers'), join(homedir(), '.cache/puppeteer'), join(homedir(), 'Library/Caches/ms-playwright'),
-    join(homedir(), '.cache/ms-playwright'), process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ms-playwright')].filter(Boolean);
   for (const c of caches) { const [hit] = search(c, 4); if (hit) return hit; }
-  console.error('No Chromium-based browser found. Either run `bun run get-browser` (downloads a standalone headless Chromium\n' +
-    'into .browsers/, ~100 MB, no Chrome install needed) or pass --chrome=<path to a Chrome/Edge/Brave/Chromium binary>.');
-  process.exit(1);
+  throw new Error('No Chromium-based browser found. Either run `bun run get-browser` (downloads a standalone headless Chromium ' +
+    'into .browsers/, ~100 MB, no Chrome install needed) or point CHROME_PATH (or render.mjs\'s --chrome=) at a Chrome, Edge, Brave or Chromium binary.');
 }
 
 // GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere.
@@ -77,7 +80,8 @@ export function isolationArgs(port) {
 
 export const browserArgs = ({ angle = ANGLE, port }) => [...gpuArgs(angle), ...isolationArgs(port)];
 
-// port: the studio server's port, the only one on this machine the browser may reach.
-export function launchBrowser({ chrome, angle = ANGLE, fromEnv = true, port } = {}) {
+// port: the studio server's port, the only one on this machine the browser may reach. Rejects (never exits) when
+// there's no browser to launch or it won't start.
+export async function launchBrowser({ chrome, angle = ANGLE, fromEnv = true, port } = {}) {
   return puppeteer.launch({ executablePath: findBrowser(chrome, { fromEnv }), headless: true, protocolTimeout: 0, args: browserArgs({ angle, port }) });
 }

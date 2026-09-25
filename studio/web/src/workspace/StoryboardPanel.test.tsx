@@ -234,7 +234,7 @@ describe('StoryboardPanel', () => {
   });
 
   test('with Claude signed out, its actions are off and say why', async () => {
-    renderInspector({ health: { claude: true, claudeSignedIn: false, ffmpeg: true } });
+    renderInspector({ health: { claude: true, claudeSignedIn: false, ffmpeg: true, painter: { ok: true, reason: null } } });
     await waitFor(async () => expect(await approve()).toBeDisabled());
     fireEvent.change(screen.getByRole('textbox', { name: 'What should change in the storyboard?' }), { target: { value: 'x' } });
     expect(screen.getByRole('button', { name: 'Ask for changes' })).toBeDisabled();

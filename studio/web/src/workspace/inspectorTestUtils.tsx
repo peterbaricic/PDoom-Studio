@@ -37,7 +37,7 @@ Chapter two's shots.
 Walkthrough: Judging.
 `;
 
-export const HEALTHY: Health = { claude: true, claudeSignedIn: true, ffmpeg: true };
+export const HEALTHY: Health = { claude: true, claudeSignedIn: true, ffmpeg: true, painter: { ok: true, reason: null } };
 
 export function manifest(overrides: Partial<Manifest> = {}): Manifest {
   return {

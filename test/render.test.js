@@ -82,6 +82,12 @@ slowTest.concurrent('check fails cleanly instead of crashing when the page canno
   expect(r.err).toContain('CHECK FAILED');
 }, T);
 
+test.concurrent('a browser that will not start fails the check in one clear line, not a crash', async () => {
+  const r = await spawnNow(['bun', 'render.mjs', '--check=5', '--chrome=/nope/chrome'], { env: isolatedEnv() });
+  expect(r.code).toBe(1);
+  expect(r.err.trim().split('\n')).toEqual(['CHECK FAILED', expect.stringContaining('/nope/chrome')]);
+}, T);
+
 slowTest.concurrent('check fails when the bundled fonts fail to load', async () => {
   const r = await spawn(['bun', 'render.mjs', '--check=load'], { env: isolatedEnv(undefined, { STUDIO_TEST_BREAK_FONTS: '1' }) });
   expect(r.code).toBe(1);

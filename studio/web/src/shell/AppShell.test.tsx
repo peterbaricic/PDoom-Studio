@@ -16,7 +16,7 @@ function mockShellApi(extra: Record<string, unknown> = {}) {
     'GET /api/versions': versions,
     'GET /api/library': [],
     'GET /api/jobs': [job({ id: 1, status: 'running' })],
-    'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true },
+    'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true, painter: { ok: true, reason: null } },
     // the workspace at /versions/mine (no chapters written, so no frames to ask for)
     'GET /api/song': { fps: 24, frames: 3759, duration: 156.6, chapters: [[0, 23], [23, 156.6]], lyrics: [] },
     'GET /api/versions/mine': { id: 'mine', title: 'My take', files: [], walkthrough: [] },
@@ -67,7 +67,7 @@ test('a version whose id is "watch" is not taken for the watch view', async () =
     'GET /api/versions': [...versions, version({ id: 'watch', title: 'Watchful' })],
     'GET /api/library': [],
     'GET /api/jobs': [],
-    'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true },
+    'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true, painter: { ok: true, reason: null } },
   });
   renderRouteTree(routeTree, { path: '/versions/watch' });
   const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
