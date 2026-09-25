@@ -1,30 +1,11 @@
-// render-job.js: final renders (from the frame cache, straight to an MP4 + poster in the library) and chapter
-// thumbnail sheets (still via render.mjs). The library lives under the data root (<data>/library/; data defaults to
-// root).
+// render-job.js: final renders and chapter thumbnails, both straight from the frame cache (via the frame service),
+// composed/encoded with ffmpeg. The library lives under the data root (<data>/library/; data defaults to root).
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CHAPTER_WINDOWS } from './storyboard.js';
 import { FPS, N, DURATION } from './frames/keys.js';
 
-// Runs render.mjs (still used for chapter thumbnail sheets), streaming its stdout to the job log and killing it on
-// cancellation.
-async function runRender(argv, { root, ctx, onLine }) {
-  const p = Bun.spawn(['bun', join(root, 'render.mjs'), ...argv], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
-  const kill = () => p.kill();
-  ctx.signal.addEventListener('abort', kill);
-  const errText = new Response(p.stderr).text(), dec = new TextDecoder();
-  let buf = '';
-  for await (const chunk of p.stdout) {
-    buf += dec.decode(chunk, { stream: true });
-    let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); ctx.log(line + '\n'); onLine?.(line); }
-  }
-  const code = await p.exited;
-  ctx.signal.removeEventListener('abort', kill);
-  if (ctx.signal.aborted) throw new Error('cancelled');
-  if (code !== 0) throw new Error((await errText).trim().split('\n').slice(-3).join(' ') || `render.mjs exited with code ${code}`);
-}
-
-// Runs ffmpeg directly (the final render's encode), killing it on cancellation.
+// Runs ffmpeg directly, killing it on cancellation.
 async function runFfmpeg(argv, { root, ctx }) {
   const p = Bun.spawn(['ffmpeg', ...argv], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   const kill = () => p.kill();
@@ -51,8 +32,19 @@ function writeConcatList(path, files) {
   writeFileSync(path, lines.join('\n') + '\n');
 }
 
-export function createRenderRunner({ db, root, data = root, baseUrl, events = null, frames }) {
-  const lib = join(data, 'library'), music = join(root, 'assets/pdoom.mp3');
+// One frame through the frame service, waiting out a pending paint: the file path once painted (or already
+// cached), or thrown if the version/chapter is missing, the segment is broken, or nothing could be painted.
+async function frameFile(frames, versionId, i, prio, ctx) {
+  const r = frames.frame(versionId, i, prio, { signal: ctx.signal });
+  if (r.missing) throw new Error(r.missing);
+  const settled = r.pending ? await r.pending : r;
+  if (settled.broken) throw new Error(settled.broken);
+  if (!settled.file) throw new Error(settled.retry || `frame ${i} was not painted`);
+  return settled.file;
+}
+
+export function createRenderRunner({ db, root, data = root, events = null, frames }) {
+  const lib = join(data, 'library');
 
   const render = async (job, ctx) => {
     const t0 = Date.now();
@@ -61,20 +53,22 @@ export function createRenderRunner({ db, root, data = root, baseUrl, events = nu
     if (last < first) throw new Error(`empty frame range: ${range}`);
     const version = db.getVersion(vid);
     if (!version) throw new Error(`no such version: ${vid}`);
+    const revisionIds = db.listFiles(vid).map(f => f.revision_id);
 
     // Frames for [first, last] are painted (or found already cached) with their segments pinned against eviction
-    // until release() runs. fillForRender has no cancellation of its own, so cancelling here races it against the
-    // job's abort signal instead: on abort this rejects with 'cancelled' right away (nothing is encoded, no render
-    // row is added), while the abandoned fill keeps running to completion in the background and, once it settles,
-    // releases the pins it took — so a cancelled render never leaks a permanent pin.
-    let aborted = false;
-    const filling = frames.fillForRender(vid, p => ctx.progress(.85 * p), { from: first, to: last });
-    filling.then(fill => { if (aborted) fill.release(); }).catch(() => {});
-    const abort = new Promise((_, bad) => {
-      const onAbort = () => { aborted = true; bad(new Error('cancelled')); };
-      if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener('abort', onAbort, { once: true });
-    });
-    const fill = await Promise.race([filling, abort]);
+    // until release() runs. The job's own abort signal is forwarded to fillForRender, which forwards it in turn to
+    // every frame it still needs to paint: on abort, the pool drops whatever of those is still queued right away
+    // (pool.request already does this for a withdrawn signal), fillForRender's own fill rejects as soon as any of
+    // them comes back cancelled, and its catch block releases the pins before rethrowing — so cancelling here both
+    // stops queueing more painting work and never leaks a pin.
+    let fill;
+    try {
+      fill = await frames.fillForRender(vid, p => ctx.progress(.85 * p), { from: first, to: last, signal: ctx.signal });
+    } catch (e) {
+      if (ctx.signal.aborted) throw new Error('cancelled');
+      throw e;
+    }
+    if (ctx.signal.aborted) { fill.release(); throw new Error('cancelled'); }   // a range that was already fully cached
 
     try {
       mkdirSync(lib, { recursive: true });
@@ -86,7 +80,7 @@ export function createRenderRunner({ db, root, data = root, baseUrl, events = nu
         const out = join(lib, name + '.mp4');
         await runFfmpeg([
           '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile,
-          '-ss', String(first / FPS), '-i', music,
+          '-ss', String(first / FPS), '-i', join(root, 'assets/pdoom.mp3'),
           '-map', '0:v', '-map', '1:a', '-r', String(FPS),
           '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p',
           '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', out,
@@ -99,7 +93,7 @@ export function createRenderRunner({ db, root, data = root, baseUrl, events = nu
         ctx.progress(.99);
 
         db.addRender({
-          versionId: vid, file: name + '.mp4', snapshotId: fill.snapshot.id, title: version.title, logline: version.logline,
+          versionId: vid, file: name + '.mp4', revisionIds, snapshotId: fill.snapshot.id, title: version.title, logline: version.logline,
           durationS: +((last - first + 1) / FPS).toFixed(3), renderS: (Date.now() - t0) / 1000,
           sizeBytes: statSync(out).size, poster: name + '.jpg',
         });
@@ -112,13 +106,22 @@ export function createRenderRunner({ db, root, data = root, baseUrl, events = nu
     }
   };
 
+  // Three frames per chapter (0.3 s in, the middle, 0.3 s from the end) through the frame service, scaled to
+  // 320 px wide and placed side by side with ffmpeg — the same cache preview and final renders share, so a chapter
+  // already covered by a preview or a render costs nothing extra here, and a second run of this job paints nothing.
   const thumbs = async (job, ctx) => {
     const vid = job.version_id, chapters = db.listFiles(vid).filter(f => f.path.startsWith('ch/'));
     for (const [k, f] of chapters.entries()) {
       const n = +/^ch\/c0(\d)/.exec(f.path)[1], [a, b] = CHAPTER_WINDOWS[n - 1];
-      const times = [a + .3, (a + b) / 2, b - .3].map(t => t.toFixed(2)).join(',');
-      await runRender([`--v=${vid}`, `--base=${baseUrl}`, `--sheet=${times}`, '--cols=3', '--w=320',
-        `--out=${join(data, '.studio/thumbs', vid, `c0${n}.jpg`)}`], { root, ctx });
+      const frameIdx = [a + .3, (a + b) / 2, b - .3].map(t => Math.round(t * FPS));
+      const files = await Promise.all(frameIdx.map(i => frameFile(frames, vid, i, 'thumbs', ctx)));
+      const out = join(data, '.studio/thumbs', vid, `c0${n}.jpg`);
+      mkdirSync(dirname(out), { recursive: true });
+      await runFfmpeg([
+        '-y', '-loglevel', 'error', '-i', files[0], '-i', files[1], '-i', files[2],
+        '-filter_complex', '[0:v]scale=320:-1[s0];[1:v]scale=320:-1[s1];[2:v]scale=320:-1[s2];[s0][s1][s2]hstack=inputs=3',
+        '-frames:v', '1', '-q:v', '3', out,
+      ], { root, ctx });
       ctx.progress((k + 1) / chapters.length);
     }
     events?.publish('version', { id: vid });

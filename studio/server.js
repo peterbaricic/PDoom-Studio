@@ -62,7 +62,7 @@ const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: c
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root });
 const claude = createClaudeRunner({ db, root, data, baseUrl, events });
-const { render, thumbs } = createRenderRunner({ db, root, data, baseUrl, events, frames });
+const { render, thumbs } = createRenderRunner({ db, root, data, events, frames });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 const srv = serve({ db, root, data, token, queue, events, port, frames });
 // Stopping, close the painting browser too (at most a few seconds' wait), so it doesn't outlive the studio.

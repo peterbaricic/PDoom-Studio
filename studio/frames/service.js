@@ -129,8 +129,11 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // Paints every missing frame of a final render (frames from..to, the whole song by default) at render priority,
   // with the segments pinned so eviction can't take them before they're encoded (and a frame file, once written, is
   // never replaced). Resolves to { snapshot, keys, files: the frame files in order, release() }: the caller releases
-  // the pins when done. Rejects (and releases them) when a chapter is missing or broken.
-  async function fillForRender(versionId, onProgress, { from = 0, to = N - 1 } = {}) {
+  // the pins when done. Rejects (and releases them) when a chapter is missing or broken, or (also releasing them)
+  // when signal aborts: aborting withdraws whichever of the still-missing frames are still queued in the pool at
+  // once (pool.request already drops a waiter whose signal fires), which fails this fill as soon as any of them
+  // comes back cancelled — a frame already being painted keeps painting, but nothing further is queued for it.
+  async function fillForRender(versionId, onProgress, { from = 0, to = N - 1, signal } = {}) {
     const cur = current(versionId);
     if (!cur) throw new Error('no such version');
     const frames = Array.from({ length: to - from + 1 }, (_, k) => from + k);
@@ -154,7 +157,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
       }
       let done = frames.length - todo.length;
       onProgress?.(done / frames.length);
-      await Promise.all(todo.map(i => paint(versionId, cur, i, 'render').then(r => {
+      await Promise.all(todo.map(i => paint(versionId, cur, i, 'render', { signal }).then(r => {
         if (r.broken) throw new Error(`chapter ${chapterOfFrame(i)} is broken: ${r.broken}`);
         if (!r.file) throw new Error(`frame ${i} was not painted: ${r.retry}`);
         files.set(i, r.file);
