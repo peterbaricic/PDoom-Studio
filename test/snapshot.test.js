@@ -117,7 +117,8 @@ test('the snapshot and blob routes serve only on renderer hosts', async () => {
     const manifest = await at(host, `/api/snapshot/${snap.id}`);
     expect(manifest.status).toBe(200);
     expect(await manifest.json()).toEqual({
-      id: snap.id, options: snap.options, scripts: [`/api/blob/${sharedSha}`, `/api/blob/${chapterSha}`], files: ['ch/c01.js', 'shared.js'],
+      id: snap.id, options: snap.options, scripts: [`/api/blob/${sharedSha}`, `/api/blob/${chapterSha}`], paths: ['shared.js', 'ch/c01.js'],
+      files: ['ch/c01.js', 'shared.js'],
     });
     const blob = await at(host, `/api/blob/${chapterSha}`);
     expect(blob.status).toBe(200);

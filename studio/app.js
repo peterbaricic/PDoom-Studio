@@ -7,6 +7,7 @@ import { versionManifest, workManifest } from './versions.js';
 import { parseStoryboard } from './storyboard.js';
 import { isValidPath } from './db.js';
 import { getSnapshot, blobBySha } from './snapshot.js';
+import { N } from './frames/keys.js';
 
 // Repo files anyone may load: the player, the shared engine, the libraries, the song and the bundled fonts. Nothing else.
 const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
@@ -58,7 +59,10 @@ const WORKER_DESTS = ['serviceworker', 'sharedworker'];
 const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/, /^\/api\/snapshot\/[0-9a-f]{64}$/, /^\/api\/blob\/[0-9a-f]{64}$/];
 const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
-export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000 }) {
+// frames: the frame service (studio/frames/service.js); without one, the frame and cache routes 404. frameHoldMs: how
+// long a frame request waits for its frame to be painted before answering 202 (ask again).
+export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000,
+  frames = null, frameHoldMs = 30000 }) {
   const app = { port };
   const guard = makeGuard({ port: () => app.port, token });
   const dirs = { ui: join(root, 'studio/ui'), work: join(data, '.studio/work'), library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
@@ -107,8 +111,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const snap = getSnapshot(id);
       if (!snap) return error(404, 'no such snapshot');
       const paths = Object.keys(snap.files).sort();
-      const scripts = [...(snap.files['shared.js'] ? ['shared.js'] : []), ...paths.filter(p => p.startsWith('ch/'))].map(p => `/api/blob/${snap.files[p]}`);
-      return json({ id: snap.id, options: snap.options, scripts, files: paths });
+      const scriptPaths = [...(snap.files['shared.js'] ? ['shared.js'] : []), ...paths.filter(p => p.startsWith('ch/'))];
+      // paths names each script (scripts[i] is paths[i]'s blob), for the painting page's CAST recording.
+      return json({ id: snap.id, options: snap.options, scripts: scriptPaths.map(p => `/api/blob/${snap.files[p]}`), paths: scriptPaths, files: paths });
     }],
     ['GET', /^\/api\/blob\/([0-9a-f]{64})$/, (req, [, sha]) => {
       if (!onRenderer(req)) return error(404, 'not found');
@@ -117,6 +122,32 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     }],
     ['GET', /^\/library\/(.+)$/, (req, [, p]) => file(req, dirs.library, p)],
     ['GET', /^\/thumbs\/(.+)$/, (req, [, p]) => file(req, dirs.thumbs, p, NO_STORE)],
+
+    // Frames, painted by the server (chapter code never runs in the user's browser), and the cache they live in: UI
+    // hosts only. A frame's URL names a version, not content, so its ETag is the segment key it was painted under.
+    ['GET', /^\/api\/frames\/([a-z0-9-]+)\/(\d+)\.jpg$/, async (req, [, id, i]) => {
+      if (onRenderer(req) || !frames || +i >= N) return error(404, 'not found');
+      const prio = new URL(req.url).searchParams.get('prio') === 'prefetch' ? 'prefetch' : 'preview';
+      let r = frames.frame(id, +i, prio);
+      if (r.pending) r = await Promise.race([r.pending, Bun.sleep(frameHoldMs).then(() => ({ retry: 'still painting' }))]);
+      if (r.missing) return error(404, r.missing);
+      if (r.broken) return error(409, r.broken);
+      const got = r.file && await frames.read(id, +i);
+      if (!got) return new Response(null, { status: 202, headers: { 'retry-after': '1', ...NO_STORE } });
+      return new Response(got.bytes, { headers: { 'content-type': 'image/jpeg', etag: `"${got.key}"`, 'cache-control': 'private, max-age=31536000, immutable' } });
+    }],
+    ['GET', /^\/api\/coverage\/([a-z0-9-]+)$/, (req, [, id]) => {
+      if (onRenderer(req) || !frames) return error(404, 'not found');
+      const c = frames.coverage(id);
+      return c ? json(c) : error(404, 'no such version');
+    }],
+    ['GET', /^\/api\/cache$/, req => onRenderer(req) || !frames ? error(404, 'not found')
+      : json({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes })],
+    ['POST', /^\/api\/cache\/clear$/, req => {
+      if (onRenderer(req) || !frames) return error(404, 'not found');
+      frames.cache.clear();
+      return json({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes });
+    }],
 
     ['GET', /^\/api\/health$/, async () => {
       const claude = !!Bun.which(claudeBin.split(' ')[0]);

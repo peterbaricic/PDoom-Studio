@@ -219,7 +219,13 @@ function composite(t) {
   c.globalCompositeOperation = 'source-over';
   drawKaraokeText(c);
 }
-window.paintAt = async t => { T = t; await redraw(); composite(t); };
+// With ?record-cast (see CAST in loader.js), it returns { castReads }: the CAST entries this frame read.
+window.paintAt = async t => {
+  const rec = window.castRecorder;
+  rec?.begin();
+  T = t; await redraw(); composite(t);
+  if (rec) return { castReads: rec.end() };
+};
 window.renderAt = async (t, type = 'image/png', q = .92) => { await window.paintAt(t); return outC.toDataURL(type, q); };
 // Contact sheet of several times, for quick visual checks: returns { url, ms[] }.
 window.renderSheet = async (times, cols = 3, w = 640) => {

@@ -15,6 +15,9 @@ import { createClaudeRunner } from './claude-job.js';
 import { createRenderRunner } from './render-job.js';
 import { serve } from './serve.js';
 import { acquireLock } from './lock.js';
+import { createCache } from './frames/cache.js';
+import { createPool } from './frames/pool.js';
+import { createFrameService } from './frames/service.js';
 
 const root = resolve(import.meta.dir, '..');
 let port = +(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] ?? process.env.PORT ?? 8080);
@@ -42,8 +45,6 @@ let release;
 try { release = acquireLock(userPath, port); }
 catch (err) { console.error(err.message); process.exit(1); }
 process.on('exit', release);
-process.on('SIGINT', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
 
 const db = openDb(userPath, { defaultPath });
 const interrupted = db.markInterrupted();
@@ -53,6 +54,14 @@ const events = createEvents(), token = randomBytes(24).toString('hex'), baseUrl 
 const claude = createClaudeRunner({ db, root, data, baseUrl, events });
 const { render, thumbs } = createRenderRunner({ db, root, data, baseUrl, events });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
-const srv = serve({ db, root, data, token, queue, events, port });
+// Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
+const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: +(process.env.STUDIO_CACHE_GB || 5) * 1e9 });
+const pool = createPool({ port, baseUrl, painters: +(process.env.STUDIO_PAINTERS || 3), onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
+const frames = createFrameService({ db, cache, pool, events, root });
+const srv = serve({ db, root, data, token, queue, events, port, frames });
+// Stopping, close the painting browser too (at most a few seconds' wait), so it doesn't outlive the studio.
+const stop = async () => { await Promise.race([pool.close(), Bun.sleep(5000)]); process.exit(0); };
+process.on('SIGINT', stop);
+process.on('SIGTERM', stop);
 queue.start();
 console.log(`P(doom) Studio: ${srv.url}/`);

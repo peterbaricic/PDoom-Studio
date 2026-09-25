@@ -12,7 +12,7 @@ export const sha256 = text => createHash('sha256').update(text, 'utf8').digest('
 // Canonical JSON: object keys sorted (recursively), so the same logical value serializes identically regardless of
 // insertion order — this is what makes a version's options order-independent for the snapshot id. Arrays keep their
 // given order (files is a plain object here, not an array, so this only ever matters for options).
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
