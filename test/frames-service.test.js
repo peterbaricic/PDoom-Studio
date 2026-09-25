@@ -461,6 +461,51 @@ test('a paint-ahead sweep paints at the lowest priority, a few frames queued at 
   } finally { await one.close(); }
 }, T);
 
+test('a paint-ahead sweep goes on through writes: past one that leaves its keys alone, and under a changed chapter\'s new key', async () => {
+  const painted = [];
+  const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
+    onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
+  const svc = createFrameService({ db, cache, pool: one, events, root });
+  const bg = () => one.stats().queued.filter(q => q.prio === 'background');
+  try {
+    fastVersion('sweeper');
+    svc.paintAhead('sweeper', 1200);
+    await until(() => painted.length >= 3);
+    // the storyboard changes the snapshot, not a segment key
+    db.writeFiles('sweeper', [{ path: 'STORYBOARD.md', content: '# a new storyboard' }], { source: 'manual' });
+    const count = painted.length;
+    await until(() => painted.length >= count + 10);
+    expect(bg().length).toBeGreaterThan(0);
+    // chapter 3 (frames 924..1415) gets new code: the sweep paints it again from where it started, under the new key
+    const oldKey = keysOf('sweeper')[3];
+    db.writeFiles('sweeper', [{ path: 'ch/c03.js', content: fastChapter(3) + '\n// revised' }], { source: 'manual' });
+    const newKey = keysOf('sweeper')[3];
+    expect(newKey).not.toBe(oldKey);
+    await until(() => painted.some(p => p.key === newKey && p.frame === 1200));
+    await until(() => painted.filter(p => p.key === newKey).length >= 5);
+  } finally { await one.close(); }
+}, T);
+
+test('a paint-ahead sweep replaces every version\'s earlier one: only the page being viewed needs it', async () => {
+  const painted = [];
+  const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
+    onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
+  const svc = createFrameService({ db, cache, pool: one, events, root });
+  const bg = () => one.stats().queued.filter(q => q.prio === 'background');
+  try {
+    fastVersion('left');
+    svc.paintAhead('left', 1500);
+    await until(() => painted.length >= 2);
+    svc.paintAhead('rev', 3400);
+    expect(bg().length).toBeGreaterThan(0);
+    expect(bg().every(q => q.versionId === 'rev')).toBe(true);
+    const count = painted.length;
+    await until(() => painted.length >= count + 6);
+    // at most the frame being painted when it changed is the old version's
+    expect(painted.slice(count + 1).every(p => p.versionId === 'rev')).toBe(true);
+  } finally { await one.close(); }
+}, T);
+
 test('a paint-ahead sweep stops at the first chapter that is not written or is broken', async () => {
   db.createVersion({ id: 'sweepy' });
   db.writeFiles('sweepy', [

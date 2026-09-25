@@ -145,24 +145,29 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return N;
   };
 
-  // A background sweep per version: paints its missing frames from `from` to the end of what can play, at the
-  // lowest priority (after previews, prefetch, renders and thumbs), SWEEP_BATCH at a time. A new sweep replaces the
-  // version's earlier one (a seek re-aims it); a sweep stops when its version's code changes, or a frame of it
-  // can't be painted (broken, superseded, the pool gone). Progress shows as `frames` events, as for any paint.
-  // Returns { from, end }, or null for a version that doesn't exist.
-  const sweeps = new Map();   // versionId -> the running sweep's token
+  // A background sweep: paints a version's missing frames from `from` to the end of what can play, at the lowest
+  // priority (after previews, prefetch, renders and thumbs), SWEEP_BATCH at a time. Only the page being viewed needs
+  // one, so a new sweep replaces the earlier one, whatever its version (a seek re-aims it; leaving a version drops
+  // its sweep). A write to the version (its storyboard, a chapter) doesn't stop it: it carries on under the new
+  // snapshot, from where it started, so a changed chapter is painted again under its new key. It stops at the end,
+  // or when a frame of it can't be painted (broken, superseded, the pool gone); the player re-aims it when it stalls.
+  // Progress shows as `frames` events, as for any paint. Returns { from, end }, or null for no such version.
+  let sweep = null;   // the running sweep's token
   function paintAhead(versionId, from) {
-    const cur = current(versionId);
+    let cur = current(versionId);
     if (!cur) return null;
     const token = {};
-    sweeps.set(versionId, token);
-    pool.supersede(versionId, 'background');
-    const end = playableEnd(cur, from);
-    let next = from, active = 0;
-    const going = () => sweeps.get(versionId) === token;
+    sweep = token;
+    pool.supersede(null, 'background');
+    let end = playableEnd(cur, from), next = from, active = 0;
+    const going = () => sweep === token;
     const more = () => {
       if (!going()) return;
-      if (current(versionId)?.snap.id !== cur.snap.id) { sweeps.delete(versionId); return; }
+      const now = current(versionId);
+      if (!now) { sweep = null; return; }
+      if (now.snap.id !== cur.snap.id) {   // written to since: go on under the new snapshot, from the start
+        cur = now; end = playableEnd(cur, from); next = from;
+      }
       while (active < SWEEP_BATCH && next < end) {
         const i = next++;
         if (lookup(cur.keys[chapterOfFrame(i)], i, cur.shas)) continue;
@@ -170,10 +175,10 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
         paint(versionId, cur, i, 'background').then(r => {
           active--;
           if (r.file) more();
-          else if (going()) sweeps.delete(versionId);
+          else if (going()) sweep = null;
         });
       }
-      if (next >= end && !active && going()) sweeps.delete(versionId);
+      if (next >= end && !active && going()) sweep = null;
     };
     more();
     return { from, end };

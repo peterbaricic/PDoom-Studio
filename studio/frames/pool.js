@@ -127,10 +127,13 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   }
   const cancel = w => { if (!w.done) drop(w, { ok: false, cancelled: true, error: 'cancelled' }); };
 
-  // Drops the queued (not yet painting) requests of this version at this priority; they resolve as superseded.
+  // Drops the queued (not yet painting) requests of this version (or of every version, for null) at this priority;
+  // they resolve as superseded.
   function supersede(versionId, prio) {
     const p = PRIORITIES.indexOf(prio);
-    for (const w of queuedWaiters()) if (w.versionId === versionId && w.prio === p) drop(w, { ok: false, superseded: true, error: 'superseded by a newer request' });
+    for (const w of queuedWaiters()) {
+      if ((versionId == null || w.versionId === versionId) && w.prio === p) drop(w, { ok: false, superseded: true, error: 'superseded by a newer request' });
+    }
   }
 
   function pump() {
