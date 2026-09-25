@@ -210,6 +210,53 @@ describe('scheduling', () => {
     expect(paintAhead).toEqual([0, 720, 720]);
   });
 
+  test('while waiting, paint-ahead is re-aimed when a broken chapter clears', async () => {
+    const segments = keys('a');
+    const p = mount({ initialTime: 0, segmentKeys: segments, coverage: coverage([[0, 100]], segments, [{ chapter: 2, error: 'timed out' }]) });
+    await flush();
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    await flush(1_000);
+    const before = paintAhead.length;
+    expect(before).toBeGreaterThanOrEqual(1);
+    // the break expires on the server: the coverage no longer lists it
+    p.update({ coverage: coverage([[0, 100]], segments) });
+    await flush(1_000);
+    expect(paintAhead.slice(before)).toEqual([0]);
+  });
+
+  test('while waiting, a stalled paint-ahead is re-aimed, less and less often, and not once nothing is left to paint', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    await flush(1_000);
+    const start = paintAhead.length;
+    await flush(60_000); // nothing gets painted: re-aimed after about 5 s, then 10 s, then 20 s
+    expect(paintAhead.length - start).toBe(3);
+    expect(paintAhead.slice(start).every(f => f === 0)).toBe(true);
+    // painting resumes: the clock starts again
+    p.update({ coverage: coverage([[0, 200]], keys('a')) });
+    await flush(4_000);
+    expect(paintAhead.length - start).toBe(3);
+    // everything is painted: it plays, and nothing more is asked for
+    p.update({ coverage: coverage([[0, N - 1]], keys('a')) });
+    await serveAll(keys('a'));
+    expect(p.result.current.state).toBe('playing');
+    const done = paintAhead.length;
+    await flush(120_000);
+    expect(paintAhead.length).toBe(done);
+  });
+
+  test('paused, a stalled paint-ahead is left alone', async () => {
+    mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush(1_000);
+    const start = paintAhead.length;
+    await flush(60_000);
+    expect(paintAhead.length).toBe(start);
+  });
+
   test('a seek cancels the in-flight requests it no longer needs (AbortController) and asks from the new playhead', async () => {
     const p = mount({ initialTime: 0 });
     await flush();

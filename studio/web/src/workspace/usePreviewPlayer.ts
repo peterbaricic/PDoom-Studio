@@ -12,6 +12,9 @@
 //   - Past the window, the server paints the rest of what can play by itself, at its lowest priority (after renders
 //     and thumbs): POST /api/frames/<v>/paint-ahead { from: playhead }, sent (debounced) on start, on a seek and when
 //     segment keys change; progress arrives as coverage (`frames` events). That's what brings "safe to play" closer.
+//     While playback waits for it (or plays towards frames not painted yet), it's re-aimed when a broken chapter
+//     clears, and when the coverage stops growing (the sweep ended early): after STALL_MS, then twice as long each
+//     time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop.
 //   - A seek cancels (AbortController) every request the new position doesn't need, and re-asks for the new playhead
 //     frame as a `preview` if it was on its way as `prefetch`: the server withdraws cancelled requests from its
 //     painting queue (Review Focus 3).
@@ -76,6 +79,8 @@ const DECODE_AHEAD = 8;
 const RATE_WINDOW_MS = 20_000; // paint rate measured over this much coverage history
 const PUMP_EVERY_MS = 500;
 const PAINT_AHEAD_DEBOUNCE_MS = 300;
+const STALL_MS = 5_000;
+const STALL_MAX_MS = 60_000;
 
 interface Snapshot {
   state: PlayerState;
@@ -125,6 +130,9 @@ export class PreviewEngine {
   private raf = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastProgressAt = Date.now(); // the coverage last grew, or paint-ahead was last aimed
+  private stallWait = STALL_MS;
+  private brokenSig: string | null = null; // the coverage's broken chapters, to tell when they change
   private running = false;
   private last: Snapshot | null = null;
 
@@ -147,6 +155,7 @@ export class PreviewEngine {
     this.audio.addEventListener('pause', this.onAudioPause);
     this.audio.addEventListener('ended', this.onAudioEnded);
     this.timer = setInterval(() => {
+      this.watchStall();
       this.pump();
       this.notify();
     }, PUMP_EVERY_MS);
@@ -195,7 +204,7 @@ export class PreviewEngine {
     this.coverage = coverage;
     if (!this.frames) return; // applied once the song is known
     if (this.applyKeys(keys)) this.aimPaintAhead();
-    this.applyCoverage(coverage);
+    if (this.applyCoverage(coverage) && this.wantsPainting()) this.aimPaintAhead();
     if (this.mode === 'playing') {
       if (this.blockedAt(this.ph)) this.stopAt(this.ph);
       else if (!this.hasBlob(this.ph)) this.gap();
@@ -227,8 +236,9 @@ export class PreviewEngine {
     return true;
   }
 
-  private applyCoverage(coverage: Coverage | undefined) {
-    if (!coverage) return;
+  // Whether the broken chapters changed (a chapter broke, or a break cleared).
+  private applyCoverage(coverage: Coverage | undefined): boolean {
+    if (!coverage) return false;
     this.covered.fill(0);
     let count = 0;
     for (const [a, b] of coverage.ranges) {
@@ -246,9 +256,18 @@ export class PreviewEngine {
     for (const i of [...this.inflight.keys()]) if (nowBroken.has(this.chapterOf[i]!)) this.abort(i);
     // the paint rate, from how fast the coverage grows
     const now = Date.now();
-    if (this.samples.length && count < this.samples.at(-1)![1]) this.samples = [];
+    const last = this.samples.at(-1);
+    if (last && count < last[1]) this.samples = [];
+    if (!last || count !== last[1]) {
+      this.lastProgressAt = now;
+      this.stallWait = STALL_MS;
+    }
     this.samples.push([now, count]);
     while (this.samples.length > 2 && this.samples[1]![0] < now - RATE_WINDOW_MS) this.samples.shift();
+    const sig = JSON.stringify(coverage.broken.map(b => [b.chapter, b.error]).sort());
+    const brokenChanged = this.brokenSig != null && sig !== this.brokenSig;
+    this.brokenSig = sig;
+    return brokenChanged;
   }
 
   setCanvas(canvas: HTMLCanvasElement | null) {
@@ -313,6 +332,27 @@ export class PreviewEngine {
     const dt = (Date.now() - first[0]) / 1000;
     const grown = last[1] - first[1];
     return dt >= 1 && grown > 0 ? grown / dt : null;
+  }
+
+  // Frames from the playhead to the end of what can play that the server hasn't painted.
+  private missingAhead() {
+    const end = this.endFrom(this.ph);
+    let missing = 0;
+    for (let i = this.ph; i < end; i++) if (!this.isCached(i)) missing++;
+    return missing;
+  }
+
+  // Playback is waiting for the server to paint (or playing towards frames it hasn't yet).
+  private wantsPainting() {
+    return (this.mode === 'waiting' || this.mode === 'playing') && !!this.keys && this.missingAhead() > 0;
+  }
+
+  // The coverage hasn't grown for a while although playback needs it to: the server's sweep ended early (a write
+  // it couldn't follow, a frame it couldn't paint, a restart). Aim it again, waiting longer each time.
+  private watchStall() {
+    if (!this.wantsPainting() || Date.now() - this.lastProgressAt < this.stallWait) return;
+    this.stallWait = Math.min(this.stallWait * 2, STALL_MAX_MS);
+    this.aimPaintAhead();
   }
 
   snapshot(): Snapshot {
@@ -390,6 +430,7 @@ export class PreviewEngine {
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null;
       if (!this.running) return;
+      this.lastProgressAt = Date.now();
       const path = `/api/frames/${encodeURIComponent(this.versionId)}/paint-ahead`;
       api.post(path, { from: this.ph }).catch(() => {}); // best effort: the window's own requests still paint
     }, PAINT_AHEAD_DEBOUNCE_MS);
@@ -607,6 +648,7 @@ export class PreviewEngine {
     if (this.blockedAt(this.ph)) return this.notify();
     if (this.safeNow() && this.hasBlob(this.ph)) return this.startAudio();
     this.mode = 'waiting';
+    this.aimPaintAhead();
     this.pump();
     this.notify();
   };

@@ -32,6 +32,7 @@ export function workspaceSearch(search: Record<string, unknown>): WorkspaceSearc
 }
 
 const URL_WRITE_DELAY_MS = 250;
+const BROKEN_RECHECK_MS = 15_000;
 const roundTime = (t: number) => Math.round(t * 1000) / 1000;
 
 export function Workspace({ versionId }: { versionId: string }) {
@@ -43,6 +44,9 @@ export function Workspace({ versionId }: { versionId: string }) {
   const coverage = useQuery({
     queryKey: ['coverage', versionId],
     queryFn: () => api.get<Coverage>(`/api/coverage/${encodeURIComponent(versionId)}`),
+    // A break from a timeout expires on the server (after a minute) without an event saying so: while any chapter
+    // is broken, ask again now and then, so the player learns when it can paint it again.
+    refetchInterval: q => (q.state.data?.broken.length ? BROKEN_RECHECK_MS : false),
   });
   const { data: jobs = [] } = useQuery(jobsQuery(versionId));
 
