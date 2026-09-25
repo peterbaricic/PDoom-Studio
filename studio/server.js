@@ -25,7 +25,8 @@ let port = +(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] ?? p
 if (port === 0) { const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() }); port = probe.port; probe.stop(true); }
 // --dev: the studio server accepts requests from the Vite dev server's own origin (studio/web/vite.config.ts's dev
 // server on 5173, proxying everything through to here) besides its own — never on by default, since it widens who
-// may drive the studio. `bun run dev` passes this; `bun run studio` never does.
+// may drive the studio. It also serves the studio.html scrubber (studio.html without ?render), which runs version code
+// in the browser that opens it. `bun run dev` passes this; `bun run studio` never does.
 const dev = process.argv.includes('--dev');
 
 const data = process.env.STUDIO_DATA ? resolve(process.env.STUDIO_DATA) : root;
@@ -78,6 +79,7 @@ if (dev) {
   writeFileSync(devTokenPath, token, { mode: 0o600 });
   chmodSync(devTokenPath, 0o600);
   console.warn(`--dev: also accepting requests from http://localhost:5173 (the Vite dev server) — never run this against real data.`);
+  console.warn(`--dev: ${baseUrl}/studio.html?v=<version> is the engine's scrubber — the studio.html scrubber runs version code in your browser, outside the sealed painting browser.`);
 }
 // Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });

@@ -38,7 +38,7 @@ The video took two generations, both in Claude Code:
 | Path | What it is |
 |---|---|
 | [`src/`](src/) | Shared code: Clawd, the guest characters, props, lyrics and the timeline |
-| [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush (also a scrubber) |
+| [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush (with `--dev`, also a scrubber) |
 | [`render.mjs`](render.mjs) | Renders frames in headless Chromium and encodes the MP4 with ffmpeg |
 | [`studio/`](studio/) | The studio: server, database, jobs and the frame cache; its web UI is in [`studio/web/`](studio/web/) |
 | [`studio/default.db`](studio/default.db) | Example versions, starting with the original video (its storyboard and chapters) |
@@ -59,7 +59,7 @@ bun run studio          # then open http://localhost:8080/
 `bun run studio` builds the web UI (React, in `studio/web/`) whenever it has changed, then serves it. To work on the UI
 itself, `bun run dev` runs the studio server with `--dev` on port 8080 beside Vite's dev server: open
 http://localhost:5173/ for hot reloading. Only use it with test data, since `--dev` also accepts changes from that
-second origin.
+second origin and turns on the engine's scrubber (below).
 
 **Versions**: the sidebar lists the examples (read-only, marked ★) and your own versions. **New version** takes a
 title and a concept, and Claude drafts a storyboard (the plan for the nine chapters). Review it in the inspector, edit
@@ -108,9 +108,12 @@ The studio listens only on your machine, and Claude jobs can only write inside t
 change the studio accepts needs its own `Origin` and the token it puts in its page (a new one each time the server
 starts), so after a restart an open page asks you to reload it.
 
-`http://w0.localhost:8080/studio.html?v=<version>` is a scrubber for one version, for working on the engine. Version
-code only runs on the `w<n>.localhost` origins, so `localhost:8080/studio.html` redirects there; it needs a browser
-that resolves `*.localhost`, such as Chrome or Firefox.
+**The engine's scrubber** is a tool for working on the engine, and only a server started with `--dev` (as by
+`bun run dev`) serves it: `http://localhost:8080/studio.html?v=<version>` sends you to `w0.localhost`, where a slider
+and Play paint the version live. Unlike everything else in the studio, it runs the version's code in your own browser,
+so only open it on versions you trust. It needs a browser that resolves `*.localhost`, such as Chrome or Firefox.
+Without `--dev`, studio.html is only served as a painting page. For a sealed look at a version outside the studio,
+use `render.mjs --sheet` or `--clip` (below), which paint in their own locked-down headless browser.
 
 **Fonts**: the lettering uses [Permanent Marker](https://fonts.google.com/specimen/Permanent+Marker) (Apache License
 2.0) and [Shantell Sans](https://fonts.google.com/specimen/Shantell+Sans) at weight 800 (SIL Open Font License 1.1).

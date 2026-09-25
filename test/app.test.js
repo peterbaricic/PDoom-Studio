@@ -122,6 +122,15 @@ test('--dev writes the per-start token to <data>/.studio/dev-token, mode 600', a
       if (done) throw new Error(`the dev server exited: ${out}${await new Response(p.stderr).text()}`);
       out += dec.decode(value);
     }
+    // The warning says what --dev opens up, the scrubber among it.
+    const errReader = p.stderr.getReader(), deadline = Date.now() + 5000;
+    let warned = '';
+    while (!warned.includes('scrubber') && Date.now() < deadline) {
+      const { value, done } = await Promise.race([errReader.read(), Bun.sleep(deadline - Date.now()).then(() => ({ done: true }))]);
+      if (done) break;
+      warned += dec.decode(value);
+    }
+    expect(warned).toContain('the studio.html scrubber runs version code in your browser');
     const tokenPath = join(dir, '.studio/dev-token');
     expect(existsSync(tokenPath)).toBe(true);
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
@@ -142,13 +151,30 @@ test('the token page and the UI are served on the studio hosts only, never where
   }
 });
 
+test('the studio.html scrubber (studio.html without ?render) is served only with --dev: it runs version code in your browser', async () => {
+  // Without --dev: nothing but a painting page, on either kind of host.
+  for (const host of ['localhost:8080', '127.0.0.1:8080', 'w0.localhost:8080', 'w2.localhost:8080']) {
+    for (const p of ['/studio.html', '/studio.html?v=a', '/studio.html?v=original&t=5']) expect([host, p, (await getOn(host, p)).status]).toEqual([host, p, 404]);
+  }
+  expect((await getOn('localhost:8080', '/studio.html?render&v=a')).status).toBe(302);
+  expect((await getOn('w0.localhost:8080', '/studio.html?render&v=a')).status).toBe(200);
+  // With --dev: the UI host sends it to w0.localhost, which serves it, under the same policy as a painting page.
+  const devApp = createApp({ db, root, data, token: 'tok', queue: {}, events: createEvents(), port: 8080, dev: true });
+  const devGet = (host, p) => devApp.fetch(new Request(`http://${host}${p}`, { headers: { host } }));
+  const redirect = await devGet('localhost:8080', '/studio.html?v=a');
+  expect([redirect.status, redirect.headers.get('location')]).toEqual([302, 'http://w0.localhost:8080/studio.html?v=a']);
+  const page = await devGet('w0.localhost:8080', '/studio.html?v=a');
+  expect(page.status).toBe(200);
+  expect(page.headers.get('content-security-policy')).toBe((await getOn('w0.localhost:8080', '/studio.html?render')).headers.get('content-security-policy'));
+});
+
 test('studio.html runs only on w<n>.localhost, under a content security policy', async () => {
   for (const host of ['localhost:8080', '127.0.0.1:8080', '[::1]:8080']) {
     const res = await getOn(host, '/studio.html?render&v=a');
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('http://w0.localhost:8080/studio.html?render&v=a');
   }
-  const res = await getOn('w1.localhost:8080', '/studio.html?v=a');
+  const res = await getOn('w1.localhost:8080', '/studio.html?render&v=a');
   expect(res.status).toBe(200);
   const html = await res.text();
   expect(html).toContain('src/loader.js');
@@ -209,13 +235,13 @@ test('renderer hosts never serve a service worker or shared worker script, whate
   db2.createVersion({ id: 'a' });
   db2.writeFiles('a', [{ path: 'ch/c01.js', content: '// one' }], { source: 'manual' });
   const fetchAs = (host, p, dest) => app2.fetch(new Request(`http://${host}${p}`, { headers: { host, ...(dest ? { 'sec-fetch-dest': dest } : {}) } }));
-  const paths = ['/studio.html', '/v/a/ch/c01.js', '/v/original/ch/c01_lab.js', '/src/lyrics.js', '/api/versions/a', '/nope'];
+  const paths = ['/studio.html?render', '/v/a/ch/c01.js', '/v/original/ch/c01_lab.js', '/src/lyrics.js', '/api/versions/a', '/nope'];
   for (const host of ['w0.localhost:8080', 'w5.localhost:8080']) {
     for (const p of paths) for (const dest of ['serviceworker', 'sharedworker']) expect((await fetchAs(host, p, dest)).status).toBe(404);
     // the same files still load as what they are
-    for (const p of ['/studio.html', '/v/a/ch/c01.js', '/src/lyrics.js', '/api/versions/a']) {
+    for (const p of ['/studio.html?render', '/v/a/ch/c01.js', '/src/lyrics.js', '/api/versions/a']) {
       expect((await fetchAs(host, p, null)).status).toBe(200);
-      expect((await fetchAs(host, p, p.endsWith('.js') ? 'script' : p === '/studio.html' ? 'document' : 'empty')).status).toBe(200);
+      expect((await fetchAs(host, p, p.endsWith('.js') ? 'script' : p.startsWith('/studio.html') ? 'document' : 'empty')).status).toBe(200);
     }
   }
 });
@@ -237,7 +263,7 @@ test('worker hosts answer only the API endpoints the loader needs; the rest of /
 });
 
 test('serves engine files but nothing private', async () => {
-  expect((await getOn('w0.localhost:8080', '/studio.html')).status).toBe(200);
+  expect((await getOn('w0.localhost:8080', '/studio.html?render')).status).toBe(200);
   expect((await get('/src/core.js')).status).toBe(200);
   expect((await get('/node_modules/p5/lib/p5.min.js')).status).toBe(200);
   for (const p of ['/studio.db', '/.git/config', '/package.json', '/studio/db.js', '/src/../package.json']) expect((await get(p)).status).toBe(404);

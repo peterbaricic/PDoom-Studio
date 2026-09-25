@@ -9,10 +9,12 @@ import { launchBrowser, findBrowser, browserArgs, gpuArgs, HOST_RESOLVER_RULES }
 import { tempDir, tempDefaultDb, captureHosts } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
-let db, srv, browser;
+let db, srv, devSrv, browser;
 beforeAll(async () => {
   db = openDb(':memory:', { defaultPath: tempDefaultDb() });
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
+  // The same studio as with --dev, which alone serves the studio.html scrubber (studio.html without ?render).
+  devSrv = serve({ db, root, data, token: 't', events: createEvents(), port: 0, dev: true });
   browser = await launchBrowser({ port: srv.port });
 });
 // Closing the browser can take a while on a busy machine; never long enough to fail the file over it.
@@ -20,6 +22,7 @@ afterAll(async () => {
   await Promise.race([browser?.close(), Bun.sleep(20000)]).catch(() => {});
   browser?.process()?.kill('SIGKILL');
   srv?.stop();
+  devSrv?.stop();
 }, 30000);
 
 // Opened on the studio's own origin, as a user would; the server sends studio.html to w0.localhost.
@@ -160,19 +163,31 @@ test('an unknown version sets loadError', async () => {
   await page.close();
 }, T);
 
-test('without ?render, studio.html is a scrubber that paints the requested version', async () => {
-  const page = await browser.newPage(), errors = [];
-  page.on('pageerror', e => errors.push(e.message));
-  await page.goto(`${srv.url}/studio.html?v=mini&t=5`);
-  expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?v=mini`);
-  await page.waitForFunction(() => document.getElementById('tt').textContent.includes('ms/frame'), { timeout: 60000 });
-  expect(await page.evaluate(() => [VERSION.id, document.getElementById('tt').textContent.split(' ')[0]])).toEqual(['mini', '5.00s']);
-  expect(errors).toEqual([]);
-  await page.close();
+test('without ?render, studio.html is a scrubber that paints the requested version, served only with --dev', async () => {
+  // Without --dev there is none, on either host: chapter code never runs in the user's browser.
+  const off = await browser.newPage();
+  expect((await off.goto(`${srv.url}/studio.html?v=mini&t=5`)).status()).toBe(404);
+  expect((await off.goto(`http://w0.localhost:${srv.port}/studio.html?v=mini&t=5`)).status()).toBe(404);
+  expect(await off.evaluate(() => typeof window.paintAt)).toBe('undefined');
+  await off.close();
+
+  const devBrowser = await launchBrowser({ port: devSrv.port });
+  try {
+    const page = await devBrowser.newPage(), errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(`${devSrv.url}/studio.html?v=mini&t=5`);
+    expect(page.url()).toStartWith(`http://w0.localhost:${devSrv.port}/studio.html?v=mini`);
+    await page.waitForFunction(() => document.getElementById('tt').textContent.includes('ms/frame'), { timeout: 60000 });
+    expect(await page.evaluate(() => [VERSION.id, document.getElementById('tt').textContent.split(' ')[0]])).toEqual(['mini', '5.00s']);
+    expect(errors).toEqual([]);
+  } finally {
+    await Promise.race([devBrowser.close(), Bun.sleep(10000)]).catch(() => {});
+    devBrowser.process()?.kill('SIGKILL');
+  }
 }, T);
 
 test("in the user's own browser (no proxy, no request interception), the scrubber's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
-  // The studio.html scrubber runs chapter code in whatever browser the user opens it in, where none of launchBrowser's
+  // The studio.html scrubber (--dev only) runs chapter code in whatever browser opens it, where none of launchBrowser's
   // flags or render.mjs's interception apply: only what the server sends (the CSP and its sandbox) and what
   // src/loader.js does before the version's scripts run. So this opens the scrubber in a browser launched with the
   // GPU flags alone; puppeteer's own defaults even turn Chrome's popup blocker off, so only the sandbox stops popups.
@@ -212,7 +227,7 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
   try {
     const page = await plain.newPage();
     plain.on('targetcreated', t => { if (t.type() === 'page') popups.push(t.url()); });
-    await page.goto(`${srv.url}/studio.html?v=b-escapee`);
+    await page.goto(`${devSrv.url}/studio.html?v=b-escapee`);
     // The scrubber comes up and goes on painting frames, its chapter's attempts notwithstanding.
     rendering = await page.waitForFunction(() => document.getElementById('tt')?.textContent.includes('ms/frame'), { timeout: 60000 })
       .then(() => page.evaluate(() => window.renderAt(1, 'image/jpeg', .5).then(u => u.length > 10000)), () => false);

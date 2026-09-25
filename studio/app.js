@@ -68,7 +68,7 @@ const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/, 
 
 // frames: the frame service (studio/frames/service.js); without one, the frame and cache routes 404. frameHoldMs: how
 // long a frame request waits for its frame to be painted before answering 202 (ask again). dev: accept the Vite dev
-// server's origin too (studio/server.js's --dev; never set by `bun run studio`).
+// server's origin too, and serve the studio.html scrubber (studio/server.js's --dev; never set by `bun run studio`).
 export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000,
   frames = null, frameHoldMs = 30000, dev = false }) {
   const app = { port };
@@ -119,9 +119,15 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     // new name. Named app-assets, not assets, so it can never collide with the repo's own /assets/ (PUBLIC, below).
     ['GET', /^\/app-assets\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, join(dirs.web, 'app-assets'), p, IMMUTABLE)],
     ['GET', /^\/api\/song$/, () => json(song)],
-    ['GET', /^\/studio\.html$/, req => onRenderer(req)
-      ? file(req, root, 'studio.html', { 'content-security-policy': STUDIO_CSP })
-      : Response.redirect(`http://w0.localhost:${app.port}/studio.html${new URL(req.url).search}`, 302)],
+    // A painting page (?render: the frame pool's and render.mjs's) on any studio. Without ?render, studio.html is the
+    // engine's scrubber, which runs version code in whoever's browser opens it: only with --dev (never by default, so
+    // chapter code never runs in the user's browser), and 404 otherwise, on either kind of host.
+    ['GET', /^\/studio\.html$/, req => {
+      const { search, searchParams } = new URL(req.url);
+      if (!searchParams.has('render') && !dev) return error(404, 'not found');
+      return onRenderer(req) ? file(req, root, 'studio.html', { 'content-security-policy': STUDIO_CSP })
+        : Response.redirect(`http://w0.localhost:${app.port}/studio.html${search}`, 302);
+    }],
     ['GET', /^\/v\/([a-z0-9-]+)\/(.+)$/, (req, [, id, p]) => {
       const f = isValidPath(p) && db.getFile(id, p);
       return f ? new Response(f.content, { headers: { 'content-type': TYPES[extname(p)], ...NO_STORE } }) : error(404, 'not found');
