@@ -11,6 +11,8 @@ describe('slug', () => {
   test('drops accents and anything else outside a-z and 0-9', () => {
     expect(slug('Café Crème — Déjà vu')).toBe('cafe-creme-deja-vu');
     expect(slug('AI 🤖 doom')).toBe('ai-doom');
+    // precomposed and decomposed accents alike
+    expect([slug('Caf\u00e9'), slug('Cafe\u0301'), slug('\u00c5ngstr\u00f6m')]).toEqual(['cafe', 'cafe', 'angstrom']);
   });
 
   test('gives only ids the server accepts, at most 41 characters, never ending in a hyphen', () => {

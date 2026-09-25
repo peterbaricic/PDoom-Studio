@@ -8,7 +8,7 @@ import type { Version } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useOpenVersionDialog } from '@/dialogs/VersionDialogs';
-import { rendersQuery, renderTitle } from '@/library/renders';
+import { rendersOf, rendersQuery, renderTitle } from '@/library/renders';
 import { JobsIndicator } from './JobsIndicator';
 import { SettingsPopover } from './SettingsPopover';
 import { useSelectedVersion } from './useSelectedVersion';
@@ -20,18 +20,24 @@ export function HeaderBar() {
   const watching = !!matchRoute({ to: '/versions/$id/watch' });
   const inLibrary = !!matchRoute({ to: '/library' });
   const versions = useQuery({ queryKey: ['versions'], queryFn: () => api.get<Version[]>('/api/versions') });
-  const current = versions.data?.find(v => v.id === selected);
-  // A render whose version was deleted is still watched under its own stored title (and there's nothing to link to).
-  const missing = !!selected && !!versions.data && !current;
+  const version = versions.data?.find(v => v.id === selected);
+  // The render being watched, when it's a render whose version was deleted (the version is missing, or the render
+  // is detached, kept from a deleted version whose id a newer one took): it's watched under its own stored title,
+  // with nothing to link to, and no version menu (the version it came from is gone).
   const { render: renderId } = useSearch({ strict: false });
-  const renders = useQuery({ ...rendersQuery, enabled: missing && watching });
-  const mine = renders.data?.filter(r => r.version_id === selected);
-  const watched = renderId === undefined ? mine?.[0] : mine?.find(r => r.id === renderId);
+  const renders = useQuery({ ...rendersQuery, enabled: !!selected && watching });
+  const watched = selected
+    ? renderId === undefined
+      ? rendersOf(renders.data ?? [], selected)[0]
+      : renders.data?.find(r => r.id === renderId && r.version_id === selected)
+    : undefined;
+  const orphan = watching && (watched?.detached || (!!selected && !!versions.data && !version));
+  const current = orphan ? undefined : version;
 
   // Each crumb after the first; `versionLink` makes it a link back to that version's workspace.
   const crumbs: Array<{ label: string; versionLink?: string }> = [];
   if (selected) {
-    const title = current ? current.title || selected : watched && missing ? renderTitle(watched) : selected;
+    const title = current ? current.title || selected : orphan && watched ? renderTitle(watched) : selected;
     crumbs.push({ label: title, versionLink: watching && current ? selected : undefined });
     if (watching) crumbs.push({ label: 'Watch' });
   } else if (inLibrary) {

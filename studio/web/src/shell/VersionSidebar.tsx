@@ -32,7 +32,7 @@ export function VersionSidebar() {
   const openDialog = useOpenVersionDialog();
   const { data: versions = [] } = useQuery({ queryKey: ['versions'], queryFn: () => api.get<Version[]>('/api/versions') });
   const { data: renders = [] } = useQuery({ queryKey: ['renders'], queryFn: () => api.get<Render[]>('/api/library') });
-  const rendered = new Set(renders.map(r => r.version_id));
+  const rendered = new Set(renders.filter(r => !r.detached).map(r => r.version_id));
   const examples = versions.filter(v => v.example);
   const mine = versions.filter(v => !v.example).sort((a, b) => b.updated_at - a.updated_at);
 

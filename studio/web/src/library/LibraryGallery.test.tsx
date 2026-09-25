@@ -20,6 +20,7 @@ const render = (overrides: Partial<Render> & Pick<Render, 'id'>): Render => ({
   size_bytes: 1,
   poster: `r-${overrides.id}.jpg`,
   created_at: WHEN + overrides.id * 86_400_000,
+  detached: false,
   ...overrides,
 });
 
@@ -47,6 +48,20 @@ describe('LibraryGallery', () => {
     expect(cardLinks(latest)).toEqual(['/versions/mine/watch?render=6', '/versions/other/watch?render=4', '/versions/gone/watch?render=3']);
     const older = screen.getByRole('region', { name: 'Older renders' });
     expect(cardLinks(older)).toEqual(['/versions/mine/watch?render=5', '/versions/other/watch?render=2']);
+  });
+
+  test('a render kept from a deleted version counts apart from a newer version that took its id', async () => {
+    library({
+      'GET /api/library': [
+        render({ id: 8 }),
+        render({ id: 7, title: 'The first Mine', detached: true }),
+        render({ id: 6, title: 'The first Mine', detached: true }),
+      ],
+    });
+    const latest = await screen.findByRole('region', { name: 'Latest renders' });
+    expect(cardLinks(latest)).toEqual(['/versions/mine/watch?render=8', '/versions/mine/watch?render=7']);
+    expect(within(latest).getByRole('heading', { name: 'The first Mine' })).toBeInTheDocument();
+    expect(cardLinks(screen.getByRole('region', { name: 'Older renders' }))).toEqual(['/versions/mine/watch?render=6']);
   });
 
   test('a card shows the poster, title, logline and date', async () => {

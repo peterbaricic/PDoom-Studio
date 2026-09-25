@@ -8,7 +8,7 @@ import type { JobKind, Version } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { jobsQuery } from '@/shell/JobsDrawer';
-import { useVersion, versionName } from './dialogParts';
+import { JobsError, useVersion, versionName } from './dialogParts';
 
 const CLAUDE_KINDS: JobKind[] = ['storyboard', 'shared', 'chapter'];
 
@@ -52,6 +52,7 @@ export function PromoteDialog({ versionId, open, onClose }: Props) {
         {busyJob && (
           <p className="text-sm">{`Not yet: a ${busyJob.kind} job for this version is still ${busyJob.status}. Let it finish, or cancel it, first.`}</p>
         )}
+        <JobsError jobs={jobs} />
         {promote.error && (
           <p role="alert" className="text-destructive text-sm">
             {`Couldn't promote it: ${promote.error.message}`}

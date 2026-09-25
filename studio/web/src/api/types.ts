@@ -96,6 +96,9 @@ export interface Render {
   size_bytes: number | null;
   poster: string | null;
   created_at: number;
+  // Its version was deleted and the render kept: it belongs to no version from then on, not even a new one that
+  // takes the same id (version_id is only where it came from), and its title and logline are its own.
+  detached: boolean;
 }
 
 // GET /api/coverage/<versionId>, and the `frames` SSE event's payload (minus versionId).

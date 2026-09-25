@@ -18,6 +18,7 @@ const render = (overrides: Partial<Render> & Pick<Render, 'id'>): Render => ({
   size_bytes: 1,
   poster: null,
   created_at: Date.UTC(2026, 8, 20, 12, 0),
+  detached: false,
   ...overrides,
 });
 
@@ -100,6 +101,11 @@ describe('RenderBar', () => {
     expect(watch).toHaveAttribute('href', '/versions/mine/watch?render=7');
     expect(screen.getByText(/2:37/)).toBeInTheDocument();
     expect(screen.getByText(new RegExp(new Date(Date.UTC(2026, 8, 22, 9, 30)).toLocaleDateString()))).toBeInTheDocument();
+  });
+
+  test('a render kept from a deleted version with the same id isn\'t this version\'s', async () => {
+    renderBar({ renders: [render({ id: 9, detached: true, created_at: Date.UTC(2026, 8, 24) }), render({ id: 7 })] });
+    expect(await screen.findByRole('link', { name: 'Watch' })).toHaveAttribute('href', '/versions/mine/watch?render=7');
   });
 
   test('without a render there is no Watch', async () => {

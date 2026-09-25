@@ -357,30 +357,65 @@ test('opening with defaultPath never modifies the examples database, and creates
   expect(existsSync(`${defaultPath}-journal`)).toBe(false);
 });
 
-test('deleteVersion removes the version, its files, revisions and jobs; its renders stay unless videos is set', () => {
-  const setUp = (id, title) => {
-    db.createVersion({ id, title, logline: `${title} logline` });
-    db.writeFiles(id, [{ path: 'STORYBOARD.md', content: `# ${title}` }, { path: 'ch/c01.js', content: `// ${title} 1` }], { source: 'manual' });
-    db.updateJob(db.addJob({ kind: 'chapter', versionId: id, params: { chapter: 1 } }), { status: 'done' });
-    return db.addRender({ versionId: id, file: `${id}.mp4`, poster: `${id}.jpg`, title, logline: `${title} logline`, durationS: 1, renderS: 1, sizeBytes: 3 });
-  };
-  const count = (table, column = 'version_id') => id => db.db.query(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = $id`).get({ id }).n;
-  setUp('kept', 'Kept');
-  const goneRender = setUp('gone', 'Gone');
+const setUpVersion = (udb, id, title, file = id) => {
+  udb.createVersion({ id, title, logline: `${title} logline` });
+  udb.writeFiles(id, [{ path: 'STORYBOARD.md', content: `# ${title}` }, { path: 'ch/c01.js', content: `// ${title} 1` }], { source: 'manual' });
+  udb.updateJob(udb.addJob({ kind: 'chapter', versionId: id, params: { chapter: 1 } }), { status: 'done' });
+  return udb.addRender({ versionId: id, file: `${file}.mp4`, poster: `${file}.jpg`, title, logline: `${title} logline`, durationS: 1, renderS: 1, sizeBytes: 3 });
+};
+
+test('deleteVersion removes the version, its files, revisions and jobs; its renders stay, detached, under its last title', () => {
+  const count = table => id => db.db.query(`SELECT COUNT(*) AS n FROM ${table} WHERE version_id = $id`).get({ id }).n;
+  setUpVersion(db, 'kept', 'Kept');
+  const goneRender = setUpVersion(db, 'gone', 'Gone');
+  db.updateVersion('gone', { title: 'Gone at last', logline: 'Renamed since it was rendered' });
 
   expect(db.deleteVersion('gone', { videos: false })).toEqual({ deletedRenders: [] });
   expect(db.getVersion('gone')).toBeNull();
   expect(db.listVersions().map(v => v.id)).toEqual(['kept']);
   for (const table of ['files', 'revisions', 'jobs']) expect([table, count(table)('gone')]).toEqual([table, 0]);
-  // the video stays in the library, under the deleted version's last title
-  expect(db.listRenders().find(r => r.id === goneRender)).toMatchObject({ version_id: 'gone', title: 'Gone', logline: 'Gone logline', file: 'gone.mp4' });
-  // nothing of the other version's went
+  // the video stays in the library, under the deleted version's last title, and belongs to no version now
+  expect(db.listRenders().find(r => r.id === goneRender)).toMatchObject({
+    version_id: 'gone', title: 'Gone at last', logline: 'Renamed since it was rendered', file: 'gone.mp4', detached: true });
+  expect(db.getRender(goneRender)).toMatchObject({ detached: true, title: 'Gone at last' });
+  // nothing of the other version's went, and its render isn't detached
   for (const table of ['files', 'revisions', 'jobs']) expect([table, count(table)('kept')]).toEqual([table, table === 'jobs' ? 1 : 2]);
-  expect(db.listRenders().map(r => r.version_id).sort()).toEqual(['gone', 'kept']);
+  expect(db.listRenders().map(r => [r.version_id, r.detached]).sort()).toEqual([['gone', true], ['kept', false]]);
+});
 
-  setUp('gone', 'Gone again');   // the id is free again: a new version may take it
-  expect(db.deleteVersion('gone', { videos: true })).toEqual({ deletedRenders: ['gone.mp4', 'gone.jpg', 'gone.mp4', 'gone.jpg'] });
-  expect(db.listRenders().map(r => r.version_id)).toEqual(['kept']);
+test('a kept render is not taken over by a new version with the same id, nor deleted with that version\'s videos', () => {
+  const kept = setUpVersion(db, 'bake-off', 'Bake-Off', 'first');
+  db.deleteVersion('bake-off', { videos: false });
+
+  const newer = setUpVersion(db, 'bake-off', 'Bake-Off Again', 'second');   // the id is free again: a new version takes it
+  const byId = () => Object.fromEntries(db.listRenders().map(r => [r.id, r]));
+  expect(byId()[kept]).toMatchObject({ version_id: 'bake-off', title: 'Bake-Off', logline: 'Bake-Off logline', detached: true });
+  expect(byId()[newer]).toMatchObject({ version_id: 'bake-off', title: 'Bake-Off Again', detached: false });
+  // the new version renamed: its own render follows, the kept one doesn't
+  db.updateVersion('bake-off', { title: 'Renamed' });
+  expect([byId()[kept].title, byId()[newer].title]).toEqual(['Bake-Off', 'Renamed']);
+
+  // deleting the new version with its videos takes only its own render's files
+  expect(db.deleteVersion('bake-off', { videos: true })).toEqual({ deletedRenders: ['second.mp4', 'second.jpg'] });
+  expect(Object.keys(byId()).map(Number)).toEqual([kept]);
+  expect(byId()[kept]).toMatchObject({ title: 'Bake-Off', detached: true });
+
+  // and a third version keeping its videos detaches only its own, leaving the first kept render's title alone
+  const third = setUpVersion(db, 'bake-off', 'Third', 'third');
+  db.deleteVersion('bake-off', { videos: false });
+  expect([byId()[kept].title, byId()[third].title]).toEqual(['Bake-Off', 'Third']);
+});
+
+test('an old database gets renders.detached, with every existing render attached', () => {
+  const path = tempDbPath('old-renders-');
+  const old = new Database(path, { create: true });
+  old.exec(`CREATE TABLE renders (id INTEGER PRIMARY KEY, version_id TEXT NOT NULL, file TEXT NOT NULL, revision_ids TEXT NOT NULL DEFAULT '[]',
+    duration_s REAL, render_s REAL, size_bytes INTEGER, poster TEXT, created_at INTEGER)`);
+  old.query("INSERT INTO renders (version_id, file, created_at) VALUES ('a', 'a.mp4', 1)").run();
+  old.close();
+  const udb = openDb(path);
+  expect(udb.listRenders()).toMatchObject([{ version_id: 'a', detached: false, title: '' }]);
+  udb.close();
 });
 
 test('deleteVersion refuses a missing version, an example, and a version with queued or running jobs', () => {
@@ -393,11 +428,23 @@ test('deleteVersion refuses a missing version, an example, and a version with qu
   udb.close();
 
   db.createVersion({ id: 'busy' });
-  for (const kind of ['storyboard', 'chapter', 'render', 'thumbs']) for (const status of ['queued', 'running']) {
+  for (const kind of ['storyboard', 'shared', 'chapter', 'render', 'thumbs', 'some-future-kind']) for (const status of ['queued', 'running']) {
     const jid = db.addJob({ kind, versionId: 'busy' }); db.updateJob(jid, { status });
     expect(() => db.deleteVersion('busy', { videos: false })).toThrow(`a ${kind} job for this version is still ${status}`);
     expect(db.getVersion('busy')).not.toBeNull();
     db.updateJob(jid, { status: 'cancelled' });
   }
   expect(db.deleteVersion('busy', { videos: false })).toEqual({ deletedRenders: [] });
+});
+
+test('deleteVersion refuses an id left in both databases by an interrupted promote (it reads as the example)', () => {
+  const defaultPath = freshDefaultPath();
+  const first = openDb(tempDbPath('user-'), { defaultPath }), crashed = openDb(tempDbPath('user-'), { defaultPath });
+  for (const udb of [first, crashed]) setUpVersion(udb, 'mine', 'Mine');
+  first.promoteVersion('mine');
+  first.close();
+  expect(() => crashed.deleteVersion('mine', { videos: true })).toThrow('examples are read-only');
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM versions WHERE id = 'mine'").get().n).toBe(1);
+  expect(crashed.db.query("SELECT COUNT(*) AS n FROM renders WHERE version_id = 'mine'").get().n).toBe(1);
+  crashed.close();
 });

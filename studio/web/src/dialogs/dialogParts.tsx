@@ -2,9 +2,10 @@
 // title and id fields of a new version (New version, Remix), where the id follows the title as a slug until it's
 // edited by hand.
 import { useId, useState, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { api } from '@/api/client';
-import type { Version } from '@/api/types';
+import type { Job, Version } from '@/api/types';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { isValidVersionId, slug } from './slug';
 
@@ -15,6 +16,20 @@ export function useVersion(versionId: string | undefined) {
 }
 
 export const versionName = (v: Version) => v.title || v.id;
+
+// Promote and Delete wait for the version's jobs (they're refused while one is queued or running): when those can't
+// be read, the dialog's button stays off, and this says why, with Retry.
+export function JobsError({ jobs }: { jobs: UseQueryResult<Job[]> }) {
+  if (!jobs.error || jobs.data) return null;
+  return (
+    <div role="alert" className="text-destructive flex items-center gap-2 text-sm">
+      <span className="flex-1">{`Couldn't check this version's jobs: ${jobs.error.message}`}</span>
+      <Button type="button" size="sm" variant="outline" disabled={jobs.isFetching} onClick={() => void jobs.refetch()}>
+        Retry
+      </Button>
+    </div>
+  );
+}
 
 export function useTitleAndId(initialTitle = '') {
   const [title, setTitleValue] = useState(initialTitle);

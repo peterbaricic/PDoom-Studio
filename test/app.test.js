@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { createApp } from '../studio/app.js';
@@ -595,7 +595,7 @@ test('deleting a version without its videos: the version, its files, revisions, 
   // the video and its poster stay, and the library still lists the render under the deleted version's title
   expect(readFileSync(join(lib, 'gone.mp4'), 'utf8')).toBe('mp4');
   expect(readFileSync(join(lib, 'gone.jpg'), 'utf8')).toBe('jpg');
-  expect(await (await get2('/api/library')).json()).toMatchObject([{ id: rid, version_id: 'gone', title: 'Gone', logline: 'Bye' }]);
+  expect(await (await get2('/api/library')).json()).toMatchObject([{ id: rid, version_id: 'gone', title: 'Gone', logline: 'Bye', detached: true }]);
   expect(published).toEqual([{ type: 'version', data: { id: 'gone' } }, { type: 'library', data: {} }]);
   // the frame service drops whatever it still had queued for the version
   expect(dropped).toEqual(['gone']);
@@ -618,6 +618,52 @@ test('deleting a version with its videos removes its renders and their files, in
   expect((await (await get2('/api/library')).json()).map(r => r.id)).toEqual([other]);
 });
 
+test('a kept render stays the deleted version\'s: a new version with the same id neither lists it nor deletes it with its videos', async () => {
+  const { db: db2, get: get2, send: send2, lib, rid } = deletable();
+  expect((await send2('DELETE', '/api/versions/gone?videos=0')).status).toBe(200);
+  // "Gone" is made again, and rendered
+  expect((await send2('POST', '/api/versions', { id: 'gone', title: 'Gone again' })).status).toBe(201);
+  writeFileSync(join(lib, 'gone-again.mp4'), 'mp4');
+  const again = db2.addRender({ versionId: 'gone', file: 'gone-again.mp4', title: 'Gone again', durationS: 1, renderS: 1, sizeBytes: 3 });
+  const library = async () => Object.fromEntries((await (await get2('/api/library')).json()).map(r => [r.id, r]));
+  expect(await library()).toMatchObject({ [rid]: { title: 'Gone', detached: true }, [again]: { title: 'Gone again', detached: false } });
+
+  expect((await send2('DELETE', '/api/versions/gone?videos=1')).status).toBe(200);
+  expect(existsSync(join(lib, 'gone-again.mp4'))).toBe(false);
+  expect(readFileSync(join(lib, 'gone.mp4'), 'utf8')).toBe('mp4');
+  expect(readFileSync(join(lib, 'gone.jpg'), 'utf8')).toBe('jpg');
+  expect(Object.keys(await library()).map(Number)).toEqual([rid]);
+  // the library can still delete it, by its render id
+  expect((await send2('DELETE', `/api/library/${rid}`)).status).toBe(200);
+  expect(existsSync(join(lib, 'gone.mp4'))).toBe(false);
+});
+
+test('a file that cannot be removed after the version is deleted is logged, not a failed request', async () => {
+  const { db: db2, send: send2, published, dropped, lib } = deletable();
+  const errors = [], logged = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  chmodSync(lib, 0o555);   // the video can't be unlinked
+  try {
+    const res = await send2('DELETE', '/api/versions/gone?videos=1');
+    expect([res.status, await res.json()]).toEqual([200, { ok: true }]);
+  } finally { chmodSync(lib, 0o755); console.error = logged; }
+  expect(db2.getVersion('gone')).toBeNull();
+  expect(errors.some(e => /deleting version gone: couldn't remove gone\.mp4/.test(e))).toBe(true);
+  expect(existsSync(join(lib, 'gone.mp4'))).toBe(true);   // left behind
+  expect(dropped).toEqual(['gone']);
+  expect(published.map(e => e.type)).toEqual(['version', 'library']);
+});
+
+test('deleting an id an interrupted promote left in both databases is refused: it reads as the example', async () => {
+  const { db: db2, send: send2 } = withExamples(tempDefaultDb());   // its own copy: this writes to default.db
+  db2.createVersion({ id: 'mine', title: 'Mine' });
+  db2.writeFiles('mine', [{ path: 'ch/c01.js', content: '// 1' }], { source: 'manual' });
+  db2._writeExample(db2.getVersion('mine'), [{ path: 'ch/c01.js', content: '// 1' }]);   // promote's first step only
+  const res = await send2('DELETE', '/api/versions/mine?videos=1');
+  expect([res.status, (await res.json()).error]).toEqual([403, 'examples are read-only — remix it first']);
+  expect(db2.db.query("SELECT COUNT(*) AS n FROM versions WHERE id = 'mine'").get().n).toBe(1);
+});
+
 test('deleting a version is refused for examples, while a job of it is queued or running, and for a bad videos flag', async () => {
   const { db: db2, send: send2, published, dropped } = deletable();
   const refused = async (path, status, message) => {
@@ -627,7 +673,7 @@ test('deleting a version is refused for examples, while a job of it is queued or
   await refused('/api/versions/original?videos=1', 403, 'examples are read-only — remix it first');
   await refused('/api/versions/nope?videos=0', 404, 'no such version');
   await refused('/api/versions/gone?videos=yes', 400, 'videos must be 0 or 1');
-  for (const kind of ['storyboard', 'chapter', 'render', 'thumbs']) for (const status of ['queued', 'running']) {
+  for (const kind of ['storyboard', 'shared', 'chapter', 'render', 'thumbs']) for (const status of ['queued', 'running']) {
     const jid = db2.addJob({ kind, versionId: 'gone' }); db2.updateJob(jid, { status });
     await refused('/api/versions/gone?videos=0', 409, `a ${kind} job for this version is still ${status} — let it finish or cancel it first`);
     db2.updateJob(jid, { status: 'failed' });

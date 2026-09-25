@@ -10,7 +10,7 @@ export const isValidVersionId = (id: string) => VERSION_ID.test(id);
 export function slug(title: string): string {
   return title
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '') // accents off: "Café" is "cafe"
+    .replace(/[\u0300-\u036f]/g, '') // NFKD split the accents off as combining marks: drop them ("Café" is "cafe")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+/, '')

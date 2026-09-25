@@ -21,6 +21,7 @@ const render = (overrides: Partial<Render> & Pick<Render, 'id'>): Render => ({
   size_bytes: 1,
   poster: `mine-${overrides.id}.jpg`,
   created_at: WHEN + overrides.id * 60_000,
+  detached: false,
   ...overrides,
 });
 
@@ -146,7 +147,7 @@ describe('WatchView', () => {
   test('"How it was made" shows the concept, revision count, feedback notes, Claude cost and render date', async () => {
     watch({ renderId: 5 });
     const made = await screen.findByRole('region', { name: 'How it was made' });
-    expect(within(made).getByText('Clawd and the Researcher bake a superintelligence.')).toBeInTheDocument();
+    expect(await within(made).findByText('Clawd and the Researcher bake a superintelligence.')).toBeInTheDocument();
     await within(made).findByText(/6 revisions/);
     expect(within(made).getByText(/2 rounds of feedback/)).toBeInTheDocument();
     // claude and manual notes, not the "<kind> job" placeholders, restores or remixes; oldest first
@@ -265,6 +266,28 @@ describe('WatchView', () => {
     // and a storyboard that's not there (404) isn't asked for again and again
     const retry = storyboardQuery('mine', true).retry;
     expect([retry(0, new Error('not found')), retry(0, new Error('HTTP 500')), retry(3, new Error('HTTP 500'))]).toEqual([false, true, false]);
+  });
+
+  test('a render kept from a deleted version plays as that version\'s, not as the newer one\'s that took its id', async () => {
+    const kept = render({ id: 9, title: 'The First Mine', logline: 'Before it was deleted.', detached: true, created_at: WHEN + 99 * 60_000 });
+    const { fetchMock } = watch({ renderId: 9, answers: { 'GET /api/library': [kept, ...RENDERS] } });
+    expect((await video()).getAttribute('src')).toBe('/library/mine-9.mp4');
+    expect(screen.getByRole('heading', { level: 1, name: 'The First Mine' })).toBeInTheDocument();
+    expect(screen.getByText('Before it was deleted.')).toBeInTheDocument();
+    const made = screen.getByRole('region', { name: 'How it was made' });
+    expect(await within(made).findByText(/This version was deleted/)).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Walkthrough' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Other renders' })).toBeNull();
+    await new Promise(r => setTimeout(r, 20));
+    expect(calls(fetchMock).filter(c => c !== 'GET /api/library')).toEqual([]);
+  });
+
+  test('the version\'s own latest and other renders leave out one kept from a deleted version with the same id', async () => {
+    const kept = render({ id: 9, title: 'The First Mine', detached: true, created_at: WHEN + 99 * 60_000 });
+    watch({ answers: { 'GET /api/library': [kept, ...RENDERS] } });
+    expect((await video()).getAttribute('src')).toBe('/library/mine-5.mp4');
+    const others = await screen.findByRole('list', { name: 'Other renders' });
+    expect(within(others).getAllByRole('link').map(a => a.getAttribute('href'))).toEqual(['/versions/mine/watch?render=3']);
   });
 
   test('a version that fails to load for another reason says so, and still plays the render', async () => {

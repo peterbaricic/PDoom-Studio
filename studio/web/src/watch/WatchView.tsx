@@ -4,7 +4,9 @@
 // date) and the version's other renders.
 //
 // A render outlives its version (studio/db.js keeps its title and logline, and listRenders falls back to them), so a
-// version that's gone still plays here under its stored title; only the parts read from the version are left out.
+// version that's gone still plays here under its stored title; only the parts read from the version are left out. A
+// render kept when its version was deleted is detached: it is played by its id alone, and a newer version that took
+// the same id is not its version (neither its walkthrough and story nor its renders are shown with it).
 //
 // Loaded lazily (router.tsx): its own chunk, with the Markdown renderer it shares with the inspector.
 import { useEffect, useRef, useState } from 'react';
@@ -13,7 +15,7 @@ import { Link } from '@tanstack/react-router';
 import { ApiError, api } from '@/api/client';
 import type { Manifest, Render, Revision, WalkthroughChapter } from '@/api/types';
 import { Skeleton } from '@/components/ui/skeleton';
-import { libraryFile, renderTitle, rendersQuery } from '@/library/renders';
+import { libraryFile, renderTitle, rendersOf, rendersQuery } from '@/library/renders';
 import { cn } from '@/lib/utils';
 import { jobsQuery } from '@/shell/JobsDrawer';
 import { formatDuration } from '@/shell/jobFormat';
@@ -36,15 +38,20 @@ const retryUnlessRefused = (count: number, e: Error) => !(e instanceof ApiError 
 
 export function WatchView({ versionId, renderId }: WatchViewProps) {
   const renders = useQuery(rendersQuery);
+  // The version's own renders, newest first, as the library lists them; a named render may also be a detached one
+  // that came from this id.
+  const mine = rendersOf(renders.data ?? [], versionId).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  const render =
+    renderId === undefined ? mine[0] : renders.data?.find(r => r.id === renderId && r.version_id === versionId);
+  const detached = !!render?.detached;
   const manifest = useQuery({
     queryKey: ['version', versionId],
     queryFn: () => api.get<Manifest>(`/api/versions/${encodeURIComponent(versionId)}`),
     retry: retryUnlessRefused,
+    // A named render may be a detached one, which no version (not even a newer one with this id) goes with: wait to
+    // know. The version's latest (no render named) is always its own.
+    enabled: renderId === undefined || (!!renders.data && !detached),
   });
-
-  // Newest first, as the library lists them.
-  const mine = (renders.data ?? []).filter(r => r.version_id === versionId).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
-  const render = renderId === undefined ? mine[0] : mine.find(r => r.id === renderId);
   // With no render to play, whether the version was ever rendered (its renders deleted since) or not: a finished
   // render job says so.
   const nothingToPlay = !!renders.data && !render && renderId === undefined;
@@ -91,7 +98,7 @@ export function WatchView({ versionId, renderId }: WatchViewProps) {
     );
   }
 
-  const deleted = manifest.error instanceof ApiError && manifest.error.status === 404;
+  const deleted = detached || (manifest.error instanceof ApiError && manifest.error.status === 404);
   // After a refetch answers 404 (the version deleted while this is open), the query keeps the manifest it had: it's
   // stale, and nothing may be asked on its account (history, jobs, the storyboard).
   const live = deleted ? undefined : manifest.data;
@@ -102,7 +109,7 @@ export function WatchView({ versionId, renderId }: WatchViewProps) {
         render={render}
         walkthrough={live?.walkthrough ?? []}
         // room for the walkthrough, kept while it loads so the video doesn't jump; none when there won't be one
-        side={manifest.isPending || !!live?.walkthrough.length}
+        side={(!deleted && manifest.isPending) || !!live?.walkthrough.length}
       />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <HowItWasMade
@@ -112,7 +119,7 @@ export function WatchView({ versionId, renderId }: WatchViewProps) {
           deleted={deleted}
           error={deleted ? null : (manifest.error?.message ?? null)}
         />
-        <OtherRenders versionId={versionId} render={render} renders={mine} />
+        <OtherRenders versionId={versionId} render={render} renders={detached ? [] : mine} />
       </div>
     </div>
   );

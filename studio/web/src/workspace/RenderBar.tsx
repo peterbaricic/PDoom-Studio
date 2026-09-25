@@ -9,7 +9,7 @@ import { toast } from 'sonner';
 import { api } from '@/api/client';
 import type { Job } from '@/api/types';
 import { Button } from '@/components/ui/button';
-import { rendersQuery } from '@/library/renders';
+import { rendersOf, rendersQuery } from '@/library/renders';
 import { formatDuration } from '@/shell/jobFormat';
 
 export interface RenderBarProps {
@@ -24,7 +24,7 @@ export function RenderBar({ versionId, chapters, jobs }: RenderBarProps) {
   const reasonId = useId();
   const queryClient = useQueryClient();
   const { data: renders = [] } = useQuery(rendersQuery);
-  const latest = renders.filter(r => r.version_id === versionId).sort((a, b) => b.created_at - a.created_at)[0];
+  const latest = rendersOf(renders, versionId).sort((a, b) => b.created_at - a.created_at)[0];
 
   const running = jobs.find(j => j.kind === 'render' && j.status === 'running');
   const queued = jobs.find(j => j.kind === 'render' && j.status === 'queued');

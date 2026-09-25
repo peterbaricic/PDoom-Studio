@@ -40,8 +40,10 @@ export function LibraryGallery() {
   const latest: Render[] = [];
   const older: Render[] = [];
   for (const r of newestFirst) {
-    (seen.has(r.version_id) ? older : latest).push(r);
-    seen.add(r.version_id);
+    // Renders kept from a deleted version are that version's, not those of a newer one that took its id.
+    const version = r.detached ? `detached:${r.version_id}` : r.version_id;
+    (seen.has(version) ? older : latest).push(r);
+    seen.add(version);
   }
 
   return (

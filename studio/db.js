@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY, version_id TEXT NOT NULL, file TEXT NOT NULL, revision_ids TEXT NOT NULL DEFAULT '[]',
   snapshot_id TEXT, title TEXT NOT NULL DEFAULT '', logline TEXT NOT NULL DEFAULT '',
-  duration_s REAL, render_s REAL, size_bytes INTEGER, poster TEXT, created_at INTEGER);
+  duration_s REAL, render_s REAL, size_bytes INTEGER, poster TEXT, created_at INTEGER, detached INTEGER NOT NULL DEFAULT 0);
 `;
 
 const PATH_RE = /^(STORYBOARD\.md|shared\.js|walkthrough\.json|ch\/c0[1-9](_[a-z0-9_]+)?\.js)$/;
@@ -53,7 +53,7 @@ const JOB_LIST_COLUMNS = 'id, kind, version_id, params, status, progress, cost_u
 
 const parseVersion = r => r && { ...r, options: JSON.parse(r.options), example: !!r.example };
 const parseJob = r => r && { ...r, params: JSON.parse(r.params) };
-const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids) };
+const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids), detached: !!r.detached };
 
 // SQLite reads the attached name as a URI (for its ?mode=ro), so a %, ? or # in the path itself is percent-encoded:
 // otherwise it would be taken as an escape, the query or a fragment, and SQLite would quietly open (and create)
@@ -139,6 +139,9 @@ function migrateRenderColumns(db) {
   if (!columns.includes('snapshot_id')) db.exec('ALTER TABLE renders ADD COLUMN snapshot_id TEXT');
   if (!columns.includes('title')) db.exec("ALTER TABLE renders ADD COLUMN title TEXT NOT NULL DEFAULT ''");
   if (!columns.includes('logline')) db.exec("ALTER TABLE renders ADD COLUMN logline TEXT NOT NULL DEFAULT ''");
+  // detached: the render's version was deleted and the render kept (deleteVersion without videos). It's nobody's
+  // render from then on, not even that of a new version that takes the same id: see listRenders.
+  if (!columns.includes('detached')) db.exec('ALTER TABLE renders ADD COLUMN detached INTEGER NOT NULL DEFAULT 0');
 }
 
 // Builds "a = $a, b = $b" from the allowed keys present in patch; objects are stored as JSON.
@@ -300,18 +303,29 @@ class StudioDb {
     return this.getVersion(id);
   }
   // Deletes one of the user's own versions: the version, its files, its revisions and its jobs (logs included), in one
-  // transaction. Its renders are deleted too only when `videos` is set; otherwise they stay in the library, listed
-  // under the title and logline stored with each (see listRenders). Refuses an example, and a version with a job
-  // still queued or running (that job would go on writing to, or rendering, a version that's gone). Returns the
-  // library files (videos and posters) of the renders it deleted, for the caller to remove from disk.
+  // transaction. Its renders are deleted too only when `videos` is set; otherwise they stay in the library, detached:
+  // they keep the version's last title and logline as their own and belong to no version from then on, so a new
+  // version that takes the same id neither lists them as its own nor deletes them with its own videos. (Renders
+  // detached earlier, from a version that had this id before, are never touched here.) Refuses an example, and a
+  // version with any job still queued or running (it would go on writing to, or rendering, a version that's gone).
+  // Returns the library files (videos and posters) of the renders it deleted, for the caller to remove from disk.
   deleteVersion(id, { videos = false } = {}) {
     if (this._isExample(id)) throw new Error('examples are read-only');
-    if (!this.getVersion(id)) throw new Error(`no such version: ${id}`);
-    const [busy] = this.findJobs({ versionId: id, kinds: ['storyboard', 'shared', 'chapter', 'render', 'thumbs'], statuses: ['queued', 'running'] });
+    const v = this.getVersion(id);
+    if (!v) throw new Error(`no such version: ${id}`);
+    const busy = this.db.query(`SELECT kind, status FROM jobs WHERE version_id = $id AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1`).get({ id });
     if (busy) throw new Error(`a ${busy.kind} job for this version is still ${busy.status} — let it finish or cancel it first`);
     return this.db.transaction(() => {
-      const renders = videos ? this.db.query('SELECT file, poster FROM renders WHERE version_id = $id ORDER BY id').all({ id }) : [];
-      if (videos) this.db.query('DELETE FROM renders WHERE version_id = $id').run({ id });
+      let renders = [];
+      if (videos) {
+        renders = this.db.query('SELECT file, poster FROM renders WHERE version_id = $id AND detached = 0 ORDER BY id').all({ id });
+        this.db.query('DELETE FROM renders WHERE version_id = $id AND detached = 0').run({ id });
+      } else {
+        // Named by the version's last title and logline (a render's own copy dates from when it was rendered).
+        this.db.query(`UPDATE renders SET detached = 1, title = CASE WHEN $title = '' THEN title ELSE $title END,
+          logline = CASE WHEN $title = '' THEN logline ELSE $logline END WHERE version_id = $id AND detached = 0`)
+          .run({ id, title: v.title, logline: v.logline });
+      }
       this.db.query('DELETE FROM jobs WHERE version_id = $id').run({ id });
       this.db.query('DELETE FROM files WHERE version_id = $id').run({ id });
       this.db.query('DELETE FROM revisions WHERE version_id = $id').run({ id });
@@ -391,11 +405,12 @@ class StudioDb {
     return Number(lastInsertRowid);
   }
   // Named after the version currently holding version_id when there is one (v.title/v.logline via the LEFT JOIN);
-  // once that version is gone (deleted, or never existed), the render's own stored title/logline stand in instead.
+  // once that version is gone (deleted, or never existed), the render's own stored title/logline stand in instead. A
+  // detached render (its version deleted, the render kept) is never joined: a new version with the same id isn't its.
   listRenders() {
     return this.db.query(`SELECT r.id, r.version_id, r.file, r.revision_ids, r.snapshot_id, r.duration_s, r.render_s, r.size_bytes, r.poster, r.created_at,
-        COALESCE(v.title, r.title) AS title, COALESCE(v.logline, r.logline) AS logline
-      FROM renders r LEFT JOIN (${this._versionsSql()}) v ON v.id = r.version_id
+        r.detached, COALESCE(v.title, r.title) AS title, COALESCE(v.logline, r.logline) AS logline
+      FROM renders r LEFT JOIN (${this._versionsSql()}) v ON v.id = r.version_id AND r.detached = 0
       ORDER BY r.created_at DESC, r.id DESC`).all().map(parseRender);
   }
   getRender(id) { return parseRender(this.db.query('SELECT * FROM renders WHERE id = $id').get({ id })); }

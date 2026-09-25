@@ -48,6 +48,21 @@ describe('PromoteDialog', () => {
     expect(calls(fetchMock)).toContain('POST /api/versions/mine/promote');
   });
 
+  test('when its jobs can\'t be read, Promote stays off and says why, with Retry', async () => {
+    let fail = true;
+    const onClose = vi.fn();
+    mockApi({
+      'GET /api/versions': VERSIONS,
+      'GET /api/jobs?version=mine': () => (fail ? new Response(JSON.stringify({ error: 'database is locked' }), { status: 500 }) : []),
+    });
+    renderInRouter(<PromoteDialog versionId="mine" open onClose={onClose} />, { path: '/versions/mine' });
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't check this version's jobs: database is locked");
+    expect(promote()).toBeDisabled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(promote()).toBeEnabled());
+  });
+
   test('a refusal stays in the dialog with the reason', async () => {
     const { onClose } = open([], {
       'POST /api/versions/mine/promote': new Response(JSON.stringify({ error: 'default.db does not exist' }), { status: 409 }),

@@ -8,14 +8,15 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tansta
 import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
+import type { Job } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { rendersQuery } from '@/library/renders';
+import { rendersOf, rendersQuery } from '@/library/renders';
 import { jobsQuery } from '@/shell/JobsDrawer';
 import { useSelectedVersion } from '@/shell/useSelectedVersion';
-import { useVersion, versionName } from './dialogParts';
+import { JobsError, useVersion, versionName } from './dialogParts';
 
 interface Props {
   versionId: string;
@@ -23,11 +24,13 @@ interface Props {
   onClose: () => void;
 }
 
-// Every query about the version goes (cancelling any fetch or retry in flight); the lists it was in are refetched.
+// Every query about the version goes (cancelling any fetch or retry in flight), its jobs' own (['job', id], with
+// their logs) included; the lists it was in are refetched.
 function forgetVersion(queryClient: QueryClient, versionId: string) {
   queryClient.removeQueries({ queryKey: ['version', versionId] });
   queryClient.removeQueries({ queryKey: ['coverage', versionId] });
   queryClient.removeQueries({ queryKey: ['jobs', { version: versionId }] });
+  queryClient.removeQueries({ queryKey: ['job'], predicate: q => (q.state.data as Job | undefined)?.version_id === versionId });
   for (const queryKey of [['versions'], ['renders'], ['jobs']]) void queryClient.invalidateQueries({ queryKey });
 }
 
@@ -46,7 +49,7 @@ export function DeleteVersionDialog({ versionId, open, onClose }: Props) {
 
   const name = version ? versionName(version) : versionId;
   const busyJob = jobs.data?.filter(j => j.status === 'queued' || j.status === 'running').sort((a, b) => b.id - a.id)[0];
-  const rendered = renders.data?.filter(r => r.version_id === versionId).length ?? 0;
+  const rendered = renders.data ? rendersOf(renders.data, versionId).length : 0;
 
   const del = useMutation({
     mutationFn: (withVideos: boolean) => api.del<{ ok: true }>(`/api/versions/${encodeURIComponent(versionId)}?videos=${withVideos ? 1 : 0}`),
@@ -74,7 +77,7 @@ export function DeleteVersionDialog({ versionId, open, onClose }: Props) {
           className="flex flex-col gap-4"
           onSubmit={e => {
             e.preventDefault();
-            if (typed.trim() === name && !busy && !busyJob && version) del.mutate(videos);
+            if (typed === name && !busy && !busyJob && jobs.data && version) del.mutate(videos);
           }}
         >
           <div className="flex items-start gap-2">
@@ -112,6 +115,7 @@ export function DeleteVersionDialog({ versionId, open, onClose }: Props) {
           {busyJob && (
             <p className="text-sm">{`Not yet: a ${busyJob.kind} job for this version is still ${busyJob.status}. Let it finish, or cancel it, first.`}</p>
           )}
+          <JobsError jobs={jobs} />
           {del.error && (
             <p role="alert" className="text-destructive text-sm">
               {`Couldn't delete it: ${del.error.message}`}
@@ -121,7 +125,7 @@ export function DeleteVersionDialog({ versionId, open, onClose }: Props) {
             <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" variant="destructive" disabled={busy || !version || !jobs.data || !!busyJob || typed.trim() !== name}>
+            <Button type="submit" variant="destructive" disabled={busy || !version || !jobs.data || !!busyJob || typed !== name}>
               Delete version
             </Button>
           </DialogFooter>

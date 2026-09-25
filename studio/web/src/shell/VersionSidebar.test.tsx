@@ -46,6 +46,14 @@ describe('VersionSidebar', () => {
     expect(links[2]).toHaveTextContent('rendered');
   });
 
+  test('a render kept from a deleted version with the same id doesn\'t make a version "rendered"', async () => {
+    mockApi({ 'GET /api/versions': versions, 'GET /api/library': [{ id: 1, version_id: 'done', detached: true }] });
+    renderInRouter(<VersionSidebar />, { path: '/versions/older' });
+    const done = await screen.findByRole('link', { name: /Done one/ });
+    expect(done).toHaveTextContent('ready');
+    expect(done).not.toHaveTextContent('rendered');
+  });
+
   test('marks the version in the URL as the current one', async () => {
     mockApi({ 'GET /api/versions': versions, 'GET /api/library': [] });
     renderInRouter(<VersionSidebar />, { path: '/versions/older/watch' });

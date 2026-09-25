@@ -10,7 +10,7 @@ afterEach(() => vi.unstubAllGlobals());
 const VERSIONS = [version({ id: 'mine', title: 'Bake-Off', status: 'ready', chapters: 9 }), version({ id: 'other', title: 'Other' })];
 const render = (id: number, versionId = 'mine'): Render => ({
   id, version_id: versionId, file: `r${id}.mp4`, revision_ids: [], snapshot_id: null, title: 'Bake-Off', logline: '', duration_s: 1,
-  render_s: 1, size_bytes: 1, poster: null, created_at: id,
+  render_s: 1, size_bytes: 1, poster: null, created_at: id, detached: false,
 });
 
 function open({ jobs = [] as Job[], path = '/versions/mine', answers = {} as Record<string, unknown> } = {}) {
@@ -18,7 +18,8 @@ function open({ jobs = [] as Job[], path = '/versions/mine', answers = {} as Rec
   const fetchMock = mockApi({
     'GET /api/versions': VERSIONS,
     'GET /api/jobs?version=mine': jobs,
-    'GET /api/library': [render(1), render(2), render(3, 'other')],
+    // two of its own, one of another version's, and one kept from an earlier "mine" (detached: not its)
+    'GET /api/library': [render(1), render(2), render(3, 'other'), { ...render(4), detached: true }],
     ...answers,
   });
   const queryClient = newQueryClient();
@@ -36,8 +37,10 @@ describe('DeleteVersionDialog', () => {
     expect(await screen.findByRole('heading', { name: 'Delete “Bake-Off”?' })).toBeInTheDocument();
     await waitFor(() => expect(confirmBox()).toBeEnabled());
     expect(del()).toBeDisabled();
-    fireEvent.change(confirmBox(), { target: { value: 'bake-off' } });
-    expect(del()).toBeDisabled();
+    for (const near of ['bake-off', ' Bake-Off', 'Bake-Off ', 'Bake-Of']) {
+      fireEvent.change(confirmBox(), { target: { value: near } });
+      expect(del(), near).toBeDisabled();
+    }
     fireEvent.change(confirmBox(), { target: { value: 'Bake-Off' } });
     expect(del()).toBeEnabled();
     expect(calls(fetchMock)).not.toContain('DELETE /api/versions/mine?videos=0');
@@ -87,6 +90,8 @@ describe('DeleteVersionDialog', () => {
     queryClient.setQueryData(['version', 'mine', 'storyboard'], '# Bake-Off');
     queryClient.setQueryData(['coverage', 'mine'], { total: 1, ranges: [], broken: [], segments: {} });
     queryClient.setQueryData(['version', 'other'], { id: 'other' });
+    queryClient.setQueryData(['job', 41], { id: 41, version_id: 'mine', log: 'its log' });
+    queryClient.setQueryData(['job', 42], { id: 42, version_id: 'other', log: 'another log' });
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
     await screen.findByRole('heading', { name: 'Delete “Bake-Off”?' });
     await waitFor(() => expect(confirmBox()).toBeEnabled());
@@ -100,6 +105,8 @@ describe('DeleteVersionDialog', () => {
       expect(queryClient.getQueryData(key), JSON.stringify(key)).toBeUndefined();
     }
     expect(queryClient.getQueryData(['version', 'other'])).toEqual({ id: 'other' });
+    expect(queryClient.getQueryCache().find({ queryKey: ['job', 41], exact: true })).toBeUndefined();
+    expect(queryClient.getQueryData(['job', 42])).toMatchObject({ version_id: 'other' });
     const invalidated = invalidate.mock.calls.map(([f]) => JSON.stringify(f?.queryKey));
     for (const key of [['versions'], ['renders'], ['jobs']]) expect(invalidated).toContain(JSON.stringify(key));
     // after the delete, only the lists are asked for again: nothing about the version itself
@@ -123,6 +130,22 @@ describe('DeleteVersionDialog', () => {
     expect(await screen.findByText(/a render job for this version is still running/)).toBeInTheDocument();
     fireEvent.change(confirmBox(), { target: { value: 'Bake-Off' } });
     expect(del()).toBeDisabled();
+  });
+
+  test('when its jobs can\'t be read, Delete stays off and says why, with Retry', async () => {
+    let fail = true;
+    open({
+      answers: {
+        'GET /api/jobs?version=mine': () => (fail ? new Response(JSON.stringify({ error: 'database is locked' }), { status: 500 }) : []),
+      },
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't check this version's jobs: database is locked");
+    fireEvent.change(confirmBox(), { target: { value: 'Bake-Off' } });
+    expect(del()).toBeDisabled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(del()).toBeEnabled());
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   test('a refusal stays in the dialog with the reason', async () => {

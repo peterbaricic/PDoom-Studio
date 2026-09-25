@@ -154,6 +154,19 @@ describe('the version dialogs', () => {
     expect(await screen.findByRole('heading', { name: 'Remix “P(doom)”' })).toBeInTheDocument();
   });
 
+  test('watching a render kept from a deleted version whose id a newer one took: its own title, no link, no menu', async () => {
+    mockShellApi({
+      'GET /api/library': [{ id: 8, version_id: 'mine', file: 'old.mp4', revision_ids: [], snapshot_id: null, title: 'The First Take', logline: '',
+        duration_s: 1, render_s: 1, size_bytes: 1, poster: null, created_at: 1, detached: true }],
+    });
+    renderRouteTree(routeTree, { path: '/versions/mine/watch?render=8' });
+    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+    const crumb = await within(breadcrumb).findByText('The First Take');
+    expect(crumb.closest('a')).toBeNull();
+    expect(within(breadcrumb).queryByText('My take')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Version actions' })).toBeNull();
+  });
+
   test('watching a render of a deleted version, the breadcrumb names it by the render\'s title and links nowhere', async () => {
     mockShellApi({
       'GET /api/library': [{ id: 8, version_id: 'gone', file: 'gone.mp4', revision_ids: [], snapshot_id: null, title: 'The Gone One', logline: '',
