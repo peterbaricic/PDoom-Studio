@@ -3,6 +3,7 @@
 // that chapter's frames stop counting as cached (and any frame that read one of its CAST entries); the rest stay.
 // Publishes the SSE event `frames` { versionId, ranges, broken } as frames get painted or segments break, at most every
 // 500 ms.
+import { existsSync } from 'node:fs';
 import { snapshotOf, rememberSnapshot } from '../snapshot.js';
 import { N, chapterOfFrame, engineHash, segmentKeys, currentShas } from './keys.js';
 
@@ -11,10 +12,24 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // segment key -> { error, until }: broken for good (until null: the chapter's own error, which only a new key
   // clears) or until then (a timeout, or a snapshot that failed to load).
   const broken = new Map();
-  const brokenOf = key => {
-    const b = broken.get(key);
-    if (b && b.until != null && b.until <= Date.now()) { broken.delete(key); return null; }
+  // snapshot id -> { error, until }: a snapshot whose page didn't load (a load error such as a missing font, shared.js
+  // throwing). That's the snapshot's, not any segment's: other versions sharing a segment are unaffected.
+  const failedSnapshots = new Map();
+  const live = (map, k) => {
+    const b = map.get(k);
+    if (b && b.until != null && b.until <= Date.now()) { map.delete(k); return null; }
     return b?.error ?? null;
+  };
+  const brokenOf = key => live(broken, key);
+
+  // The cached frame valid for these file hashes, as long as its file is really there: one deleted behind the
+  // cache's back is taken out of it, to be painted again.
+  const lookup = (key, i, shas) => {
+    for (;;) {
+      const found = cache.find(key, i, shas);
+      if (!found || existsSync(found.path)) return found;
+      cache.forget(key, i, found.depsHash);
+    }
   };
 
   // The version's current snapshot (remembered, so the painting pages can load it), its keys and its file hashes.
@@ -44,11 +59,15 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
 
   // Resolves to { file, key, depsHash } once painted, { broken, key } if its segment broke, or { retry, key } if the
   // request was superseded, cancelled or couldn't be painted (it's worth asking again).
-  const paint = (versionId, cur, i, prio, signal) => {
+  const paint = (versionId, cur, i, prio, { signal, near } = {}) => {
     const key = cur.keys[chapterOfFrame(i)];
-    return pool.request({ versionId, snapshotId: cur.snap.id, key, frame: i, prio, currentShas: cur.shas, signal }).then(r => {
-      if (r.broken) { broken.set(key, { error: r.error, until: r.until ?? null }); changed(versionId); return { broken: r.error, key }; }
-      const found = r.ok && cache.find(key, i, cur.shas);
+    return pool.request({ versionId, snapshotId: cur.snap.id, key, frame: i, prio, currentShas: cur.shas, signal, near }).then(r => {
+      if (r.broken) {
+        (r.snapshot ? failedSnapshots : broken).set(r.snapshot ? cur.snap.id : key, { error: r.error, until: r.until ?? null });
+        changed(versionId);
+        return { broken: r.error, key };
+      }
+      const found = r.ok && lookup(key, i, cur.shas);
       if (!found) return { retry: r.error || 'not in the cache', key };
       changed(versionId);
       return { file: found.path, depsHash: found.depsHash, key };
@@ -65,26 +84,30 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     if (!key) return { missing: `chapter ${n} isn't written yet` };
     const b = brokenOf(key);
     if (b) return { broken: b, key };
-    const found = cache.find(key, i, cur.shas);
+    const found = lookup(key, i, cur.shas);
     if (found) { cache.touch(key); return { file: found.path, depsHash: found.depsHash, key }; }
+    const failed = live(failedSnapshots, cur.snap.id);   // what's cached is still good; nothing new can be painted
+    if (failed) return { broken: failed, key };
     if (prio === 'preview') pool.supersede(versionId, 'preview');
-    return { pending: paint(versionId, cur, i, prio, signal), key };
+    return { pending: paint(versionId, cur, i, prio, { signal }), key };
   }
 
   // The bytes of a cached frame valid for the version's current snapshot: { bytes, key, depsHash }, or null (not
   // cached: ask again). Files are never replaced once written, so what's read is the frame that was found.
   async function read(versionId, i) {
     const cur = current(versionId);
-    const key = cur?.keys[chapterOfFrame(i)], found = key && cache.find(key, i, cur.shas);
+    const key = cur?.keys[chapterOfFrame(i)], found = key && lookup(key, i, cur.shas);
     if (!found) return null;
-    try { return { bytes: await Bun.file(found.path).bytes(), key, depsHash: found.depsHash }; } catch { return null; }
+    try { return { bytes: await Bun.file(found.path).bytes(), key, depsHash: found.depsHash }; }
+    catch { cache.forget(key, i, found.depsHash); return null; }
   }
 
   // { total, ranges: [[first, last], ...] cached for the current snapshot, broken: [{ chapter, error }] }, or null.
   function coverage(versionId) {
     const cur = current(versionId);
     if (!cur) return null;
-    const brokenChapters = Object.entries(cur.keys).filter(([, k]) => k && brokenOf(k)).map(([n, k]) => ({ chapter: +n, error: brokenOf(k) }));
+    const failed = live(failedSnapshots, cur.snap.id);
+    const brokenChapters = Object.entries(cur.keys).filter(([, k]) => k && (failed || brokenOf(k))).map(([n, k]) => ({ chapter: +n, error: failed || brokenOf(k) }));
     return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters };
   }
 
@@ -96,8 +119,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     let queued = 0;
     for (let i = Math.max(0, from); i < Math.min(N, from + count); i++) {
       const key = cur.keys[chapterOfFrame(i)];
-      if (!key || brokenOf(key) || cache.has(key, i, cur.shas)) continue;
-      paint(versionId, cur, i, 'prefetch');
+      if (!key || brokenOf(key) || lookup(key, i, cur.shas)) continue;
+      paint(versionId, cur, i, 'prefetch', { near: from });
       queued++;
     }
     return queued;
@@ -112,6 +135,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     if (!cur) throw new Error('no such version');
     const frames = Array.from({ length: to - from + 1 }, (_, k) => from + k);
     const chapters = [...new Set(frames.map(chapterOfFrame))];
+    const failed = live(failedSnapshots, cur.snap.id);
+    if (failed) throw new Error(`the version did not load: ${failed}`);
     for (const n of chapters) {
       if (!cur.keys[n]) throw new Error(`chapter ${n} isn't written yet`);
       if (brokenOf(cur.keys[n])) throw new Error(`chapter ${n} is broken: ${brokenOf(cur.keys[n])}`);
@@ -124,7 +149,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     try {
       const todo = [];
       for (const i of frames) {
-        const found = cache.find(cur.keys[chapterOfFrame(i)], i, cur.shas);
+        const found = lookup(cur.keys[chapterOfFrame(i)], i, cur.shas);
         if (found) files.set(i, found.path); else todo.push(i);
       }
       let done = frames.length - todo.length;

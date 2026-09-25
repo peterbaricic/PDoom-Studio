@@ -2,7 +2,8 @@
 // launched on first use. Each page loads one snapshot (studio.html?render&record-cast&snapshot=<id> on w0.localhost,
 // with the guards of studio/frames/page.js) and paints one frame at a time, so a more urgent request waits at most
 // for the frames already being painted. The queue runs preview, then prefetch, then render, then thumbs; the newest
-// preview request goes first, and each version keeps at most MAX_PREFETCH prefetch requests queued (the newest).
+// preview request goes first, and each version keeps at most MAX_PREFETCH prefetch requests queued: those nearest
+// the newest request's playhead (`near`, by default the frame it asks for).
 //
 // Requests for the same frame of the same segment coalesce, queued or in progress. A frame is painted with one
 // requester's snapshot; the CAST entries it read (while painting, and while the scripts loaded) become its
@@ -81,14 +82,17 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   const settle = (waiters, result) => { for (const w of waiters) finish(w, result); };
   const brokenResult = (error, until = null) => ({ ok: false, broken: true, error, ...(until != null && { until }) });
 
-  function request({ versionId, snapshotId, key, frame, prio = 'preview', currentShas = {}, signal }) {
+  // A request's result: { ok: true, depsHash }; { ok: false, broken: true, error, until?, snapshot? } (snapshot: the
+  // whole snapshot failed to load, not this segment); or { ok: false, error, superseded? | cancelled? } (ask again).
+  function request({ versionId, snapshotId, key, frame, prio = 'preview', currentShas = {}, signal, near = frame }) {
     if (!PRIORITIES.includes(prio)) throw new Error(`unknown priority: ${prio}`);
     return new Promise(resolve => {
       if (closed) return resolve({ ok: false, error: 'the painting pool is closed' });
-      const b = fresh(broken, key) || fresh(failedSnapshots, snapshotId);
+      const b = fresh(broken, key), f = !b && fresh(failedSnapshots, snapshotId);
       if (b) return resolve(brokenResult(b.error, b.until));
+      if (f) return resolve({ ...brokenResult(f.error, f.until), snapshot: true });
       if (signal?.aborted) return resolve({ ok: false, cancelled: true, error: 'cancelled' });
-      const w = { versionId, snapshotId, key, frame, prio: PRIORITIES.indexOf(prio), currentShas, signal, resolve };
+      const w = { versionId, snapshotId, key, frame, prio: PRIORITIES.indexOf(prio), currentShas, signal, near, resolve };
       w.onAbort = () => cancel(w);
       signal?.addEventListener('abort', w.onAbort, { once: true });
       enqueue(w);
@@ -104,8 +108,10 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     w.job = job; w.seq = ++seq;
     if (job.state === 'queued') job.seq = w.seq;
     if (w.prio === PREFETCH) {
-      const mine = queuedWaiters().filter(x => x.versionId === w.versionId && x.prio === PREFETCH).sort((a, b) => a.seq - b.seq);
-      for (const x of mine.slice(0, Math.max(0, mine.length - MAX_PREFETCH))) drop(x, { ok: false, superseded: true, error: 'superseded by newer prefetch requests' });
+      // Over the cap, the version's queued prefetch farthest from this request's playhead goes (the older first).
+      const mine = queuedWaiters().filter(x => x.versionId === w.versionId && x.prio === PREFETCH)
+        .sort((a, b) => Math.abs(b.frame - w.near) - Math.abs(a.frame - w.near) || a.seq - b.seq);
+      for (const x of mine.slice(0, Math.max(0, mine.length - MAX_PREFETCH))) drop(x, { ok: false, superseded: true, error: 'superseded by nearer prefetch requests' });
     }
   }
 
@@ -135,7 +141,11 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       // A page that already has this snapshot, or else the one idle the longest (an empty one first).
       const slot = free.find(s => s.page && s.snapshotId === w.snapshotId) || free.sort((a, b) => (!!a.page - !!b.page) || a.used - b.used)[0];
       job.state = 'painting'; slot.busy = true;
-      paint(slot, job, w).finally(() => { slot.busy = false; slot.used = Date.now(); pump(); });
+      // A snapshot no page has loaded yet: its first load runs alone, so its other requests wait (nextJob skips them)
+      // instead of each taking a page, all of them held for as long as a hanging chapter holds one.
+      const first = !(slot.page && slot.snapshotId === w.snapshotId) && !loaded.has(w.snapshotId);
+      if (first) firstLoads.add(w.snapshotId);
+      paint(slot, job, w).finally(() => { if (first) firstLoads.delete(w.snapshotId); slot.busy = false; slot.used = Date.now(); pump(); });
     }
   }
 
@@ -165,6 +175,12 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
 
   // Loads the snapshot into the slot's page, leaving out the chapters in `without` (they hang while loading).
   async function load(slot, snapshotId, without) {
+    // (Already marked when pump() handed this paint a snapshot no page had loaded: then the mark lasts the whole paint.)
+    const first = !loaded.has(snapshotId) && !firstLoads.has(snapshotId);
+    if (first) firstLoads.add(snapshotId);
+    try { return await loadInto(slot, snapshotId, without); } finally { if (first) firstLoads.delete(snapshotId); }
+  }
+  async function loadInto(slot, snapshotId, without) {
     await closePage(slot);
     const b = await getBrowser();
     const snap = getSnapshot(snapshotId);
@@ -174,8 +190,6 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       const files = Object.fromEntries(Object.entries(snap.files).filter(([p]) => ![...without].some(n => chapterPaths(snap.files, n).includes(p))));
       pageSnapshot = rememberSnapshot({ id: sha256(canonicalJson({ options: snap.options, files })), options: snap.options, files }).id;
     }
-    const first = !loaded.has(snapshotId);
-    if (first) firstLoads.add(snapshotId);
     counts.loads++;
     let lastBlob = null, page;
     try {
@@ -210,8 +224,6 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       const until = Date.now() + snapshotFailureTtlMs;
       failedSnapshots.set(snapshotId, { error: e.message, until });
       throw new Broken(e.message, until, { snapshot: true });
-    } finally {
-      if (first) firstLoads.delete(snapshotId);
     }
   }
 
@@ -270,13 +282,13 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       if (closed) result = { ok: false, error: 'the painting pool is closed' };
       else if (e instanceof Broken) {
         if (!e.snapshot) broken.set(key, { error: e.message, until: e.until });
-        result = { ...brokenResult(e.message, e.until), snapshot: e.snapshot };
+        result = { ...brokenResult(e.message, e.until), ...(e.snapshot && { snapshot: true }) };
       } else result = { ok: false, error: e.message };
     }
     jobs.delete(job.id);
     const waiters = job.waiters.filter(x => !x.done);
     if (!result.ok) {
-      const { snapshot: whole, ...answer } = result;
+      const whole = result.snapshot, answer = result;
       // A snapshot that didn't load fails its own requests (queued ones too), not those of the other snapshots that
       // asked for this frame; a broken segment fails every request for it.
       const hit = x => whole ? x.snapshotId === snapshotId : !result.broken || x.key === key;

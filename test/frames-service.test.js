@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { serve } from '../studio/serve.js';
@@ -78,6 +78,11 @@ beforeAll(async () => {
     { path: 'ch/c01.js', content: fastChapter(1) },
     { path: 'ch/c03.js', content: 'for (;;) {}' },
   ], { source: 'manual' });
+  // a version whose page can't load (chapter 5 declares a load error), and one sharing its chapter 1 that can
+  db.createVersion({ id: 'sabotaged' });
+  db.writeFiles('sabotaged', [{ path: 'ch/c01.js', content: fastChapter(1) }, { path: 'ch/c05.js', content: "window.loadError = 'sabotaged';" }], { source: 'manual' });
+  db.createVersion({ id: 'sound' });
+  db.writeFiles('sound', [{ path: 'ch/c01.js', content: fastChapter(1) }], { source: 'manual' });
   // a chapter that tries to reach other hosts, while loading and while painting
   cap = await captureHosts(['fetch', 'image', 'open', 'link', 'beacon']);
   const leak = when => `fetch('${cap.url('fetch')}/${when}', { mode: 'no-cors' }).catch(() => {});
@@ -127,13 +132,21 @@ test('a frame is painted once, then served from the cache', async () => {
   const held = await fetch(`${srv.url}/api/frames/tiny/60.jpg?prio=prefetch`);
   expect(held.status).toBe(200);
   expect(pool.stats().painted - before).toBe(2);
+  // a frame file deleted behind the cache's back is painted again, not answered 202 for ever
+  const shas = currentShas(snapshotOf(db, 'tiny')), used = cache.usedBytes();
+  rmSync(cache.find(keysOf('tiny')[1], 60, shas).path);
+  const repainted = await fetch(`${srv.url}/api/frames/tiny/60.jpg`);
+  expect(repainted.status).toBe(200);
+  expect(pool.stats().painted - before).toBe(3);
+  expect(existsSync(cache.find(keysOf('tiny')[1], 60, shas).path)).toBe(true);
+  expect(Math.abs(cache.usedBytes() - used)).toBeLessThan(used / 100);
 }, T);
 
 test('revising a chapter resets only that chapter\'s coverage; the other chapters stay cached (Review Focus 2)', async () => {
   const seen = [];
   const off = events.subscribe(e => { if (e.type === 'frames' && e.data.versionId === 'rev') seen.push({ at: Date.now(), ...e.data }); });
   try {
-    await Promise.all([24, 25, 600, 601].map(i => frameOf('rev', i)));
+    await Promise.all([24, 25, 600, 601].map(i => frameOf('rev', i, 'prefetch')));   // (previews would supersede each other)
     expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [] });
     const res = await fetch(`${srv.url}/api/coverage/rev`);
     expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [] });
@@ -164,7 +177,7 @@ test('the Original\'s curtain call records its CAST reads as dependencies; chang
   // t = 145 s: the whole cast bows (entries of chapters 2, 3, 4, 5 and 7); t = 140.625 s: only the shoggoth has run on
   // (chapter 2's); t = 153 s: the curtain, no guests; t = 138 s: chapter 8's basilisk puppet (chapter 4's).
   const [bows, runOn, curtain, puppet] = [3480, 3375, 3672, 3312];
-  const results = await Promise.all([bows, runOn, curtain, puppet].map(i => frameOf('orig', i)));
+  const results = await Promise.all([bows, runOn, curtain, puppet].map(i => frameOf('orig', i, 'prefetch')));
   for (const r of results) expect(r.file).toBeDefined();
   const keys = keysOf('orig'), files = snapshotOf(db, 'orig').files, shasBefore = currentShas(snapshotOf(db, 'orig'));
   const depsOf = (n, i) => { const f = cache.find(keys[n], i, shasBefore).path.replace(/\.jpg$/, '.deps.json'); return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null; };
@@ -292,8 +305,14 @@ test('a chapter that never finishes loading breaks only itself, fails fast after
   const get = async (v, i, prio = 'prefetch') => { const r = svc.frame(v, i, prio); return r.pending ? r.pending : r; };
   try {
     const t0 = Date.now();
-    const hangs = get('hangload', 1200), fine = get('hangload', 24);
-    await Bun.sleep(200);
+    // more requests for the snapshot than there are painters, queued in one go (a prefetch run, then one more)
+    expect(svc.prefetch('hangload', 1200, 6)).toBe(6);
+    const hangs = get('hangload', 1206), fine = get('hangload', 24, 'render');
+    // its first load runs alone, on one page
+    await until(() => own.stats().loads > 0);
+    await Bun.sleep(500);
+    expect(own.stats().loads).toBe(1);
+    expect(own.stats().painting).toBe(1);
     // meanwhile another version's preview paints: the hanging load holds one page, not every one
     const p0 = Date.now();
     expect((await get('tiny', 130, 'preview')).file).toBeDefined();
@@ -310,6 +329,19 @@ test('a chapter that never finishes loading breaks only itself, fails fast after
     expect(own.stats().loads).toBe(loads);
     expect(svc.coverage('hangload').broken).toEqual([{ chapter: 3, error: 'chapter 3 did not finish loading within 5 s' }]);
   } finally { await own.close(); }
+}, T);
+
+test('a version whose page fails to load fails on its own, not other versions sharing its segments', async () => {
+  expect(keysOf('sound')[1]).toBe(keysOf('sabotaged')[1]);
+  // (chapter 1 is the same as other versions' here, so frames other tests painted are cached for it already: these
+  // two aren't)
+  expect((await frameOf('sabotaged', 70, 'prefetch')).broken).toBe('sabotaged');
+  expect(service.frame('sabotaged', 71).broken).toBe('sabotaged');
+  expect(service.coverage('sabotaged').broken).toEqual([1, 5].map(chapter => ({ chapter, error: 'sabotaged' })));
+  expect((await frameOf('sound', 70, 'prefetch')).file).toBeDefined();
+  expect(service.coverage('sound').broken).toEqual([]);
+  // what's cached for it (painted for the other version) is still served meanwhile
+  expect(service.frame('sabotaged', 70).file).toBeDefined();
 }, T);
 
 test('a chapter cannot reach another host from a painting page, while loading or painting', async () => {
@@ -356,7 +388,13 @@ test('a render backlog delays a preview request by at most the frame being paint
     expect(queuedPrefetch).toHaveLength(240);
     expect(Math.min(...queuedPrefetch.map(q => q.frame))).toBe(1060);
     expect((await many[0].pending).retry).toContain('superseded');
-    svc.prefetch('tiny', 0, 0);   // drops the version's queued prefetch again, to get on with the test
+    svc.prefetch('tiny', 0, 0);   // drops the version's queued prefetch again
+    // a prefetch run longer than the cap keeps the frames nearest where it starts (the playhead)
+    expect(svc.prefetch('tiny', 1500, 300)).toBe(300);
+    const kept = one.stats().queued.filter(q => q.prio === 'prefetch' && q.versionId === 'tiny').map(q => q.frame);
+    expect(kept).toHaveLength(240);
+    expect([Math.min(...kept), Math.max(...kept)]).toEqual([1500, 1739]);
+    svc.prefetch('tiny', 0, 0);
     await preview.pending;
     expect(onePainted.indexOf(400)).toBeLessThanOrEqual(1);
     const { files, release } = await fill;

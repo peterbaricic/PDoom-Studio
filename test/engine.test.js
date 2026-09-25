@@ -15,7 +15,12 @@ beforeAll(async () => {
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
   browser = await launchBrowser({ port: srv.port });
 });
-afterAll(async () => { await browser?.close(); srv?.stop(); });
+// Closing the browser can take a while on a busy machine; never long enough to fail the file over it.
+afterAll(async () => {
+  await Promise.race([browser?.close(), Bun.sleep(20000)]).catch(() => {});
+  browser?.process()?.kill('SIGKILL');
+  srv?.stop();
+}, 30000);
 
 // Opened on the studio's own origin, as a user would; the server sends studio.html to w0.localhost.
 async function open(query, b = browser) {

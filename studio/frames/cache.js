@@ -109,6 +109,19 @@ export function createCache({ dir, capBytes }) {
     return { path: path(key, i, h), depsHash: h };
   }
 
+  // A frame found missing from the disk (deleted behind the cache's back) is taken out of the index; a segment whose
+  // folder has gone, entirely. Its size is counted again from what's left.
+  function forget(key, i, h = '-') {
+    const seg = segments.get(key);
+    if (!seg) return;
+    let names;
+    try { names = readdirSync(join(dir, key)); } catch { segments.delete(key); save(); return; }
+    seg.frames?.get(i)?.delete(h);
+    if (seg.frames?.get(i)?.size === 0) seg.frames.delete(i);
+    seg.bytes = names.reduce((sum, f) => sum + sizeOf(join(dir, key, f)), 0);
+    save();
+  }
+
   const pin = key => pins.set(key, (pins.get(key) || 0) + 1);
   const unpin = key => { const n = (pins.get(key) || 0) - 1; if (n > 0) pins.set(key, n); else pins.delete(key); };
 
@@ -152,5 +165,5 @@ export function createCache({ dir, capBytes }) {
     return ranges;
   }
 
-  return { has, find, path, put, touch, pin, unpin, usedBytes, evict, clear, coverage, capBytes, dir };
+  return { has, find, path, put, forget, touch, pin, unpin, usedBytes, evict, clear, coverage, capBytes, dir };
 }
