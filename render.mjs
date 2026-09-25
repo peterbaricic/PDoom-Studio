@@ -18,6 +18,7 @@ import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync
 import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
+import { openSealedPage } from './studio/frames/page.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
 // Relative paths the caller gives are theirs; everything else is relative to the project.
@@ -119,12 +120,8 @@ const PAGE = `${pageOrigin.origin}/studio.html?render&`
   + (args.snapshot ? `snapshot=${args.snapshot}` : args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
 // Underneath everything here, the browser itself can reach no host but the studio's port (see launchBrowser in
-// studio/browser.js). The CSP blocks chapter code from fetching or XHR-ing out, but not from navigating the
-// top-level page away or from opening a popup — so a render keeps its own net to catch those as well. Only requests
-// to the page's own origin are allowed; the fonts studio.html uses are bundled, so no other origin ever needs to load.
-const PAGE_ORIGIN = new URL(PAGE).origin;
-const ALLOWED_ORIGINS = new Set([PAGE_ORIGIN]);
-
+// studio/browser.js); openSealedPage (studio/frames/page.js) adds the page-level guards on top: only the page's own
+// origin loads, and no popup or navigation away gets anywhere.
 browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 });
 let exitCode = 0;
 // errors: collect load and page errors there instead of logging them (--check). strict: an error while the page loads
@@ -132,65 +129,18 @@ let exitCode = 0;
 async function openPage(tag = '', errors = null, { strict = false } = {}) {
   const loadErrors = [];
   let loading = true;
-  const page = await browser.newPage();
-  // window.open never even gets chapter code a target to send data with — closing one after the fact (below) is too
-  // late: Chrome dispatches a popup's first request as soon as the target exists, before we can hear about it.
-  await page.evaluateOnNewDocument(() => {
-    window.open = () => null;
-    // A same-tab navigation away (location.href = …, a link, a form) starts with beforeunload; cancelling it here
-    // keeps the current document live, instead of racing to abort the network request after the browser already
-    // committed to unloading (which reliably wedges the renderer — the page never becomes ready). src/loader.js
-    // cancels such navigations even earlier, through the Navigation API; this stays as the next line. It needs
-    // studio.html's sandbox to allow modals: without allow-modals, Chrome skips the prompt and lets the page go.
-    addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
+  const page = await openSealedPage(browser, PAGE, {
+    onConsole: m => {
+      if (!['error', 'warn'].includes(m.type())) return;
+      if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
+      else console.log(`[page${tag}]`, m.text());
+    },
+    onPageError: e => {
+      if (errors) return errors.push(e.message);
+      console.log(`[page error${tag}]`, e.message);
+      if (loading) loadErrors.push(e.message);
+    },
   });
-  // A beforeunload prompt is silently skipped for a frame that's never had real input, so it needs one gesture below
-  // to make the cancellation above actually take effect.
-  page.on('dialog', d => d.dismiss().catch(() => {}));
-  // Belt and suspenders for any popup that slips past the override above (document.open(url, name, features) and a
-  // target=_blank link do, though studio.html's sandbox now refuses popups altogether): closed immediately, and
-  // network-dead regardless.
-  page.on('popup', async popup => {
-    await popup.setRequestInterception(true).catch(() => {});
-    popup.on('request', request => request.abort('aborted').catch(() => {}));
-    await popup.close().catch(() => {});
-  });
-  await page.setRequestInterception(true);
-  page.on('request', request => {
-    let origin; try { origin = new URL(request.url()).origin; } catch { origin = null; }
-    // 'aborted' (net::ERR_ABORTED), not the default 'failed': a live top-level navigation should never reach here
-    // (beforeunload cancels it first), but if it ever did, ERR_FAILED would commit an error page in its place.
-    // Both calls can reject (e.g. the request already finished by the time we act on it, a race Chrome allows) —
-    // caught so that doesn't surface as an unhandled rejection.
-    if (ALLOWED_ORIGINS.has(origin)) request.continue().catch(() => {}); else request.abort('aborted').catch(() => {});
-  });
-  page.on('console', m => {
-    if (!['error', 'warn'].includes(m.type())) return;
-    // Chrome says this of studio.html's CSP sandbox (see studio/app.js) as if it were an iframe's sandbox attribute,
-    // the kind a same-origin parent's script could remove. A header's can't be; it isn't worth printing on every render.
-    if (/both allow-scripts and allow-same-origin for its sandbox attribute/.test(m.text())) return;
-    if (errors && m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text());
-    else console.log(`[page${tag}]`, m.text());
-  });
-  page.on('pageerror', e => {
-    if (errors) return errors.push(e.message);
-    console.log(`[page error${tag}]`, e.message);
-    if (loading) loadErrors.push(e.message);
-  });
-  // The chapter scripts that follow load asynchronously (waited for below via window.ready) and could try to
-  // navigate away as soon as they run, so the gesture that arms beforeunload has to land as soon as there's a
-  // document for it to land on — at domcontentloaded, well before that — not after goto's own networkidle0 wait,
-  // which only settles once everything, including a malicious attempt, has already happened. A key press, not a
-  // mouse click: p5 tracks mouseX/mouseY/mouseIsPressed and would fire mousePressed() off a synthetic click, which
-  // no sketch reads today but would still be this code nudging a chapter's own state. Tab counts as "real" input to
-  // Chrome's activation tracking the same way a click does (a bare modifier like Shift does not — verified: with
-  // only Shift pressed, beforeunload is silently skipped exactly as with no input at all), and nothing in the
-  // engine listens for it, so it's otherwise inert.
-  // RENDER_TEST_NO_GESTURE exists only so a test can render with and without this gesture and diff the pixels —
-  // it's never set outside that one test.
-  if (!process.env.RENDER_TEST_NO_GESTURE) page.once('domcontentloaded', () => { page.keyboard.press('Tab').catch(() => {}); });
-  await page.goto(PAGE, { waitUntil: 'networkidle0' });
-  await page.waitForFunction('window.ready === true', { timeout: 60000 });
   const loadError = await page.evaluate(() => window.loadError || null);
   if (loadError) { if (errors) errors.push(loadError); else throw new Error(loadError); }
   loading = false;
