@@ -6,6 +6,7 @@ import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
 import { versionManifest, workManifest } from './versions.js';
 import { parseStoryboard } from './storyboard.js';
 import { isValidPath } from './db.js';
+import { getSnapshot, blobBySha } from './snapshot.js';
 
 // Repo files anyone may load: the player, the shared engine, the libraries, the song and the bundled fonts. Nothing else.
 const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
@@ -52,9 +53,9 @@ const lockDown = res => {
 // Whatever the CSP misses, a renderer host never serves a service worker or shared worker script: Chrome marks
 // those fetches with Sec-Fetch-Dest, and every one of them is answered 404, whatever the path.
 const WORKER_DESTS = ['serviceworker', 'sharedworker'];
-// The only two /api endpoints chapter code needs (src/loader.js): everything else under /api/ is answered 404 on
-// renderer hosts, so code running there can't read (or, were the guard ever to slip, write) anything through it.
-const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/];
+// The /api endpoints chapter code needs (src/loader.js): everything else under /api/ is answered 404 on renderer
+// hosts, so code running there can't read (or, were the guard ever to slip, write) anything through it.
+const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/, /^\/api\/snapshot\/[0-9a-f]{64}$/, /^\/api\/blob\/[0-9a-f]{64}$/];
 const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
 export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000 }) {
@@ -98,6 +99,22 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       return f ? new Response(f.content, { headers: { 'content-type': TYPES[extname(p)], ...NO_STORE } }) : error(404, 'not found');
     }],
     ['GET', /^\/work\/(\d+)\/(.+)$/, (req, [, jid, p]) => isValidPath(p) ? file(req, join(dirs.work, jid), p, { 'content-type': TYPES[extname(p)], ...NO_STORE }) : error(404, 'not found')],
+    // Content-addressed code, for painting pages only (studio.html?render&snapshot=<id>, via src/loader.js): a
+    // snapshot manifest and the blobs its scripts point at. Both renderer-host only — a UI host has no business
+    // asking for version code, snapshotted or not — so this is refused before RENDERER_API_OK is even consulted.
+    ['GET', /^\/api\/snapshot\/([0-9a-f]{64})$/, (req, [, id]) => {
+      if (!onRenderer(req)) return error(404, 'not found');
+      const snap = getSnapshot(id);
+      if (!snap) return error(404, 'no such snapshot');
+      const paths = Object.keys(snap.files).sort();
+      const scripts = [...(snap.files['shared.js'] ? ['shared.js'] : []), ...paths.filter(p => p.startsWith('ch/'))].map(p => `/api/blob/${snap.files[p]}`);
+      return json({ id: snap.id, options: snap.options, scripts, files: paths });
+    }],
+    ['GET', /^\/api\/blob\/([0-9a-f]{64})$/, (req, [, sha]) => {
+      if (!onRenderer(req)) return error(404, 'not found');
+      const content = blobBySha(db, sha);
+      return content == null ? error(404, 'no such blob') : new Response(content, { headers: { 'content-type': TYPES['.js'], ...NO_STORE } });
+    }],
     ['GET', /^\/library\/(.+)$/, (req, [, p]) => file(req, dirs.library, p)],
     ['GET', /^\/thumbs\/(.+)$/, (req, [, p]) => file(req, dirs.thumbs, p, NO_STORE)],
 

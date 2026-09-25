@@ -133,7 +133,7 @@ test('renderer hosts never serve a service worker or shared worker script, whate
   }
 });
 
-test('worker hosts answer only the two API endpoints the loader needs; the rest of /api is 404 there', async () => {
+test('worker hosts answer only the API endpoints the loader needs; the rest of /api is 404 there', async () => {
   db.createVersion({ id: 'a' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });
   mkdirSync(join(data, '.studio/work', String(jid)), { recursive: true });

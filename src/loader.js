@@ -1,5 +1,6 @@
 // loader.js: loads one version's own scripts (shared.js, then the chapters) from the studio server and applies its
-// engine options. ?v=<id> loads a version from the database, ?work=<jobId> a job's work folder; default: the original.
+// engine options. ?v=<id> loads a version from the database, ?work=<jobId> a job's work folder, ?snapshot=<id> a
+// content-addressed snapshot (its scripts are already full /api/blob/<sha> URLs); default: the original.
 const CAST = {};  // guest characters shared between chapters (e.g. for the curtain call)
 window.ENGINE = { wipes: true, cornerMeter: true };
 
@@ -25,8 +26,9 @@ window.ENGINE = { wipes: true, cornerMeter: true };
 // own, clobbering an early `window.VERSION` set here. The promise's resolved value lets core.js re-apply the
 // manifest to window.VERSION from inside setup(), after p5 has already claimed the name.
 window.versionLoaded = (async () => {
-  const q = new URLSearchParams(location.search), work = q.get('work'), id = q.get('v') || 'original';
-  const [manifestUrl, base] = work ? [`/api/work/${work}`, `/work/${work}/`] : [`/api/versions/${id}`, `/v/${id}/`];
+  const q = new URLSearchParams(location.search), snapshot = q.get('snapshot'), work = q.get('work'), id = q.get('v') || 'original';
+  const [manifestUrl, base] = snapshot ? [`/api/snapshot/${snapshot}`, '']
+    : work ? [`/api/work/${work}`, `/work/${work}/`] : [`/api/versions/${id}`, `/v/${id}/`];
   const m = await (await fetch(manifestUrl)).json();
   if (m.error) throw new Error(m.error);
   Object.assign(window.ENGINE, m.options);

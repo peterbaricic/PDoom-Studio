@@ -7,7 +7,8 @@
 //   bun render.mjs --frames=0:156.6 --workers=4 [--frames-dir=out/frames]      full-res JPEG frames (resumable)
 //   bun render.mjs --encode [--frames-dir=out/frames] [--start=0] [--out=out/pdoom.mp4]   frames + song → MP4
 //   bun render.mjs --loop=recursion [--out=out/loop_recursion]                 one cycle of a standalone loop (PNGs)
-// Which version: --v=<id> (default: original) or --work=<jobId> (a studio job's work folder).
+// Which version: --v=<id> (default: original), --work=<jobId> (a studio job's work folder), or --snapshot=<id> (a
+// content-addressed snapshot already known to --base's server — see studio/snapshot.js).
 // Pages come from a running studio at --base=<url>; without it, an in-process server is started over the studio's
 // own databases: user.db in the data folder (or, until the studio has migrated it, the old studio.db there) plus
 // studio/default.db for the examples. As for the studio, $STUDIO_DATA picks another data folder (for user.db, .studio/
@@ -39,7 +40,9 @@ if (SANDBOX) {
   const rawKeys = process.argv.slice(2).map(a => a.replace(/^--/, '').split('=')[0]);
   const dup = rawKeys.find((k, i) => rawKeys.indexOf(k) !== i);
   if (dup) fail(`--${dup} is given more than once`);
-  for (const f of ['chrome', 'angle', 'frames', 'frames-dir', 'encode', 'loop', 'clip']) {
+  // --snapshot is excluded too: a sandboxed job may only ever paint its own work folder (--work), never an
+  // arbitrary content-addressed snapshot some other job or version happens to share with the running server.
+  for (const f of ['chrome', 'angle', 'frames', 'frames-dir', 'encode', 'loop', 'clip', 'snapshot']) {
     if (args[f] !== undefined) fail(`--${f} is not allowed`);
   }
   if (!['sheet', 'check', 'poster', 'stills'].some(m => args[m] !== undefined)) fail('only --sheet, --check, --poster or --stills are allowed');
@@ -112,7 +115,8 @@ if (!base) {
 }
 // Version code runs only on a renderer origin (w0.localhost), never on the studio's own, which serves the token page.
 const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
-const PAGE = `${pageOrigin.origin}/studio.html?render&` + (args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
+const PAGE = `${pageOrigin.origin}/studio.html?render&`
+  + (args.snapshot ? `snapshot=${args.snapshot}` : args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
 // Underneath everything here, the browser itself can reach no host but the studio's port (see launchBrowser in
 // studio/browser.js). The CSP blocks chapter code from fetching or XHR-ing out, but not from navigating the

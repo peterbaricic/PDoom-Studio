@@ -7,6 +7,13 @@
 // (other than Promote) on user.db, refusing to touch an example.
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+// A revision's content hash, stored in revisions.sha256 (filled on write, backfilled below for a database created
+// before that column existed). Deliberately the same one-line computation as studio/snapshot.js's sha256, kept as
+// its own copy here rather than an import: db.js has no dependency on the rest of studio/, and the tables it keeps
+// content-addressed are hashed the same way regardless of who's asking.
+const contentHash = text => createHash('sha256').update(text, 'utf8').digest('hex');
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS versions (
@@ -14,7 +21,7 @@ CREATE TABLE IF NOT EXISTS versions (
   options TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'concept', created_at INTEGER, updated_at INTEGER);
 CREATE TABLE IF NOT EXISTS revisions (
   id INTEGER PRIMARY KEY, version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE, path TEXT NOT NULL,
-  content TEXT NOT NULL, job_id INTEGER, source TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at INTEGER);
+  content TEXT NOT NULL, job_id INTEGER, source TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', sha256 TEXT, created_at INTEGER);
 CREATE INDEX IF NOT EXISTS revisions_by_file ON revisions (version_id, path, id);
 CREATE TABLE IF NOT EXISTS files (
   version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE, path TEXT NOT NULL, content TEXT NOT NULL,
@@ -58,9 +65,25 @@ export function openDb(path = 'studio.db', { defaultPath } = {}) {
   const db = new Database(path, { create: true, strict: true });
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  migrateShaColumn(db);
   const hasDef = !!(defaultPath && existsSync(defaultPath));
   if (hasDef) db.query('ATTACH DATABASE ? AS def').run(readOnlyUri(defaultPath));
   return new StudioDb(db, { defaultPath, hasDef });
+}
+
+// Adds revisions.sha256 to a database created before this column existed (CREATE TABLE IF NOT EXISTS above is a
+// no-op for a table that already exists), then fills it, once, for every row still missing it. A fresh database
+// already has the column from SCHEMA and no rows, so both steps are no-ops for it. Runs on the main schema only,
+// before def (default.db, read-only, never migrated) is attached.
+function migrateShaColumn(db) {
+  const hasColumn = db.query('PRAGMA table_info(revisions)').all().some(c => c.name === 'sha256');
+  if (!hasColumn) db.exec('ALTER TABLE revisions ADD COLUMN sha256 TEXT');
+  const missing = db.query('SELECT id, content FROM revisions WHERE sha256 IS NULL').all();
+  if (missing.length) {
+    db.transaction(() => {
+      for (const r of missing) db.query('UPDATE revisions SET sha256 = $sha256 WHERE id = $id').run({ id: r.id, sha256: contentHash(r.content) });
+    })();
+  }
 }
 
 // Builds "a = $a, b = $b" from the allowed keys present in patch; objects are stored as JSON.
@@ -123,8 +146,9 @@ class StudioDb {
       for (const { path, content } of files) {
         if (!isValidPath(path)) throw new Error(`not an allowed version file: ${path}`);
         if (this.getFile(versionId, path)?.content === content) continue;
-        const { lastInsertRowid } = this.db.query(`INSERT INTO revisions (version_id, path, content, job_id, source, note, created_at)
-          VALUES ($versionId, $path, $content, $jobId, $source, $note, $t)`).run({ versionId, path, content, jobId, source, note, t: Date.now() });
+        const { lastInsertRowid } = this.db.query(`INSERT INTO revisions (version_id, path, content, job_id, source, note, sha256, created_at)
+          VALUES ($versionId, $path, $content, $jobId, $source, $note, $sha256, $t)`)
+          .run({ versionId, path, content, jobId, source, note, sha256: contentHash(content), t: Date.now() });
         const rid = Number(lastInsertRowid);
         this.db.query(`INSERT INTO files (version_id, path, content, revision_id) VALUES ($versionId, $path, $content, $rid)
           ON CONFLICT (version_id, path) DO UPDATE SET content = excluded.content, revision_id = excluded.revision_id`).run({ versionId, path, content, rid });
@@ -141,6 +165,21 @@ class StudioDb {
   listFiles(versionId) {
     const schema = this._schema(versionId);
     return this.db.query(`SELECT path, revision_id FROM ${schema}files WHERE version_id = $versionId ORDER BY path`).all({ versionId });
+  }
+  // A file's current content hash. For the user's own versions, the stored column (filled on write, backfilled at
+  // open) is authoritative. For an example, default.db is read-only at runtime and may not have the column filled —
+  // or, for a database built before this column existed, at all — so it's computed here instead and cached in
+  // memory per revision id (default.db's own content never changes once the server is running).
+  fileSha(versionId, path) {
+    const f = this.getFile(versionId, path);
+    if (!f) return null;
+    if (!this._isExample(versionId)) {
+      const row = this.db.query('SELECT sha256 FROM revisions WHERE id = $id').get({ id: f.revision_id });
+      return row?.sha256 ?? contentHash(f.content);
+    }
+    this._exampleShaCache ??= new Map();
+    if (!this._exampleShaCache.has(f.revision_id)) this._exampleShaCache.set(f.revision_id, contentHash(f.content));
+    return this._exampleShaCache.get(f.revision_id);
   }
   history(versionId, path) {
     const schema = this._schema(versionId);
