@@ -28,3 +28,11 @@ window.matchMedia ??= (query: string) =>
     removeListener() {},
     dispatchEvent: () => false,
   }) as MediaQueryList;
+// jsdom has no media playback or canvas drawing, and logs "not implemented" when either is used: the preview player
+// (workspace/usePreviewPlayer.ts) makes an <audio> for the song and draws on a <canvas>. Its own tests pass fakes.
+window.HTMLMediaElement.prototype.play = function play() {
+  return Promise.resolve();
+};
+window.HTMLMediaElement.prototype.pause = function pause() {};
+window.HTMLMediaElement.prototype.load = function load() {};
+window.HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext;

@@ -538,14 +538,24 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
       (window.__cspViolations ??= []).push(`${e.violatedDirective}: ${e.blockedURI}`);
     });
   });
-  const pageErrors = [];
+  const pageErrors = [], frames = [];
   page.on('pageerror', e => pageErrors.push(e.message));
+  page.on('response', r => { if (r.url().includes('/api/frames/')) frames.push(`${r.status()} ${r.headers()['content-type']}`); });
   // Not networkidle0: the app opens an EventSource('/api/events') that's meant to stay open, so the network is
   // never idle.
   await page.goto(`${cspServer.url}/`, { waitUntil: 'domcontentloaded' });
   // The "/" -> "/versions/<id>" client-side redirect (router.tsx) has to have actually run for this to prove
   // anything: it depends on a same-origin fetch succeeding under connect-src 'self'.
   await page.waitForFunction(() => location.pathname.startsWith('/versions/'), { timeout: 10000 });
+
+  // The workspace: the preview player draws a server-painted frame onto its canvas (fetch, createImageBitmap, canvas;
+  // no chapter code on this page), and a timeline block's tooltip opens (Radix positions it with inline styles, set
+  // through the CSSOM, which the CSP allows; a <style> tag it doesn't).
+  await page.waitForSelector('[role="slider"][aria-label="Playhead"]', { timeout: 10000 });
+  await page.waitForSelector('[data-painting="false"] canvas', { timeout: 40000 });
+  expect(frames).toContain('200 image/jpeg');
+  await page.hover('button[aria-label^="Chapter 2"]');
+  await page.waitForSelector('[role="tooltip"]', { timeout: 10000 });
 
   // The pieces that bring their own runtime CSS have to be on screen too: a toast (sonner injects a <style> tag at
   // import time) and a modal sheet (Radix locks page scroll through react-remove-scroll, which injects one when it
@@ -566,4 +576,4 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   // Page scroll is still locked while the sheet is open, without a <style> tag.
   expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).toBe('hidden');
   await page.close();
-}, 30000);
+}, 90000);

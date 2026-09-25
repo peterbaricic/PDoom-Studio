@@ -1,0 +1,504 @@
+import { act, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { Coverage, Song } from '@/api/types';
+import { usePreviewPlayer, type PreviewPlayerOptions } from './usePreviewPlayer';
+
+// The song as /api/song sends it (studio/storyboard.js's CHAPTER_WINDOWS; 3759 frames at 24 fps).
+const CHAPTERS: Array<[number, number]> = [
+  [0, 23], [23, 38.5], [38.5, 59], [59, 73], [73, 95.4], [95.4, 109.4], [109.4, 123.5], [123.5, 140.5], [140.5, 156.6],
+];
+const SONG: Song = { fps: 24, frames: 3759, duration: 156.6, chapters: CHAPTERS, lyrics: [] };
+const N = 3759;
+const CH2 = 552; // chapter 2's first frame (23 s)
+
+const keys = (tag: string, overrides: Record<number, string | null> = {}): Coverage['segments'] => ({
+  ...Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => [n, `${tag}${n}`])),
+  ...overrides,
+});
+const coverage = (ranges: Array<[number, number]>, segments: Coverage['segments'], broken: Coverage['broken'] = []): Coverage => ({
+  total: N,
+  ranges,
+  broken,
+  segments,
+});
+const chapterOf = (i: number) => 1 + CHAPTERS.findIndex(([a, b]) => i / 24 >= a && i / 24 < b);
+
+// ---- a fake song element: its clock is moved by the test ----
+class FakeAudio extends EventTarget {
+  currentTime = 0;
+  paused = true;
+  muted = false;
+  preload = '';
+  play = vi.fn(async () => {
+    this.paused = false;
+  });
+  pause = vi.fn(() => {
+    if (this.paused) return;
+    this.paused = true;
+    this.dispatchEvent(new Event('pause'));
+  });
+}
+
+// ---- a fake frame server: every request waits until the test answers it ----
+interface Pending {
+  frame: number;
+  prio: string | null;
+  signal: AbortSignal;
+  resolve: (r: Response) => void;
+}
+let requests: Pending[];
+let fetchMock: ReturnType<typeof vi.fn>;
+const open = () => requests.filter(r => !r.signal.aborted && !answered.has(r));
+const answered = new Set<Pending>();
+const framesAsked = () => requests.map(r => r.frame);
+
+function frameResponse(frame: number, key: string) {
+  return new Response(`frame ${frame} ${key}`, { status: 200, headers: { etag: `"${key}.-"`, 'content-type': 'image/jpeg' } });
+}
+function answer(r: Pending, res: Response) {
+  answered.add(r);
+  r.resolve(res);
+}
+// Answers every open request for frame i (the newest first) with the frame under `key`.
+function answerFrame(i: number, key: string) {
+  const r = open().filter(x => x.frame === i).at(-1);
+  if (!r) throw new Error(`no open request for frame ${i} (asked: ${framesAsked().join(',')})`);
+  answer(r, frameResponse(i, key));
+}
+
+// ---- decoding and the canvas: what got drawn, by the frame's text ----
+let drawn: string[];
+let decode: (blob: Blob) => Promise<unknown>;
+const canvas = () =>
+  ({
+    width: 1920,
+    height: 1080,
+    getContext: () => ({ drawImage: (b: { label: string }) => drawn.push(b.label) }),
+  }) as unknown as HTMLCanvasElement;
+
+beforeEach(() => {
+  // Everything but setImmediate: flush() yields real macrotasks with it, for Response/Blob reads that don't settle in
+  // microtasks alone.
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'Date', 'performance'],
+  });
+  requests = [];
+  answered.clear();
+  drawn = [];
+  fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
+    const m = /^\/api\/frames\/([a-z0-9-]+)\/(\d+)\.jpg(?:\?prio=(\w+))?$/.exec(url);
+    if (!m) throw new Error(`unexpected fetch ${url}`);
+    return new Promise<Response>((resolve, reject) => {
+      const r: Pending = { frame: +m[2]!, prio: m[3] ?? null, signal: init.signal!, resolve };
+      requests.push(r);
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  decode = async blob => ({ label: await blob.text(), close() {} });
+  vi.stubGlobal('createImageBitmap', (blob: Blob) => decode(blob));
+});
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+const flush = async (ms = 0) => {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+};
+
+function mount(overrides: Partial<PreviewPlayerOptions> = {}) {
+  const audio = new FakeAudio();
+  const props: PreviewPlayerOptions = {
+    versionId: 'mine',
+    song: SONG,
+    coverage: coverage([], keys('a')),
+    segmentKeys: keys('a'),
+    audio: audio as unknown as HTMLAudioElement,
+    ...overrides,
+  };
+  const hook = renderHook((p: PreviewPlayerOptions) => usePreviewPlayer(p), { initialProps: props });
+  act(() => hook.result.current.canvasRef(canvas()));
+  return {
+    ...hook,
+    audio,
+    props,
+    update(next: Partial<PreviewPlayerOptions>) {
+      Object.assign(props, next);
+      hook.rerender({ ...props });
+    },
+  };
+}
+
+// Answers every open request with the frame under the current key of its chapter, as a server with nothing to paint
+// would, until nothing is left open (or `rounds` runs out).
+async function serveAll(segments: Coverage['segments'], { except = new Set<number>(), rounds = 50 } = {}) {
+  for (let k = 0; k < rounds; k++) {
+    const todo = open().filter(r => !except.has(r.frame));
+    if (!todo.length) return;
+    for (const r of todo) answer(r, frameResponse(r.frame, segments[chapterOf(r.frame)]!));
+    await flush();
+  }
+}
+
+describe('scheduling', () => {
+  test('requests frames ahead of the playhead, at most 6 in flight, the playhead frame as a preview', async () => {
+    const p = mount({ initialTime: 10 });
+    await flush();
+    expect(framesAsked()).toEqual([240, 241, 242, 243, 244, 245]);
+    expect(requests.map(r => r.prio)).toEqual(['preview', 'prefetch', 'prefetch', 'prefetch', 'prefetch', 'prefetch']);
+    expect(p.result.current.time).toBe(10);
+
+    answerFrame(240, 'a1');
+    answerFrame(241, 'a1');
+    await flush();
+    expect(framesAsked().slice(6)).toEqual([246, 247]);
+    expect(open()).toHaveLength(6);
+
+    // nothing more while all six are still out, however long it takes
+    await flush(10_000);
+    expect(open()).toHaveLength(6);
+    expect(requests).toHaveLength(8);
+  });
+
+  test('frames already on screen or in memory are not asked for again, and cached frames past the window are not asked for at all', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    // the paused window: 48 frames, each once; everything else is cached on the server, so nothing more is needed
+    expect(framesAsked().sort((a, b) => a - b)).toEqual(Array.from({ length: 48 }, (_, k) => k));
+    expect(drawn).toEqual(['frame 0 a1']);
+    expect(p.result.current.painting).toBe(false);
+  });
+
+  test('keeps the painter busy on uncached frames past the window, so the rest of the song gets painted', async () => {
+    mount({ initialTime: 0, coverage: coverage([[0, 47]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'), { rounds: 8 });
+    // once the window is in memory, frames from 48 on are asked for (to be painted), still at most 6 at a time
+    expect(framesAsked().filter(i => i >= 48).slice(0, 6)).toEqual([48, 49, 50, 51, 52, 53]);
+    expect(open().length).toBeLessThanOrEqual(6);
+    expect(requests.filter(r => r.frame >= 48).every(r => r.prio === 'prefetch')).toBe(true);
+  });
+
+  test('a seek cancels the in-flight requests it no longer needs (AbortController) and asks from the new playhead', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    const before = [...requests];
+    expect(before).toHaveLength(6);
+
+    act(() => p.result.current.seek(100));
+    await flush();
+    expect(before.every(r => r.signal.aborted)).toBe(true);
+    expect(open().map(r => r.frame)).toEqual([2400, 2401, 2402, 2403, 2404, 2405]);
+    expect(open()[0]!.prio).toBe('preview');
+    expect(p.result.current.time).toBe(100);
+  });
+
+  test('scrubbing never piles requests up: only the latest position\'s stay open', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    for (let s = 1; s <= 30; s++) {
+      act(() => p.result.current.seek(s * 5));
+      await flush(16);
+      expect(open().length).toBeLessThanOrEqual(6);
+    }
+    expect(open().every(r => r.frame >= 150 * 24)).toBe(true);
+  });
+
+  test('a frame whose answer comes after a seek is dropped, not drawn', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    const first = requests[0]!;
+    act(() => p.result.current.seek(50));
+    await flush();
+    answer(first, frameResponse(0, 'a1')); // the old request resolves anyway (a race with the abort)
+    await flush();
+    expect(drawn).toEqual([]);
+  });
+});
+
+describe('segment keys (Review Focus 2)', () => {
+  test('an answer painted under a chapter\'s old key is never drawn once segments[n] has changed', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    const old = requests.find(r => r.frame === 0)!;
+    p.update({ segmentKeys: keys('a', { 1: 'b1' }), coverage: coverage([], keys('a', { 1: 'b1' })) });
+    await flush();
+    expect(old.signal.aborted).toBe(true); // chapter 1's requests were for the old code
+    answer(old, frameResponse(0, 'a1'));
+    await flush();
+    expect(drawn).toEqual([]);
+
+    answerFrame(0, 'b1');
+    await flush();
+    expect(drawn).toEqual(['frame 0 b1']);
+  });
+
+  test('frames already in memory from the old key are dropped and fetched again; other chapters\' are kept', async () => {
+    const p = mount({ initialTime: 22, coverage: coverage([[0, N - 1]], keys('a')) }); // frame 528, near chapter 2
+    await flush();
+    await serveAll(keys('a'));
+    expect(drawn).toEqual(['frame 528 a1']);
+    const asked = requests.length;
+    const drawnBefore = drawn.length;
+
+    p.update({ segmentKeys: keys('a', { 1: 'b1' }), coverage: coverage([[CH2, N - 1]], keys('a', { 1: 'b1' })) });
+    await flush();
+    // chapter 1's frames (528..551) are asked for again; chapter 2's (552..575) were kept
+    const again = requests.slice(asked).map(r => r.frame);
+    expect(again.every(i => i < CH2)).toBe(true);
+    expect(again).toContain(528);
+    await serveAll(keys('a', { 1: 'b1' }));
+    expect(drawn.at(-1)).toBe('frame 528 b1');
+    expect(drawn.slice(drawnBefore).filter(d => d.endsWith(' a1'))).toEqual([]);
+    expect(requests.slice(asked).some(r => r.frame >= CH2 && r.frame < CH2 + 24)).toBe(false);
+  });
+
+  test('a decode that finishes after the key changed is not drawn', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(r => (release = r));
+    decode = async blob => {
+      const label = await blob.text();
+      await gate;
+      return { label, close() {} };
+    };
+    const p = mount({ initialTime: 0 });
+    await flush();
+    answerFrame(0, 'a1');
+    await flush();
+    p.update({ segmentKeys: keys('a', { 1: 'b1' }), coverage: coverage([], keys('a', { 1: 'b1' })) });
+    await flush();
+    release();
+    await flush();
+    expect(drawn).toEqual([]);
+  });
+
+  test('an answer under a key the player doesn\'t know yet is dropped, the coverage is refreshed, and it isn\'t asked for in a loop', async () => {
+    const onStaleKeys = vi.fn();
+    const p = mount({ initialTime: 0, onStaleKeys });
+    await flush();
+    answerFrame(0, 'b1'); // the server already has chapter 1's new code
+    await flush(5_000);
+    expect(drawn).toEqual([]);
+    expect(onStaleKeys).toHaveBeenCalledTimes(1);
+    expect(framesAsked().filter(i => i === 0)).toHaveLength(1);
+
+    p.update({ segmentKeys: keys('a', { 1: 'b1' }), coverage: coverage([], keys('a', { 1: 'b1' })) });
+    await flush();
+    answerFrame(0, 'b1');
+    await flush();
+    expect(drawn).toEqual(['frame 0 b1']);
+  });
+});
+
+describe('playback', () => {
+  test('Play waits until everything from the playhead to the end is cached, then plays in sync with the song', async () => {
+    const p = mount({ initialTime: 3700 / 24, coverage: coverage([[3700, 3730]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'), { except: new Set(Array.from({ length: 28 }, (_, k) => 3731 + k)) });
+    expect(p.result.current.safeIn).not.toBe(0);
+    expect(p.result.current.aheadReady).toBeCloseTo(31 / 24, 9);
+
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    expect(p.audio.play).not.toHaveBeenCalled();
+
+    // the rest gets painted
+    p.update({ coverage: coverage([[3700, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    expect(p.result.current.safeIn).toBe(0);
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.play).toHaveBeenCalledTimes(1);
+    expect(p.audio.currentTime).toBeCloseTo(3700 / 24, 9);
+
+    // the picture follows the song's clock
+    p.audio.currentTime = 3712 / 24 + 0.01;
+    await flush(20);
+    expect(drawn.at(-1)).toBe('frame 3712 a9');
+    expect(p.result.current.time).toBeCloseTo(3712 / 24, 9);
+  });
+
+  test('Play plays at once when it\'s safe', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    expect(p.result.current.safeIn).toBe(0);
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.play).toHaveBeenCalledTimes(1);
+    act(() => p.result.current.pause());
+    expect(p.result.current.state).toBe('paused');
+    expect(p.audio.pause).toHaveBeenCalled();
+  });
+
+  test('"Play now" plays what\'s ready, stops at a gap, and resumes when the frame arrives', async () => {
+    const GAP = 250;
+    const p = mount({ initialTime: 10, coverage: coverage([[240, GAP - 1], [GAP + 1, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'), { except: new Set([GAP]) });
+    expect(p.result.current.aheadReady).toBeCloseTo(10 / 24, 9);
+    expect(p.result.current.safeIn).not.toBe(0);
+
+    act(() => p.result.current.playNow());
+    expect(p.result.current.state).toBe('playing');
+    p.audio.currentTime = 249 / 24 + 0.01;
+    await flush(20);
+    expect(drawn.at(-1)).toBe('frame 249 a1');
+
+    p.audio.currentTime = GAP / 24 + 0.01;
+    await flush(20);
+    expect(p.result.current.state).toBe('waiting');
+    expect(p.audio.paused).toBe(true);
+    expect(drawn.at(-1)).toBe('frame 249 a1');
+
+    answerFrame(GAP, 'a1');
+    await flush(20);
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.play).toHaveBeenCalledTimes(2);
+    expect(p.audio.currentTime).toBeCloseTo(GAP / 24, 9);
+    expect(drawn.at(-1)).toBe('frame 250 a1');
+  });
+
+  test('"Play now" on a cached frame not fetched yet starts as soon as it arrives', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush();
+    act(() => p.result.current.playNow());
+    expect(p.result.current.state).toBe('waiting');
+    answerFrame(0, 'a1');
+    await flush();
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.play).toHaveBeenCalledTimes(1);
+  });
+
+  test('playback stops cleanly where a chapter isn\'t written yet', async () => {
+    const segments = keys('a', { 2: null, 3: null, 4: null, 5: null, 6: null, 7: null, 8: null, 9: null });
+    const p = mount({ initialTime: 22, segmentKeys: segments, coverage: coverage([[0, CH2 - 1]], segments) });
+    await flush();
+    await serveAll(segments);
+    expect(p.result.current.safeIn).toBe(0); // everything up to chapter 2 is there
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('playing');
+    p.audio.currentTime = 23.01;
+    await flush(20);
+    expect(p.result.current.state).toBe('paused');
+    expect(p.audio.paused).toBe(true);
+    expect(p.result.current.error).toMatch(/chapter 2 isn't written yet/i);
+    expect(framesAsked().every(i => i < CH2)).toBe(true);
+  });
+
+  test('seeking while waiting to a part that can play starts it', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[1200, N - 1]], keys('a')) });
+    await flush();
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    act(() => p.result.current.seek(60));
+    await flush();
+    await serveAll(keys('a'));
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.currentTime).toBe(60);
+  });
+
+  test('the song ending leaves the player paused at the end', async () => {
+    const p = mount({ initialTime: 156, coverage: coverage([[0, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    act(() => p.result.current.play());
+    p.audio.currentTime = 156.6;
+    p.audio.paused = true;
+    act(() => {
+      p.audio.dispatchEvent(new Event('ended'));
+    });
+    expect(p.result.current.state).toBe('paused');
+  });
+});
+
+describe('a broken segment (Review Focus 1)', () => {
+  test('shows the error and doesn\'t ask for that chapter again in a loop; other chapters keep going', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    for (const r of open().filter(r => r.frame < CH2)) {
+      answer(r, new Response(JSON.stringify({ error: 'chapter one is broken' }), { status: 409 }));
+    }
+    await flush();
+    expect(p.result.current.error).toContain('chapter one is broken');
+    const chapterOneAsks = requests.filter(r => r.frame < CH2).length;
+    expect(chapterOneAsks).toBeLessThanOrEqual(6);
+
+    await flush(30_000);
+    expect(requests.filter(r => r.frame < CH2)).toHaveLength(chapterOneAsks);
+    // chapter 2 onwards is still painted
+    expect(requests.some(r => r.frame >= CH2)).toBe(true);
+
+    act(() => p.result.current.play());
+    expect(p.result.current.state).not.toBe('playing');
+    expect(p.audio.play).not.toHaveBeenCalled();
+  });
+
+  test('a chapter the server says it doesn\'t have waits for new keys instead of being asked for frame by frame', async () => {
+    const onStaleKeys = vi.fn();
+    const p = mount({ initialTime: 0, onStaleKeys });
+    await flush();
+    for (const r of open().filter(r => r.frame < CH2)) answer(r, new Response(JSON.stringify({ error: "chapter 1 isn't written yet" }), { status: 404 }));
+    await flush(10_000);
+    expect(onStaleKeys).toHaveBeenCalledTimes(1);
+    expect(requests.filter(r => r.frame < CH2)).toHaveLength(6);
+    expect(p.result.current.error).toMatch(/not found/);
+  });
+
+  test('a chapter the coverage lists as broken is not asked for at all', async () => {
+    const segments = keys('a');
+    const p = mount({ initialTime: 30, segmentKeys: segments, coverage: coverage([], segments, [{ chapter: 2, error: 'boom' }]) });
+    await flush(5_000);
+    expect(p.result.current.error).toContain('boom');
+    expect(requests.some(r => chapterOf(r.frame) === 2)).toBe(false);
+    expect(p.result.current.safeIn).toBeNull();
+  });
+
+  test('playing into a broken chapter stops there, with its error', async () => {
+    const segments = keys('a');
+    const p = mount({
+      initialTime: 22,
+      segmentKeys: segments,
+      coverage: coverage([[0, CH2 - 1]], segments, [{ chapter: 2, error: 'chapter two threw' }]),
+    });
+    await flush();
+    await serveAll(segments);
+    expect(p.result.current.error).toBeNull();
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('playing');
+    p.audio.currentTime = 23.01;
+    await flush(20);
+    expect(p.result.current.state).toBe('paused');
+    expect(p.result.current.error).toContain('chapter two threw');
+  });
+});
+
+describe('safe to play', () => {
+  test('becomes true (0) exactly when the remaining frames are cached', async () => {
+    const p = mount({ initialTime: 3700 / 24, coverage: coverage([], keys('a')) });
+    await flush();
+    expect(p.result.current.safeIn).toBeNull(); // no paint rate measured yet
+    p.update({ coverage: coverage([[3700, 3757]], keys('a')) });
+    await flush();
+    expect(p.result.current.safeIn).not.toBe(0);
+    p.update({ coverage: coverage([[3700, N - 1]], keys('a')) });
+    await flush();
+    expect(p.result.current.safeIn).toBe(0);
+  });
+
+  test('estimates the wait from the measured paint rate', async () => {
+    const p = mount({ initialTime: 3700 / 24, coverage: coverage([[3700, 3709]], keys('a')) });
+    await flush();
+    await flush(4_000);
+    p.update({ coverage: coverage([[3700, 3717]], keys('a')) }); // 8 frames in 4 s: 2 frames/s
+    await flush();
+    // 41 frames still missing (3718..3758) at 2 frames/s
+    expect(p.result.current.safeIn).toBeCloseTo(20.5, 1);
+  });
+});

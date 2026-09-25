@@ -1,6 +1,6 @@
 // events.ts: one EventSource('/api/events') per app (studio/events.js), turned into TanStack Query cache updates.
 // Exactly the spec's "Data flow" list (docs/superpowers/specs/2026-09-25-react-studio-design.md, section 2):
-//   version -> invalidate ['versions'] and ['version', id]
+//   version -> invalidate ['versions'] and ['version', id] (and ['coverage', id]: new code means new segment keys)
 //   job     -> invalidate ['jobs'] and ['job', id]
 //   log     -> append to ['job', id]'s log via setQueryData (at the event's offset; else refetch it)
 //   library -> invalidate ['renders']
@@ -26,6 +26,7 @@ interface FramesEvent {
   versionId: string;
   ranges: Array<[number, number]>;
   broken: Coverage['broken'];
+  segments?: Coverage['segments'];
 }
 
 // Two ranges (each [first, last], inclusive, frame indices) merge when they overlap or touch (adjacent integer
@@ -41,9 +42,17 @@ function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
   return merged;
 }
 
+const sameSegments = (a: Coverage['segments'] | undefined, b: Coverage['segments']) =>
+  !!a && [1, 2, 3, 4, 5, 6, 7, 8, 9].every(n => (a[n] ?? null) === (b[n] ?? null));
+
 // Pure, unit-tested (events.test.ts): prev's ranges plus the event's, coalesced; broken is replaced with the event's
-// (the frame service always reports the full current broken-chapter set, not a delta).
-export function applyFramesEvent(prev: Coverage, e: Pick<FramesEvent, 'ranges' | 'broken'>): Coverage {
+// (the frame service always reports the full current broken-chapter set, not a delta). When the event's segment keys
+// differ from prev's, a chapter's code changed: prev's ranges were counted under the old keys, so the event's (always
+// the full current coverage) replace them.
+export function applyFramesEvent(prev: Coverage, e: Pick<FramesEvent, 'ranges' | 'broken' | 'segments'>): Coverage {
+  if (e.segments && !sameSegments(prev.segments, e.segments)) {
+    return { ...prev, ranges: mergeRanges(e.ranges), broken: e.broken, segments: e.segments };
+  }
   return { ...prev, ranges: mergeRanges([...prev.ranges, ...e.ranges]), broken: e.broken };
 }
 
@@ -55,6 +64,9 @@ export function handleStudioEvent(queryClient: QueryClient, type: string, data: 
       const { id } = data as VersionEvent;
       queryClient.invalidateQueries({ queryKey: ['versions'] });
       queryClient.invalidateQueries({ queryKey: ['version', id] });
+      // A changed chapter, shared.js or option gives new segment keys: the frames cached under the old ones stop
+      // counting, and the player has to learn the new keys now, not whenever something new gets painted.
+      queryClient.invalidateQueries({ queryKey: ['coverage', id] });
       break;
     }
     case 'job': {

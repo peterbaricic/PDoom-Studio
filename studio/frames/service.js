@@ -1,8 +1,8 @@
 // service.js: frames for versions, by way of the cache and the painting pool. A version's frames are always looked up
 // under its current snapshot's segment keys and file hashes (studio/frames/keys.js), so when a chapter changes, only
 // that chapter's frames stop counting as cached (and any frame that read one of its CAST entries); the rest stay.
-// Publishes the SSE event `frames` { versionId, ranges, broken } as frames get painted or segments break, at most every
-// 500 ms.
+// Publishes the SSE event `frames` { versionId, ranges, broken, segments } as frames get painted or segments break, at
+// most every 500 ms.
 import { existsSync } from 'node:fs';
 import { snapshotOf, rememberSnapshot } from '../snapshot.js';
 import { N, chapterOfFrame, engineHash, segmentKeys, currentShas } from './keys.js';
@@ -47,7 +47,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     for (const versionId of dirty) {
       try {
         const c = coverage(versionId);
-        if (c) events?.publish('frames', { versionId, ranges: c.ranges, broken: c.broken });
+        if (c) events?.publish('frames', { versionId, ranges: c.ranges, broken: c.broken, segments: c.segments });
       } catch (e) { console.error(`frames event for ${versionId}: ${e.message}`); }
     }
     dirty.clear();
@@ -102,13 +102,16 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     catch { cache.forget(key, i, found.depsHash); return null; }
   }
 
-  // { total, ranges: [[first, last], ...] cached for the current snapshot, broken: [{ chapter, error }] }, or null.
+  // { total, ranges: [[first, last], ...] cached for the current snapshot, broken: [{ chapter, error }],
+  // segments: { 1..9: segment key, or null for a chapter not written } }, or null. The segment keys let the player
+  // tell when a chapter's frames changed (a frame's ETag names the key it was painted under), so it never shows one
+  // from a chapter's older code.
   function coverage(versionId) {
     const cur = current(versionId);
     if (!cur) return null;
     const failed = live(failedSnapshots, cur.snap.id);
     const brokenChapters = Object.entries(cur.keys).filter(([, k]) => k && (failed || brokenOf(k))).map(([n, k]) => ({ chapter: +n, error: failed || brokenOf(k) }));
-    return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters };
+    return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters, segments: cur.keys };
   }
 
   // Queues the missing frames of [from, from + count) at prefetch priority, in place of the version's earlier prefetch.

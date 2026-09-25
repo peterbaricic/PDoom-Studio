@@ -103,6 +103,9 @@ export interface Coverage {
   total: number;
   ranges: Array<[number, number]>;
   broken: Array<{ chapter: number; error: string }>;
+  // Each chapter's (1..9) segment key, or null for a chapter not written yet. A frame's ETag names the key it was
+  // painted under, so the player can tell a frame of a chapter's older code from a current one.
+  segments: Record<number, string | null>;
 }
 
 export interface Health {

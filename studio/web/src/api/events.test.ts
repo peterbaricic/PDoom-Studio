@@ -4,7 +4,13 @@ import { applyFramesEvent, handleStudioEvent } from './events';
 import type { Coverage, JobWithLog } from './types';
 
 describe('applyFramesEvent', () => {
-  const coverage = (ranges: Array<[number, number]>, broken: Coverage['broken'] = []): Coverage => ({ total: 3759, ranges, broken });
+  const keys = (k: string): Coverage['segments'] => Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => [n, `${k}${n}`]));
+  const coverage = (ranges: Array<[number, number]>, broken: Coverage['broken'] = []): Coverage => ({
+    total: 3759,
+    ranges,
+    broken,
+    segments: keys('a'),
+  });
 
   test('merges a new range that overlaps an existing one', () => {
     const prev = coverage([[0, 10]]);
@@ -49,6 +55,19 @@ describe('applyFramesEvent', () => {
     expect(next.broken).toEqual([{ chapter: 5, error: 'new error' }]);
   });
 
+  test('merges as before while the segment keys stay the same', () => {
+    const prev = coverage([[0, 10]]);
+    expect(applyFramesEvent(prev, { ranges: [[11, 20]], broken: [], segments: keys('a') }).ranges).toEqual([[0, 20]]);
+  });
+
+  test('a chapter whose segment key changed: the event\'s ranges replace the old ones (they were for older code)', () => {
+    const prev = coverage([[0, 600]]);
+    const segments = { ...keys('a'), 2: 'b2' };
+    const next = applyFramesEvent(prev, { ranges: [[0, 551]], broken: [], segments });
+    expect(next.ranges).toEqual([[0, 551]]);
+    expect(next.segments).toEqual(segments);
+  });
+
   test('leaves total untouched (the event never carries one)', () => {
     const prev = coverage([[0, 10]]);
     expect(applyFramesEvent(prev, { ranges: [[11, 12]], broken: [] }).total).toBe(3759);
@@ -60,7 +79,7 @@ describe('handleStudioEvent', () => {
     return new QueryClient({ defaultOptions: { queries: { retry: false } } });
   }
 
-  test('version invalidates the versions list and that one version', () => {
+  test('version invalidates the versions list, that one version and its coverage', () => {
     const qc = client();
     const seen: unknown[][] = [];
     qc.invalidateQueries = (filters => {
@@ -68,7 +87,9 @@ describe('handleStudioEvent', () => {
       return Promise.resolve();
     }) as typeof qc.invalidateQueries;
     handleStudioEvent(qc, 'version', { id: 'a' });
-    expect(seen).toEqual([[['versions']], [['version', 'a']]]);
+    // and its coverage: a changed chapter or option means new segment keys, and frames cached under the old ones no
+    // longer count (the frames event only comes once something new is painted)
+    expect(seen).toEqual([[['versions']], [['version', 'a']], [['coverage', 'a']]]);
   });
 
   test('job invalidates the jobs list and that one job', () => {
@@ -124,7 +145,7 @@ describe('handleStudioEvent', () => {
 
   test('frames merges ranges into the cached coverage for that version, and does nothing when it is not cached', () => {
     const qc = client();
-    qc.setQueryData(['coverage', 'a'], { total: 3759, ranges: [[0, 10]], broken: [] } as Coverage);
+    qc.setQueryData<Coverage>(['coverage', 'a'], { total: 3759, ranges: [[0, 10]], broken: [], segments: {} });
     handleStudioEvent(qc, 'frames', { versionId: 'a', ranges: [[11, 20]], broken: [] });
     expect(qc.getQueryData<Coverage>(['coverage', 'a'])?.ranges).toEqual([[0, 20]]);
 

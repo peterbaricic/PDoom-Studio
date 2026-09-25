@@ -17,6 +17,11 @@ function mockShellApi() {
     'GET /api/library': [],
     'GET /api/jobs': [job({ id: 1, status: 'running' })],
     'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true },
+    // the workspace at /versions/mine (no chapters written, so no frames to ask for)
+    'GET /api/song': { fps: 24, frames: 3759, duration: 156.6, chapters: [[0, 23], [23, 156.6]], lyrics: [] },
+    'GET /api/versions/mine': { id: 'mine', title: 'My take', files: [], walkthrough: [] },
+    'GET /api/coverage/mine': { total: 3759, ranges: [], broken: [], segments: { 1: null, 2: null } },
+    'GET /api/jobs?version=mine': [],
   });
 }
 
@@ -30,13 +35,13 @@ describe('AppShell', () => {
     expect(await within(within(header).getByRole('navigation', { name: 'Breadcrumb' })).findByText('My take')).toBeInTheDocument();
     expect(await within(header).findByRole('button', { name: 'Jobs: 1 running · 0 queued' })).toBeInTheDocument();
     expect(within(header).getByRole('button', { name: 'Settings' })).toBeInTheDocument();
-    expect(screen.getByRole('main')).toHaveTextContent('Workspace placeholder for version mine');
+    expect(await within(screen.getByRole('main')).findByRole('slider', { name: 'Playhead' })).toBeInTheDocument();
   });
 
   test('"/" redirects into the most recently updated version of mine', async () => {
     mockShellApi();
     const { router } = renderRouteTree(routeTree, { path: '/' });
-    await screen.findByText('Workspace placeholder for version mine');
+    await screen.findByRole('slider', { name: 'Playhead' });
     expect(router.state.location.pathname).toBe('/versions/mine');
   });
 

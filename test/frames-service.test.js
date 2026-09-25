@@ -147,16 +147,23 @@ test('revising a chapter resets only that chapter\'s coverage; the other chapter
   const off = events.subscribe(e => { if (e.type === 'frames' && e.data.versionId === 'rev') seen.push({ at: Date.now(), ...e.data }); });
   try {
     await Promise.all([24, 25, 600, 601].map(i => frameOf('rev', i, 'prefetch')));   // (previews would supersede each other)
-    expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [] });
-    const res = await fetch(`${srv.url}/api/coverage/rev`);
-    expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [] });
-
+    // coverage names each chapter's segment key, so the player can tell when a chapter's frames change
     const keysBefore = keysOf('rev');
+    expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
+    const res = await fetch(`${srv.url}/api/coverage/rev`);
+    expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
+    expect(Object.keys(keysBefore)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+
     db.writeFiles('rev', [{ path: 'ch/c02.js', content: fastChapter(2) + '\n// revised' }], { source: 'manual' });
     const keysAfter = keysOf('rev');
     expect(keysAfter[2]).not.toBe(keysBefore[2]);
     for (const n of [1, 3, 4, 5, 6, 7, 8, 9]) expect(keysAfter[n]).toBe(keysBefore[n]);
     expect(service.coverage('rev').ranges).toEqual([[24, 25]]);
+    expect(service.coverage('rev').segments).toEqual(keysAfter);
+    // a chapter the version doesn't have is null
+    expect(service.coverage('partial').segments).toEqual(keysOf('partial'));
+    expect(service.coverage('partial').segments[1]).toMatch(/^[0-9a-f]{64}$/);
+    expect(service.coverage('partial').segments[9]).toBeNull();
 
     const before = pool.stats().painted;
     expect(service.frame('rev', 24).file).toBeDefined();   // still cached, no paint
@@ -169,6 +176,7 @@ test('revising a chapter resets only that chapter\'s coverage; the other chapter
     await Bun.sleep(700);
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.at(-1).ranges).toEqual([[24, 25], [600, 600]]);
+    expect(seen.at(-1).segments).toEqual(keysAfter);
     for (let k = 1; k < seen.length; k++) expect(seen[k].at - seen[k - 1].at).toBeGreaterThanOrEqual(450);
   } finally { off(); }
 }, T);
