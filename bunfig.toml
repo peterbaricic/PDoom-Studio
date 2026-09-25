@@ -3,3 +3,5 @@
 # a real `document`), run with `bun run test:web` instead. Scoping `bun test` to test/ keeps the two suites separate.
 [test]
 root = "test"
+# Pins CLAUDE_BIN to test/fake-claude.js for every test file (and every server a test spawns): see test/preload.js.
+preload = ["./test/preload.js"]

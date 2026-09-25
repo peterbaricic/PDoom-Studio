@@ -59,7 +59,7 @@ test('the bundled fonts load, and studio.html makes no request to any non-loopba
 test('the launched browser goes direct only to the studio port; everything else hits a dead proxy', async () => {
   const cap = await captureHosts(['other-port']), otherPort = cap.port('other-port');
   const probe = await browser.newPage();
-  await probe.goto(`${srv.url}/api/health`);   // any page on the studio's own origin
+  await probe.goto(`${srv.url}/api/song`);   // any page on the studio's own origin (not /api/health: that asks the Claude CLI)
   const failures = [];
   probe.on('requestfailed', r => failures.push(`${new URL(r.url()).host} ${r.failure()?.errorText}`));
   const tryFetch = url => probe.evaluate(u => fetch(u, { mode: 'no-cors' }).then(() => 'ok', () => 'failed'), url);
