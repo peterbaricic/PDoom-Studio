@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # probe-sandbox.sh: a live, manual check that the sandbox rules from studio/claude-job.js's permissionSettings()
 # actually hold when the real Claude CLI runs them (not run by `bun test`; needs a signed-in `claude`). It builds a
-# throwaway studio job (its own database and data root in a temp folder, never the project's studio.db or .studio/),
+# throwaway studio job (its own user database and data root in a temp folder, never the project's user.db, studio.db
+# or .studio/; the Original is read from studio/default.db, read-only),
 # asks Claude to do a fixed sequence of steps that should be allowed or denied, then plants a hostile bunfig.toml and
 # .env in the work folder itself and runs the allowed render command once more, and reports what actually happened.
 # Run it from the repo, e.g. `bash test/probe-sandbox.sh`.
@@ -19,16 +20,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-export STUDIO_DATA="$DATA" STUDIO_DB="$DATA/studio.db"
+export STUDIO_DATA="$DATA" USER_DB="$DATA/user.db"
 echo "== building a studio job in $DATA =="
 JOB_ID="$(ROOT="$ROOT" bun -e '
   const { openDb } = await import(process.env.ROOT + "/studio/db.js");
-  const { importOriginal } = await import(process.env.ROOT + "/studio/versions.js");
   const { permissionSettings } = await import(process.env.ROOT + "/studio/claude-job.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const { join, dirname } = await import("node:path");
-  const db = openDb(process.env.STUDIO_DB);
-  importOriginal(db, process.env.ROOT);
+  const db = openDb(process.env.USER_DB, { defaultPath: process.env.ROOT + "/studio/default.db" });
   const id = db.addJob({ kind: "chapter", versionId: "original", params: { chapter: 1 } });
   const dir = join(process.env.STUDIO_DATA, ".studio/work", String(id));
   for (const f of db.listFiles("original")) {
