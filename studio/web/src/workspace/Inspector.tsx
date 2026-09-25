@@ -13,6 +13,7 @@ import type { Job, Manifest } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChapterPanel } from './ChapterPanel';
+import { storyboardQuery } from './inspectorControls';
 import { StoryboardPanel } from './StoryboardPanel';
 
 export interface InspectorProps {
@@ -23,20 +24,6 @@ export interface InspectorProps {
   chapter?: number;
   // Opens the Remix dialog for this version (an example's call to action). Until one is wired up, the button is off.
   onRemix?: () => void;
-}
-
-// STORYBOARD.md as written: /v/<id>/STORYBOARD.md serves a version's files as plain text on the UI hosts. Under
-// ['version', id, …] so that every `version` event (an edit, a storyboard job finishing) reads it again.
-export function storyboardQuery(versionId: string, enabled: boolean) {
-  return {
-    queryKey: ['version', versionId, 'storyboard'],
-    queryFn: async () => {
-      const res = await fetch(`/v/${encodeURIComponent(versionId)}/STORYBOARD.md`);
-      if (!res.ok) throw new Error(res.status === 404 ? 'not found' : `HTTP ${res.status}`);
-      return res.text();
-    },
-    enabled,
-  };
 }
 
 // Escape in a text field or a dialog belongs to them, not to the inspector.

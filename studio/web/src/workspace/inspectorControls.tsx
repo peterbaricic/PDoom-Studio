@@ -1,6 +1,7 @@
-// inspectorControls.tsx: the pieces both inspector panels (StoryboardPanel, ChapterPanel) use: the rendered
-// storyboard Markdown, the Claude model picker, a button for an action that runs Claude (off, with the reason as its
-// tooltip, while the CLI is missing or signed out), and a list of jobs with their logs.
+// inspectorControls.tsx: the pieces both inspector panels (StoryboardPanel, ChapterPanel) use: the storyboard's text
+// and its rendered Markdown (which the watch view shows too), the Claude model picker, a button for an action that
+// runs Claude (off, with the reason as its tooltip, while the CLI is missing or signed out), and a list of jobs with
+// their logs.
 import type { ComponentProps, ReactNode } from 'react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -12,6 +13,20 @@ import { cn } from '@/lib/utils';
 import { claudeUnavailable, useHealth } from '@/shell/HealthBanner';
 import { jobDuration, jobLabel } from '@/shell/jobFormat';
 import { useOpenJobLog } from '@/shell/LogViewer';
+
+// STORYBOARD.md as written: /v/<id>/STORYBOARD.md serves a version's files as plain text on the UI hosts. Under
+// ['version', id, …] so that every `version` event (an edit, a storyboard job finishing) reads it again.
+export function storyboardQuery(versionId: string, enabled: boolean) {
+  return {
+    queryKey: ['version', versionId, 'storyboard'],
+    queryFn: async () => {
+      const res = await fetch(`/v/${encodeURIComponent(versionId)}/STORYBOARD.md`);
+      if (!res.ok) throw new Error(res.status === 404 ? 'not found' : `HTTP ${res.status}`);
+      return res.text();
+    },
+    enabled,
+  };
+}
 
 // Storyboards are written by Claude, so their Markdown is untrusted: raw HTML stays text (react-markdown's default,
 // never rehype-raw), images show their alt text rather than loading anything, and links open in a new tab without

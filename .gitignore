@@ -6,6 +6,6 @@ assets/source.mp4
 studio.db*
 user.db*
 studio/default.db-*
-library/
+/library/
 .studio/
 studio/web/dist/

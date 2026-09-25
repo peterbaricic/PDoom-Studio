@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { createApp } from '../studio/app.js';
@@ -441,6 +441,22 @@ test('library lists renders and deleting removes the files', async () => {
   expect(db.listRenders()).toEqual([]);
 });
 
+test('deleting a render removes files inside the library only', async () => {
+  const lib = join(data, 'library'), outside = join(data, 'outside');
+  mkdirSync(lib, { recursive: true }); mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, 'keep.mp4'), 'mp4'); writeFileSync(join(data, 'keep.jpg'), 'jpg');
+  symlinkSync(join(outside, 'keep.mp4'), join(lib, 'link.mp4'));
+  db.createVersion({ id: 'a', title: 'A' });
+  // a symlink out of the library, and a name that climbs out of it
+  const rid = db.addRender({ versionId: 'a', file: 'link.mp4', revisionIds: [], durationS: 1, renderS: 1, sizeBytes: 3, poster: '../keep.jpg' });
+  expect((await send('DELETE', `/api/library/${rid}`, undefined, { ...W, 'x-studio-token': 'wrong' })).status).toBe(403);
+  expect((await send('DELETE', `/api/library/${rid}`)).status).toBe(200);
+  expect(readFileSync(join(outside, 'keep.mp4'), 'utf8')).toBe('mp4');
+  expect(readFileSync(join(data, 'keep.jpg'), 'utf8')).toBe('jpg');
+  expect(db.listRenders()).toEqual([]);
+  expect((await send('DELETE', `/api/library/${rid}`)).status).toBe(404);
+});
+
 test('version responses carry storyboard errors, and the whole history', async () => {
   db.createVersion({ id: 'a' });
   db.writeFiles('a', [{ path: 'STORYBOARD.md', content: 'nope' }], { source: 'manual', note: 'first try' });
@@ -555,11 +571,24 @@ test('work folders are served while a job runs', async () => {
 let cspServer, cspBrowser;
 beforeAll(async () => {
   const dir = tempDir('csp-');
+  // Two finished renders for the watch view and the library: a tiny real MP4 and its poster, one render of the
+  // Original and one whose version is gone (it keeps its stored title).
+  mkdirSync(join(dir, 'library'));
+  const mp4 = join(dir, 'library/csp-original.mp4');
+  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=orange:s=320x180:d=4:r=24', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+    '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', mp4]);
+  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-i', mp4, '-frames:v', '1', join(dir, 'library/csp-original.jpg')]);
+  cpSync(mp4, join(dir, 'library/csp-gone.mp4')); cpSync(join(dir, 'library/csp-original.jpg'), join(dir, 'library/csp-gone.jpg'));
+  const userDb = openDb(join(dir, 'user.db'), { defaultPath: defaultDbPath });
+  userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 4, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
+  userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 4, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
+  userDb.close();
   cspServer = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { cwd: root, env: isolatedEnv(dir, { DEFAULT_DB: defaultDbPath }), stdout: 'pipe', stderr: 'pipe' });
   const reader = cspServer.stdout.getReader(), dec = new TextDecoder();
   let out = '';
   while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
   cspServer.url = /Studio: (http:\/\/localhost:\d+)\//.exec(out)[1];
+  cspServer.data = dir;
   cspBrowser = await launchBrowser({ port: new URL(cspServer.url).port });
 }, 30000);
 afterAll(async () => { await cspBrowser?.close(); cspServer?.kill(); await cspServer?.exited; });
@@ -614,6 +643,27 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"]`, { timeout: 10000 });
   await page.waitForSelector(`${inspector} select[aria-label="Claude model"]`, { timeout: 10000 });
   await page.waitForSelector(`${inspector} [aria-label="Revisions"] li`, { timeout: 10000 });
+
+  // The library (a lazily loaded chunk): poster cards load under img-src 'self'. Deleting the render whose version is
+  // gone goes through the confirmation dialog (a modal: Radix's scroll lock again) and the token-guarded DELETE.
+  await page.click('a[href="/library"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('article img')].some(i => i.complete && i.naturalWidth > 0), { timeout: 10000 });
+  expect(await page.$$eval('article h3', hs => hs.map(h => h.textContent))).toEqual(expect.arrayContaining(['CSP gone']));
+  await page.click('button[aria-label="Delete the render of CSP gone"]');
+  await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+  await page.evaluate(() => [...document.querySelectorAll('[role="dialog"] button')].find(b => b.textContent === 'Delete render').click());
+  await page.waitForFunction(() => ![...document.querySelectorAll('article h3')].some(h => h.textContent === 'CSP gone') && !document.querySelector('[role="dialog"]'),
+    { timeout: 10000 });
+  expect(existsSync(join(cspServer.data, 'library/csp-gone.mp4'))).toBe(false);
+
+  // The watch view (another lazy chunk): the MP4 loads under media-src 'self', and the walkthrough follows it.
+  await page.click('article a[href^="/versions/original/watch"]');
+  await page.waitForSelector('video[data-testid="watch-video"]', { timeout: 10000 });
+  // its metadata loaded (media-src 'none' would leave it at HAVE_NOTHING)
+  await page.waitForFunction(() => document.querySelector('video[data-testid="watch-video"]').readyState >= 1, { timeout: 10000 });
+  await page.$eval('video[data-testid="watch-video"]', v => new Promise(resolve => { v.addEventListener('seeked', resolve, { once: true }); v.currentTime = 3; }));
+  await page.waitForSelector('ol[aria-label="Walkthrough"] li[aria-current="true"]', { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector('[aria-labelledby="how-it-was-made"]')?.textContent.includes('revisions'), { timeout: 10000 });
 
   // The pieces that bring their own runtime CSS have to be on screen too: a toast (sonner injects a <style> tag at
   // import time) and a modal sheet (Radix locks page scroll through react-remove-scroll, which injects one when it

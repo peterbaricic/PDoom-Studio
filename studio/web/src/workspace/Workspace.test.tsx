@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
 import type { Coverage, Manifest, Song } from '@/api/types';
 import { mockApi, newQueryClient, renderRouteTree } from '../test-utils';
-import { InspectorBoundary, Workspace, workspaceSearch } from './Workspace';
+import { LoadBoundary } from '@/components/LoadBoundary';
+import { Workspace, workspaceSearch } from './Workspace';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -145,9 +146,9 @@ describe('Workspace', () => {
     render(
       <div>
         <p>the player</p>
-        <InspectorBoundary onRetry={onRetry}>
+        <LoadBoundary what="the inspector" onRetry={onRetry}>
           <Flaky />
-        </InspectorBoundary>
+        </LoadBoundary>
       </div>,
     );
     expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load the inspector: Failed to fetch dynamically imported module");

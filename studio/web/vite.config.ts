@@ -69,7 +69,29 @@ export default defineConfig({
   // assetsDir is 'app-assets', not the default 'assets': studio/app.js serves the repo's own /assets/ (the song,
   // the bundled fonts — PUBLIC) at that path already, and hashed build output needs a namespace that can't collide
   // with it.
-  build: { outDir: 'dist', assetsDir: 'app-assets', emptyOutDir: true },
+  build: {
+    outDir: 'dist',
+    assetsDir: 'app-assets',
+    emptyOutDir: true,
+    // Libraries in chunks of their own, beside the app's own code: the app chunk stays well under Vite's 500 kB
+    // warning, and a rebuild that only changes the app leaves the library chunks' names (and the browser's cached
+    // copies) alone. React, TanStack and the UI kit get a chunk each; `vendor` takes the other libraries the first
+    // page loads ($initial: reached by static imports from the entry); `markdown` takes what's left, which is the
+    // Markdown renderer only the lazily loaded inspector and watch view use, so it loads with them.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            { name: 'react', test: /[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/ },
+            { name: 'tanstack', test: /[\\/]node_modules[\\/]@tanstack[\\/]/ },
+            { name: 'ui', test: /[\\/]node_modules[\\/](@radix-ui|@floating-ui|lucide-react|sonner)[\\/]/ },
+            { name: 'vendor', test: /[\\/]node_modules[\\/]/, tags: ['$initial'] },
+            { name: 'markdown', test: /[\\/]node_modules[\\/]/ },
+          ],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,
