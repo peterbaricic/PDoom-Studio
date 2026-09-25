@@ -662,6 +662,85 @@ test('frame and coverage requests another site made, or sent without the token, 
   expect((await fetchT(`${srv.url}/api/coverage/tiny`, { headers: { 'sec-fetch-site': 'same-origin' } })).status).toBe(200);
 });
 
+// A stand-in pool for what needs no painting browser: requests wait until the test answers them. paint() answers
+// the oldest background one as painted (a stand-in JPEG in the cache), as the real pool would.
+function fakePool(fakeCache) {
+  const pending = [], superseded = [];
+  const settle = (p, r) => { pending.splice(pending.indexOf(p), 1); p.resolve(r); };
+  return {
+    pending, superseded,
+    background: () => pending.filter(p => p.prio === 'background'),
+    request: w => new Promise(resolve => pending.push({ ...w, resolve })),
+    supersede(versionId, prio) {
+      superseded.push([versionId, prio]);
+      for (const p of [...pending]) if ((versionId == null || p.versionId === versionId) && p.prio === prio) settle(p, { ok: false, superseded: true, error: 'superseded' });
+    },
+    paint() {
+      const p = pending.find(x => x.prio === 'background');
+      fakeCache.put(p.key, p.frame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {});
+      settle(p, { ok: true, deps: {}, depsHash: '-' });
+    },
+  };
+}
+const leased = (extra = {}) => {
+  const fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 }), fake = fakePool(fakeCache);
+  return { fake, svc: createFrameService({ db, cache: fakeCache, pool: fake, events, root, ...extra }) };
+};
+const settled = () => Bun.sleep(20);
+
+test('a paint-ahead sweep stops once its lease runs out: nothing more is queued, and what was queued is withdrawn', async () => {
+  fastVersion('lease-1');
+  const { fake, svc } = leased({ leaseMs: 200 });
+  svc.paintAhead('lease-1', 0);
+  expect(fake.background().map(p => p.frame)).toEqual([0, 1, 2, 3, 4, 5]);
+  fake.paint(); await settled();
+  expect(fake.background().map(p => p.frame)).toEqual([1, 2, 3, 4, 5, 6]);   // one done, the next queued
+  await Bun.sleep(250);
+  expect(fake.background()).toEqual([]);
+  expect(fake.superseded).toContainEqual([null, 'background']);
+  // (a frame already being painted when it lapsed queues nothing after it)
+  svc.frame('lease-1', 2000, 'preview');
+  await settled();
+  expect(fake.background()).toEqual([]);
+});
+
+test('a paint-ahead sweep goes on while it is renewed, by paint-ahead calls or the version\'s own frame requests', async () => {
+  fastVersion('lease-2');
+  const { fake, svc } = leased({ leaseMs: 200 });
+  expect(svc.paintAhead('lease-2', 0)).toEqual({ from: 0, end: N });
+  for (let k = 0; k < 6; k++) {   // 600 ms, three times the lease
+    await Bun.sleep(100);
+    if (k % 2) svc.frame('lease-2', 3000 + k, 'prefetch');
+    else expect(svc.paintAhead('lease-2', 0)).toEqual({ from: 0, end: N });   // renewed, not restarted
+    fake.paint(); await settled();
+  }
+  expect(fake.background().map(p => p.frame)).toEqual([6, 7, 8, 9, 10, 11]);
+  // another version's frames don't renew it, nor do a render's or the thumbnails'
+  fastVersion('lease-other');
+  for (let k = 0; k < 3; k++) {
+    await Bun.sleep(100);
+    svc.frame('lease-other', 100 + k, 'preview');
+    svc.frame('lease-2', 200 + k, 'thumbs');
+  }
+  expect(fake.background()).toEqual([]);
+});
+
+test('a paint-ahead sweep stops when no studio page is left on the event stream', async () => {
+  fastVersion('lease-3');
+  const ev = createEvents(), fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 }), fake = fakePool(fakeCache);
+  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root });
+  const tabs = [new AbortController(), new AbortController()];
+  for (const t of tabs) ev.stream(new Request('http://localhost/api/events', { signal: t.signal }));
+  expect(ev.streamCount()).toBe(2);
+  svc.paintAhead('lease-3', 0);
+  tabs[0].abort();   // one page left: it goes on
+  fake.paint(); await settled();
+  expect(fake.background()).toHaveLength(6);
+  tabs[1].abort();
+  expect(ev.streamCount()).toBe(0);
+  expect(fake.background()).toEqual([]);
+});
+
 test('missing versions, chapters and frames are 404s', async () => {
   expect((await fetchT(`${srv.url}/api/frames/partial/1500.jpg`)).status).toBe(404);
   expect((await fetchT(`${srv.url}/api/frames/nope/10.jpg`)).status).toBe(404);

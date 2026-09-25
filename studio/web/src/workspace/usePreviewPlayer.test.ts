@@ -203,9 +203,14 @@ describe('scheduling', () => {
   test('past the window, the server is asked to paint ahead from the playhead instead of being sent requests', async () => {
     const p = mount({ initialTime: 0, coverage: coverage([[0, 47]], keys('a')) });
     await flush(1_000);
-    expect(paintAhead).toEqual([0]); // on start
     await serveAll(keys('a'), { rounds: 20 });
     expect(Math.max(...framesAsked())).toBe(47); // nothing past the paused window is fetched
+
+    // Play (there's more to paint): from the playhead
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    await flush(1_000);
+    expect(paintAhead).toEqual([0]);
 
     // a scrub re-aims it once it settles, not once per step
     for (let s = 1; s <= 10; s++) {
@@ -224,6 +229,44 @@ describe('scheduling', () => {
     p.update({ segmentKeys: keys('a', { 2: 'b2' }), coverage: coverage([[720, 730]], keys('a', { 2: 'b2' })) });
     await flush(1_000);
     expect(paintAhead).toEqual([0, 720, 720]);
+  });
+
+  test('opening a version, scrubbing it and new code for it while paused ask the server to paint nothing ahead', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 47]], keys('a')) });
+    await flush(5_000);
+    for (let s = 1; s <= 3; s++) {
+      act(() => p.result.current.seek(s * 30));
+      await flush(1_000);
+    }
+    p.update({ segmentKeys: keys('a', { 2: 'b2' }), coverage: coverage([], keys('a', { 2: 'b2' })) });
+    await flush(60_000);
+    expect(paintAhead).toEqual([]);
+    // "Play now" wants it (what's past the playhead isn't painted): asked for then
+    p.update({ coverage: coverage([[2160, 2200]], keys('a', { 2: 'b2' })) });
+    await serveAll(keys('a', { 2: 'b2' }));
+    act(() => p.result.current.playNow());
+    await flush(1_000);
+    expect(paintAhead).toEqual([2160]);
+  });
+
+  test('while playback wants painting ahead, it is asked for again every 20 s (the server holds it on a lease), and not once it stops', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    act(() => p.result.current.play());
+    await flush(1_000);
+    expect(paintAhead).toEqual([0]);
+    // the coverage keeps growing (no stall), so only the renewals ask again
+    for (let s = 1; s <= 50; s++) {
+      p.update({ coverage: coverage([[0, 100 + s]], keys('a')) });
+      await flush(1_000);
+    }
+    expect(paintAhead).toEqual([0, 0, 0]); // after 20 s and 40 s
+    // cancelled: no more
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('paused');
+    await flush(120_000);
+    expect(paintAhead).toEqual([0, 0, 0]);
   });
 
   test('while waiting, paint-ahead is re-aimed when a broken chapter clears', async () => {
@@ -249,13 +292,13 @@ describe('scheduling', () => {
     expect(p.result.current.state).toBe('waiting');
     await flush(1_000);
     const start = paintAhead.length;
-    await flush(60_000); // nothing gets painted: re-aimed after about 5 s, then 10 s, then 20 s
-    expect(paintAhead.length - start).toBe(3);
+    await flush(60_000); // nothing gets painted: re-aimed after about 5 s, then 10 s, then 20 s, and renewed 20 s after that
+    expect(paintAhead.length - start).toBe(4);
     expect(paintAhead.slice(start).every(f => f === 0)).toBe(true);
     // painting resumes: the clock starts again
     p.update({ coverage: coverage([[0, 200]], keys('a')) });
     await flush(4_000);
-    expect(paintAhead.length - start).toBe(3);
+    expect(paintAhead.length - start).toBe(4);
     // everything is painted: it plays, and nothing more is asked for
     p.update({ coverage: coverage([[0, N - 1]], keys('a')) });
     await serveAll(keys('a'));

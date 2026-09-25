@@ -10,11 +10,14 @@
 //     playhead are decoded to bitmaps at a time (1080p bitmaps are 8 MB). The playhead frame goes as a `preview`
 //     (the server paints it first and drops older previews); the rest as `prefetch`.
 //   - Past the window, the server paints the rest of what can play by itself, at its lowest priority (after renders
-//     and thumbs): POST /api/frames/<v>/paint-ahead { from: playhead }, sent (debounced) on start, on a seek and when
-//     segment keys change; progress arrives as coverage (`frames` events). That's what brings "safe to play" closer.
-//     While playback waits for it (or plays towards frames not painted yet), it's re-aimed when a broken chapter
-//     clears, and when the coverage stops growing (the sweep ended early): after STALL_MS, then twice as long each
-//     time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop.
+//     and thumbs): POST /api/frames/<v>/paint-ahead { from: playhead }. That's the whole rest of the song, so it's
+//     asked for only while playback wants it (Play, or "Play now", with frames still to paint ahead: waiting or
+//     playing), never merely because a version is open: sent (debounced) on Play, on a seek and when segment keys
+//     change while it's wanted, and re-sent every RENEW_MS for as long as it is, since the server holds a sweep only
+//     on a lease it lets lapse after about 45 s. Progress arrives as coverage (`frames` events). That's what brings
+//     "safe to play" closer. While playback waits for it (or plays towards frames not painted yet), it's re-aimed when a
+//     broken chapter clears, and when the coverage stops growing (the sweep ended early): after STALL_MS, then twice
+//     as long each time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop.
 //   - A seek cancels (AbortController) every request the new position doesn't need, and re-asks for the new playhead
 //     frame as a `preview` if it was on its way as `prefetch`: the server withdraws cancelled requests from its
 //     painting queue (Review Focus 3).
@@ -81,6 +84,7 @@ const PUMP_EVERY_MS = 500;
 const PAINT_AHEAD_DEBOUNCE_MS = 300;
 const STALL_MS = 5_000;
 const STALL_MAX_MS = 60_000;
+const RENEW_MS = 20_000; // well inside the server's ~45 s lease on a paint-ahead sweep
 
 interface Snapshot {
   state: PlayerState;
@@ -131,6 +135,7 @@ export class PreviewEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private lastProgressAt = Date.now(); // the coverage last grew, or paint-ahead was last aimed
+  private lastAimAt = -Infinity; // paint-ahead was last sent
   private stallWait = STALL_MS;
   private brokenSig: string | null = null; // the coverage's broken chapters, to tell when they change
   private running = false;
@@ -156,10 +161,10 @@ export class PreviewEngine {
     this.audio.addEventListener('ended', this.onAudioEnded);
     this.timer = setInterval(() => {
       this.watchStall();
+      this.renewPaintAhead();
       this.pump();
       this.notify();
     }, PUMP_EVERY_MS);
-    this.aimPaintAhead();
     this.pump();
     this.notify();
   }
@@ -203,7 +208,7 @@ export class PreviewEngine {
     this.pendingKeys = keys;
     this.coverage = coverage;
     if (!this.frames) return; // applied once the song is known
-    if (this.applyKeys(keys)) this.aimPaintAhead();
+    if (this.applyKeys(keys) && this.wantsPainting()) this.aimPaintAhead();
     if (this.applyCoverage(coverage) && this.wantsPainting()) this.aimPaintAhead();
     if (this.mode === 'playing') {
       if (this.blockedAt(this.ph)) this.stopAt(this.ph);
@@ -355,6 +360,12 @@ export class PreviewEngine {
     this.aimPaintAhead();
   }
 
+  // The server lets a paint-ahead sweep lapse unless it's asked for again: while playback wants it, it is.
+  private renewPaintAhead() {
+    if (this.aheadTimer || !this.wantsPainting() || Date.now() - this.lastAimAt < RENEW_MS) return;
+    this.aimPaintAhead();
+  }
+
   snapshot(): Snapshot {
     const ready = this.frames > 0 && !!this.keys;
     const end = ready ? this.endFrom(this.ph) : this.ph;
@@ -431,6 +442,7 @@ export class PreviewEngine {
       this.aheadTimer = null;
       if (!this.running) return;
       this.lastProgressAt = Date.now();
+      this.lastAimAt = Date.now();
       const path = `/api/frames/${encodeURIComponent(this.versionId)}/paint-ahead`;
       api.post(path, { from: this.ph }).catch(() => {}); // best effort: the window's own requests still paint
     }, PAINT_AHEAD_DEBOUNCE_MS);
@@ -690,7 +702,7 @@ export class PreviewEngine {
     // on its way as a prefetch: it's asked for again as a preview, which the server paints first
     for (const [k, f] of [...this.inflight]) if (k < i || k >= i + this.window() || (k === i && f.prio !== 'preview')) this.abort(k);
     this.trim();
-    this.aimPaintAhead();
+    if (this.wantsPainting()) this.aimPaintAhead();
     if (this.mode === 'playing') {
       if (this.blockedAt(i)) this.stopAt(i);
       else if (this.hasBlob(i)) this.audio.currentTime = i / this.fps;

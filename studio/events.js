@@ -1,23 +1,33 @@
-// events.js: in-process pub/sub, and a server-sent-events stream of it for the studio page.
+// events.js: in-process pub/sub, and a server-sent-events stream of it for the studio page. onStreams(fn) calls fn with
+// the number of open streams whenever it changes: none open means no studio page is watching (studio/frames/service.js
+// stops painting ahead then).
 export function createEvents() {
-  const subs = new Set();
+  const subs = new Set(), streamWatchers = new Set();
+  let streams = 0;
   const publish = (type, data) => { for (const fn of subs) fn({ type, data }); };
   const subscribe = fn => { subs.add(fn); return () => subs.delete(fn); };
+  const onStreams = fn => { streamWatchers.add(fn); return () => streamWatchers.delete(fn); };
+  const counted = delta => { streams += delta; for (const fn of streamWatchers) fn(streams); };
   const stream = req => {
     const enc = new TextEncoder();
-    let off, ping;
+    let off, ping, open = false;
+    const cleanup = () => {
+      off?.(); clearInterval(ping);
+      if (open) { open = false; counted(-1); }
+    };
     const body = new ReadableStream({
       start(ctrl) {
         const send = s => { try { ctrl.enqueue(enc.encode(s)); } catch { cleanup(); } };
-        const cleanup = () => { off?.(); clearInterval(ping); };
         off = subscribe(e => send(`event: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`));
         ping = setInterval(() => send(': ping\n\n'), 15000);
         req.signal?.addEventListener('abort', () => { cleanup(); try { ctrl.close(); } catch {} });
+        open = true; counted(1);
+        if (req.signal?.aborted) { cleanup(); try { ctrl.close(); } catch {} return; }
         send(': connected\n\n');
       },
-      cancel() { off?.(); clearInterval(ping); },
+      cancel() { cleanup(); },
     });
     return new Response(body, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' } });
   };
-  return { publish, subscribe, stream };
+  return { publish, subscribe, stream, onStreams, streamCount: () => streams };
 }

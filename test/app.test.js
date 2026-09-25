@@ -776,9 +776,13 @@ slowTest('the built SPA loads under the SPA CSP with no violations (so, no inlin
   await page.waitForSelector('[role="slider"][aria-label="Playhead"]', { timeout: 10000 });
   await page.waitForSelector('[data-painting="false"] canvas', { timeout: 40000 });
   expect(frames).toContain('GET 200 image/jpeg');
-  // past what it fetches, the player has the server paint ahead (a token-guarded POST)
+  // past what it fetches, the player has the server paint ahead (a token-guarded POST) once Play wants it: not merely
+  // because the version is open
+  expect(frames.filter(f => f.startsWith('POST'))).toEqual([]);
+  await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => b.textContent.trim() === 'Play').click());
   await page.waitForFunction(() => performance.getEntriesByType('resource').some(e => e.name.endsWith('/paint-ahead')), { timeout: 10000 });
   expect(frames.filter(f => f.startsWith('POST')).map(f => f.split(';')[0])).toContain('POST 200 application/json');
+  await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
   await page.hover('button[aria-label^="Chapter 2"]');
   await page.waitForSelector('[role="tooltip"]', { timeout: 10000 });
 

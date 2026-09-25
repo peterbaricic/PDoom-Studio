@@ -12,7 +12,7 @@ import { PRIORITIES } from './pool.js';
 // done: the rest of a song is thousands of frames, and they don't all need to sit in the queue.
 const SWEEP_BATCH = 6;
 
-export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500 }) {
+export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500, leaseMs = 45000 }) {
   const engine = engineHash(root);
   // segment key -> { error, until }: broken for good (until null: the chapter's own error, which only a new key
   // clears) or until then (a timeout, or a snapshot that failed to load).
@@ -90,6 +90,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     if (!cur) return { missing: 'no such version' };
     const n = chapterOfFrame(i), key = cur.keys[n];
     if (!key) return { missing: `chapter ${n} isn't written yet` };
+    // The player asking for frames still wants its version painted ahead.
+    if (prio === 'preview' || prio === 'prefetch') renewSweep(versionId);
     const b = brokenOf(key);
     if (b) return { broken: b, key };
     const found = lookup(key, i, cur.shas);
@@ -155,20 +157,36 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // its sweep). A write to the version (its storyboard, a chapter) doesn't stop it: it carries on under the new
   // snapshot, from where it started, so a changed chapter is painted again under its new key. It stops at the end,
   // or when a frame of it can't be painted (broken, superseded, the pool gone); the player re-aims it when it stalls.
+  // A sweep is the whole rest of the song (minutes of GPU), so it's held on a lease: each paint-ahead call and each of
+  // the version's preview or prefetch frame requests renews it, and it stops once leaseMs passes without either (the
+  // page went away, or stopped wanting it) or when no studio page is left on the event stream.
   // Progress shows as `frames` events, as for any paint. Returns { from, end }, or null for no such version.
-  let sweep = null;   // the running sweep's token: { versionId }
+  let sweep = null;   // the running sweep's token: { versionId, from, lease }
+  const endSweep = token => { if (token && sweep === token) { clearTimeout(token.lease); sweep = null; } };
+  // Ended, and whatever of it is still queued withdrawn.
+  const stopSweep = token => { if (token && sweep === token) { endSweep(token); pool.supersede(null, 'background'); } };
+  const renew = token => {
+    clearTimeout(token.lease);
+    token.lease = setTimeout(() => stopSweep(token), leaseMs);
+    token.lease.unref?.();
+  };
+  const renewSweep = versionId => { if (sweep?.versionId === versionId) renew(sweep); };
+  events?.onStreams?.(n => { if (!n) stopSweep(sweep); });
   function paintAhead(versionId, from) {
     let cur = current(versionId);
     if (!cur) return null;
-    const token = { versionId };
-    sweep = token;
-    pool.supersede(null, 'background');
+    // The same sweep asked for again (the player renewing it): it goes on as it is.
+    if (sweep && sweep.versionId === versionId && sweep.from === from) { renew(sweep); return { from, end: sweep.end() }; }
+    stopSweep(sweep);
     let end = playableEnd(cur, from), next = from, active = 0;
+    const token = { versionId, from, end: () => end };
+    sweep = token;
+    renew(token);
     const going = () => sweep === token;
     const more = () => {
       if (!going()) return;
       const now = current(versionId);
-      if (!now) { sweep = null; return; }
+      if (!now) { endSweep(token); return; }
       if (now.snap.id !== cur.snap.id) {   // written to since: go on under the new snapshot, from the start
         cur = now; end = playableEnd(cur, from); next = from;
       }
@@ -179,10 +197,10 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
         paint(versionId, cur, i, 'background').then(r => {
           active--;
           if (r.file) more();
-          else if (going()) sweep = null;
+          else endSweep(token);
         });
       }
-      if (next >= end && !active && going()) sweep = null;
+      if (next >= end && !active) endSweep(token);
     };
     more();
     return { from, end };
@@ -193,7 +211,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // The segments themselves aren't touched: the cache is keyed by content, not by version, so another version may
   // share them, and nothing of the deleted one is pinned (it has no render running: deleting waits for its jobs).
   function dropVersion(versionId) {
-    if (sweep?.versionId === versionId) sweep = null;
+    if (sweep?.versionId === versionId) endSweep(sweep);
     for (const prio of PRIORITIES) pool.supersede(versionId, prio);
   }
 
