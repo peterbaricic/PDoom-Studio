@@ -1,10 +1,14 @@
-// VersionSidebar.tsx: every version, "Examples" (★, read-only) above "My versions", each with where it stands.
+// VersionSidebar.tsx: every version, "Examples" (★, read-only) above "My versions", each with where it stands, and
+// "+ New version".
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { PlusIcon } from 'lucide-react';
 import { api } from '@/api/client';
 import type { Render, Version } from '@/api/types';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useOpenVersionDialog } from '@/dialogs/VersionDialogs';
 import { cn } from '@/lib/utils';
 import { useSelectedVersion } from './useSelectedVersion';
 
@@ -25,6 +29,7 @@ export function stageLabel(v: Version, rendered: boolean): string {
 
 export function VersionSidebar() {
   const selected = useSelectedVersion();
+  const openDialog = useOpenVersionDialog();
   const { data: versions = [] } = useQuery({ queryKey: ['versions'], queryFn: () => api.get<Version[]>('/api/versions') });
   const { data: renders = [] } = useQuery({ queryKey: ['renders'], queryFn: () => api.get<Render[]>('/api/library') });
   const rendered = new Set(renders.map(r => r.version_id));
@@ -57,6 +62,14 @@ export function VersionSidebar() {
 
   return (
     <nav aria-label="Versions" className="bg-card flex w-64 shrink-0 flex-col border-r">
+      {openDialog && (
+        <div className="border-b p-3">
+          <Button variant="outline" size="sm" className="w-full" onClick={() => openDialog({ kind: 'new' })}>
+            <PlusIcon />
+            New version
+          </Button>
+        </div>
+      )}
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-4 p-3">
           <section aria-labelledby="sidebar-examples" className="flex flex-col gap-1">

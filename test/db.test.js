@@ -356,3 +356,48 @@ test('opening with defaultPath never modifies the examples database, and creates
   expect(existsSync(`${defaultPath}-shm`)).toBe(false);
   expect(existsSync(`${defaultPath}-journal`)).toBe(false);
 });
+
+test('deleteVersion removes the version, its files, revisions and jobs; its renders stay unless videos is set', () => {
+  const setUp = (id, title) => {
+    db.createVersion({ id, title, logline: `${title} logline` });
+    db.writeFiles(id, [{ path: 'STORYBOARD.md', content: `# ${title}` }, { path: 'ch/c01.js', content: `// ${title} 1` }], { source: 'manual' });
+    db.updateJob(db.addJob({ kind: 'chapter', versionId: id, params: { chapter: 1 } }), { status: 'done' });
+    return db.addRender({ versionId: id, file: `${id}.mp4`, poster: `${id}.jpg`, title, logline: `${title} logline`, durationS: 1, renderS: 1, sizeBytes: 3 });
+  };
+  const count = (table, column = 'version_id') => id => db.db.query(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = $id`).get({ id }).n;
+  setUp('kept', 'Kept');
+  const goneRender = setUp('gone', 'Gone');
+
+  expect(db.deleteVersion('gone', { videos: false })).toEqual({ deletedRenders: [] });
+  expect(db.getVersion('gone')).toBeNull();
+  expect(db.listVersions().map(v => v.id)).toEqual(['kept']);
+  for (const table of ['files', 'revisions', 'jobs']) expect([table, count(table)('gone')]).toEqual([table, 0]);
+  // the video stays in the library, under the deleted version's last title
+  expect(db.listRenders().find(r => r.id === goneRender)).toMatchObject({ version_id: 'gone', title: 'Gone', logline: 'Gone logline', file: 'gone.mp4' });
+  // nothing of the other version's went
+  for (const table of ['files', 'revisions', 'jobs']) expect([table, count(table)('kept')]).toEqual([table, table === 'jobs' ? 1 : 2]);
+  expect(db.listRenders().map(r => r.version_id).sort()).toEqual(['gone', 'kept']);
+
+  setUp('gone', 'Gone again');   // the id is free again: a new version may take it
+  expect(db.deleteVersion('gone', { videos: true })).toEqual({ deletedRenders: ['gone.mp4', 'gone.jpg', 'gone.mp4', 'gone.jpg'] });
+  expect(db.listRenders().map(r => r.version_id)).toEqual(['kept']);
+});
+
+test('deleteVersion refuses a missing version, an example, and a version with queued or running jobs', () => {
+  expect(() => db.deleteVersion('nope', { videos: false })).toThrow('no such version: nope');
+
+  const defaultPath = freshDefaultPath();
+  const udb = openDb(tempDbPath('user-'), { defaultPath });
+  expect(() => udb.deleteVersion('original', { videos: true })).toThrow('examples are read-only');
+  expect(udb.getVersion('original')).toMatchObject({ example: true });
+  udb.close();
+
+  db.createVersion({ id: 'busy' });
+  for (const kind of ['storyboard', 'chapter', 'render', 'thumbs']) for (const status of ['queued', 'running']) {
+    const jid = db.addJob({ kind, versionId: 'busy' }); db.updateJob(jid, { status });
+    expect(() => db.deleteVersion('busy', { videos: false })).toThrow(`a ${kind} job for this version is still ${status}`);
+    expect(db.getVersion('busy')).not.toBeNull();
+    db.updateJob(jid, { status: 'cancelled' });
+  }
+  expect(db.deleteVersion('busy', { videos: false })).toEqual({ deletedRenders: [] });
+});

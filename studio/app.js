@@ -1,6 +1,6 @@
 // app.js: every URL the studio answers. Pages and the shared engine come from the repo (root), version code from the
 // database, work folders and thumbnails from <data>/.studio/, finished videos from <data>/library/ (data defaults to root).
-import { readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
 import { versionManifest, workManifest } from './versions.js';
@@ -250,6 +250,26 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
         events.publish('version', { id: v.id });
         return json(v);
       } catch (e) { return error(409, e.message); }
+    }],
+    // Deletes one of the user's own versions: its files, revisions and jobs, its thumbnails, and whatever the frame
+    // service still had queued for it (frames already cached age out of the cache like any other). videos=1 deletes
+    // its renders and their files too (inside the library only, as DELETE /api/library/:rid does); without it they
+    // stay in the library under the version's last title. Refused for an example (403) and while a job of the
+    // version is queued or running (409): the job would go on writing to, or rendering, a version that's gone.
+    ['DELETE', /^\/api\/versions\/([a-z0-9-]+)$/, (req, [, id]) => {
+      const missing = needVersion(id); if (missing) return missing;
+      const blocked = guardExample(id); if (blocked) return blocked;
+      const flag = new URL(req.url).searchParams.get('videos') ?? '0';
+      if (!['0', '1'].includes(flag)) return error(400, 'videos must be 0 or 1');
+      let deletedRenders;
+      try { ({ deletedRenders } = db.deleteVersion(id, { videos: flag === '1' })); }
+      catch (e) { return error(/still (queued|running)/.test(e.message) ? 409 : 400, e.message); }
+      for (const f of deletedRenders) { const p = safeJoin(dirs.library, f); if (p) unlinkSync(p); }
+      rmSync(join(dirs.thumbs, id), { recursive: true, force: true });
+      frames?.dropVersion(id);
+      events.publish('version', { id });
+      events.publish('library', {});
+      return json({ ok: true });
     }],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)\/files\/STORYBOARD\.md$/, async (req, [, id]) => {
       const missing = needVersion(id); if (missing) return missing;

@@ -7,6 +7,9 @@
 // <dir>/cache.json indexes the segments by how recently each was used (file access times aren't reliable), so that
 // over the cap, whole least-recently-used segments go first. Pins (held by a running final render) live in memory
 // only: they belong to this process's jobs.
+// Nothing here is indexed by version: a segment is content (engine, options, shared.js, chapter), which versions can
+// share. So deleting a version cleans nothing here: its segments, unpinned, simply age out under the cap like any
+// others that stop being used, and stay useful meanwhile to any version sharing them.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, statSync, existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { framesOfChapter, depsHash } from './keys.js';

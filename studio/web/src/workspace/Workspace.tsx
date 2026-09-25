@@ -10,6 +10,7 @@ import { api } from '@/api/client';
 import type { Coverage, Job, Manifest, Song } from '@/api/types';
 import { LoadBoundary } from '@/components/LoadBoundary';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useOpenVersionDialog } from '@/dialogs/VersionDialogs';
 import { jobsQuery } from '@/shell/JobsDrawer';
 import { LyricsTrack } from './LyricsTrack';
 import { PreviewPlayer } from './PreviewPlayer';
@@ -93,6 +94,7 @@ interface BodyProps {
 
 function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, jobs }: BodyProps) {
   const queryClient = useQueryClient();
+  const openDialog = useOpenVersionDialog();
   const search = useSearch({ from: '/versions/$id' });
   const navigate = useNavigate();
   const chapterStart = (ch: number | undefined) => (ch ? song.chapters[ch - 1]?.[0] : undefined);
@@ -178,7 +180,13 @@ function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, job
       <div ref={inspectorBox} className="xl:sticky xl:top-4 xl:max-h-[calc(100dvh-6rem)] xl:w-[28rem] xl:shrink-0 xl:overflow-y-auto">
         <LoadBoundary what="the inspector" onRetry={retryInspector}>
           <Suspense fallback={<Skeleton className="h-64 w-full" />}>
-            <Inspector versionId={versionId} manifest={manifest} jobs={jobs} chapter={search.ch} />
+            <Inspector
+              versionId={versionId}
+              manifest={manifest}
+              jobs={jobs}
+              chapter={search.ch}
+              onRemix={openDialog ? () => openDialog({ kind: 'remix', versionId }) : undefined}
+            />
           </Suspense>
         </LoadBoundary>
       </div>

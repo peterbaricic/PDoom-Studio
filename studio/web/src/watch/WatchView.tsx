@@ -92,20 +92,23 @@ export function WatchView({ versionId, renderId }: WatchViewProps) {
   }
 
   const deleted = manifest.error instanceof ApiError && manifest.error.status === 404;
+  // After a refetch answers 404 (the version deleted while this is open), the query keeps the manifest it had: it's
+  // stale, and nothing may be asked on its account (history, jobs, the storyboard).
+  const live = deleted ? undefined : manifest.data;
   return (
     <div className="mx-auto flex max-w-[1600px] flex-col gap-6 p-4">
       <Player
         key={render.id}
         render={render}
-        walkthrough={manifest.data?.walkthrough ?? []}
+        walkthrough={live?.walkthrough ?? []}
         // room for the walkthrough, kept while it loads so the video doesn't jump; none when there won't be one
-        side={manifest.isPending || !!manifest.data?.walkthrough.length}
+        side={manifest.isPending || !!live?.walkthrough.length}
       />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <HowItWasMade
           versionId={versionId}
           render={render}
-          manifest={manifest.data}
+          manifest={live}
           deleted={deleted}
           error={deleted ? null : (manifest.error?.message ?? null)}
         />

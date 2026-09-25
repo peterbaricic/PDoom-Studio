@@ -564,6 +564,81 @@ test('promote waits for the version\'s storyboard, shared and chapter jobs to fi
   expect(db2.getVersion('mine').example).toBe(true);
 });
 
+// A version with a storyboard, a chapter, a finished job, a render (video and poster in the library) and thumbnails,
+// through an app whose events and frame service are recorded.
+function deletable() {
+  const published = [], dropped = [], events = createEvents();
+  events.subscribe(e => published.push(e));
+  const env = withExamples(defaultDbPath, { events, frames: { dropVersion: id => dropped.push(id) } });
+  const lib = join(data, 'library'), thumbs = join(data, '.studio/thumbs/gone');
+  mkdirSync(lib, { recursive: true }); mkdirSync(thumbs, { recursive: true });
+  writeFileSync(join(lib, 'gone.mp4'), 'mp4'); writeFileSync(join(lib, 'gone.jpg'), 'jpg'); writeFileSync(join(thumbs, 'c01.jpg'), 'thumb');
+  env.db.createVersion({ id: 'gone', title: 'Gone', logline: 'Bye' });
+  env.db.writeFiles('gone', [{ path: 'STORYBOARD.md', content: '# Gone' }, { path: 'ch/c01.js', content: '// 1' }], { source: 'manual' });
+  env.db.updateJob(env.db.addJob({ kind: 'chapter', versionId: 'gone', params: { chapter: 1 } }), { status: 'done' });
+  const rid = env.db.addRender({ versionId: 'gone', file: 'gone.mp4', poster: 'gone.jpg', title: 'Gone', logline: 'Bye', durationS: 1, renderS: 1, sizeBytes: 3 });
+  return { ...env, published, dropped, lib, thumbs, rid };
+}
+
+test('deleting a version without its videos: the version, its files, revisions, jobs and thumbnails go; the render stays, under its title', async () => {
+  const { db: db2, get: get2, send: send2, published, dropped, lib, thumbs, rid } = deletable();
+  expect((await send2('DELETE', '/api/versions/gone?videos=0', undefined, { ...W, 'x-studio-token': 'wrong' })).status).toBe(403);
+  expect(db2.getVersion('gone')).not.toBeNull();
+
+  const res = await send2('DELETE', '/api/versions/gone?videos=0');
+  expect([res.status, await res.json()]).toEqual([200, { ok: true }]);
+  expect((await get2('/api/versions/gone')).status).toBe(404);
+  expect((await (await get2('/api/versions')).json()).map(v => v.id)).toEqual(['original']);
+  expect(db2.history('gone', null)).toEqual([]);
+  expect(await (await get2('/api/jobs?version=gone')).json()).toEqual([]);
+  expect(existsSync(thumbs)).toBe(false);
+  // the video and its poster stay, and the library still lists the render under the deleted version's title
+  expect(readFileSync(join(lib, 'gone.mp4'), 'utf8')).toBe('mp4');
+  expect(readFileSync(join(lib, 'gone.jpg'), 'utf8')).toBe('jpg');
+  expect(await (await get2('/api/library')).json()).toMatchObject([{ id: rid, version_id: 'gone', title: 'Gone', logline: 'Bye' }]);
+  expect(published).toEqual([{ type: 'version', data: { id: 'gone' } }, { type: 'library', data: {} }]);
+  // the frame service drops whatever it still had queued for the version
+  expect(dropped).toEqual(['gone']);
+  expect((await send2('DELETE', '/api/versions/gone?videos=0')).status).toBe(404);
+});
+
+test('deleting a version with its videos removes its renders and their files, inside the library only', async () => {
+  const { db: db2, get: get2, send: send2, lib } = deletable();
+  // a second render whose poster climbs out of the library: only its library namesake may go
+  writeFileSync(join(lib, 'gone-2.mp4'), 'mp4'); writeFileSync(join(data, 'keep.jpg'), 'out');
+  db2.addRender({ versionId: 'gone', file: 'gone-2.mp4', poster: '../../keep.jpg', title: 'Gone', durationS: 1, renderS: 1, sizeBytes: 3 });
+  db2.createVersion({ id: 'other', title: 'Other' });
+  writeFileSync(join(lib, 'other.mp4'), 'mp4');
+  const other = db2.addRender({ versionId: 'other', file: 'other.mp4', title: 'Other', durationS: 1, renderS: 1, sizeBytes: 3 });
+
+  expect((await send2('DELETE', '/api/versions/gone?videos=1')).status).toBe(200);
+  for (const f of ['gone.mp4', 'gone.jpg', 'gone-2.mp4']) expect([f, existsSync(join(lib, f))]).toEqual([f, false]);
+  expect(readFileSync(join(data, 'keep.jpg'), 'utf8')).toBe('out');
+  expect(readFileSync(join(lib, 'other.mp4'), 'utf8')).toBe('mp4');
+  expect((await (await get2('/api/library')).json()).map(r => r.id)).toEqual([other]);
+});
+
+test('deleting a version is refused for examples, while a job of it is queued or running, and for a bad videos flag', async () => {
+  const { db: db2, send: send2, published, dropped } = deletable();
+  const refused = async (path, status, message) => {
+    const res = await send2('DELETE', path);
+    expect([res.status, (await res.json()).error]).toEqual([status, message]);
+  };
+  await refused('/api/versions/original?videos=1', 403, 'examples are read-only — remix it first');
+  await refused('/api/versions/nope?videos=0', 404, 'no such version');
+  await refused('/api/versions/gone?videos=yes', 400, 'videos must be 0 or 1');
+  for (const kind of ['storyboard', 'chapter', 'render', 'thumbs']) for (const status of ['queued', 'running']) {
+    const jid = db2.addJob({ kind, versionId: 'gone' }); db2.updateJob(jid, { status });
+    await refused('/api/versions/gone?videos=0', 409, `a ${kind} job for this version is still ${status} — let it finish or cancel it first`);
+    db2.updateJob(jid, { status: 'failed' });
+  }
+  expect(db2.getVersion('gone')).not.toBeNull();
+  expect(db2.getVersion('original')).toMatchObject({ example: true });
+  expect([published, dropped]).toEqual([[], []]);
+  expect((await send2('DELETE', '/api/versions/gone')).status).toBe(200);   // no flag: the videos stay
+  expect(db2.listRenders().map(r => r.version_id)).toEqual(['gone']);
+});
+
 test('work folders are served while a job runs', async () => {
   db.createVersion({ id: 'a' });
   const jid = db.addJob({ kind: 'chapter', versionId: 'a', params: { chapter: 1 } });
@@ -598,7 +673,9 @@ beforeAll(async () => {
   userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
   userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
   userDb.close();
-  cspServer = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { cwd: root, env: isolatedEnv(dir, { DEFAULT_DB: defaultDbPath }), stdout: 'pipe', stderr: 'pipe' });
+  // The fake Claude: the page asks for the studio's health, which asks the CLI whether it's signed in.
+  cspServer = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { cwd: root,
+    env: isolatedEnv(dir, { DEFAULT_DB: defaultDbPath, CLAUDE_BIN: `bun ${join(root, 'test/fake-claude.js')}` }), stdout: 'pipe', stderr: 'pipe' });
   const reader = cspServer.stdout.getReader(), dec = new TextDecoder();
   let out = '';
   while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
@@ -640,17 +717,24 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
 
   // The inspector (its own lazily loaded chunk), with the storyboard rendered from Markdown (tables included). On the
   // Original it's read-only, so for its editing controls (the native model select among them) this remixes the
-  // Original and opens the remix from the sidebar, staying on this page: then the storyboard panel, and chapter 2's.
+  // Original, through the header's version menu (a Radix dropdown) and the Remix dialog (a lazily loaded chunk, a
+  // modal), which opens the remix: then the storyboard panel, and chapter 2's.
   const inspector = '[aria-label="Inspector"]';
+  const dialogButton = label => page.evaluate(l => [...document.querySelectorAll('[role="dialog"] button')].find(b => b.textContent === l).click(), label);
+  const versionMenu = async item => {
+    await page.click('button[aria-label="Version actions"]');
+    await page.waitForSelector('[role="menuitem"]', { timeout: 10000 });
+    await page.evaluate(i => [...document.querySelectorAll('[role="menuitem"]')].find(m => m.textContent === i).click(), item);
+    await page.waitForSelector('[role="dialog"] input[data-slot="input"]', { timeout: 10000 });
+  };
   await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"] table`, { timeout: 10000 });
-  expect(await page.evaluate(async () => {
-    const token = document.querySelector('meta[name="studio-token"]').content;
-    const res = await fetch('/api/versions/original/remix', { method: 'POST', headers: { 'content-type': 'application/json', 'x-studio-token': token },
-      body: JSON.stringify({ id: 'csp-remix', title: 'CSP remix' }) });
-    return res.status;
-  })).toBe(201);
-  await page.waitForSelector('a[href="/versions/csp-remix"]', { timeout: 10000 });
-  await page.click('a[href="/versions/csp-remix"]');
+  await versionMenu('Remix…');
+  await page.waitForFunction(() => document.querySelector('[role="dialog"] input[data-slot="input"]').value.endsWith('(remix)'), { timeout: 10000 });
+  await page.$eval('[role="dialog"] input[data-slot="input"]', i => i.select());
+  await page.keyboard.type('CSP remix');   // the id follows the title
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"] input')].some(i => i.value === 'csp-remix'), { timeout: 10000 });
+  await dialogButton('Remix');
+  await page.waitForFunction(() => location.pathname === '/versions/csp-remix' && !document.querySelector('[role="dialog"]'), { timeout: 10000 });
   await page.waitForSelector(`${inspector} select[aria-label="Claude model"]`, { timeout: 10000 });
   await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"] table`, { timeout: 10000 });
   await page.click('button[aria-label^="Chapter 2"]');
@@ -658,6 +742,15 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   await page.waitForSelector(`${inspector} [data-testid="storyboard-markdown"]`, { timeout: 10000 });
   await page.waitForSelector(`${inspector} select[aria-label="Claude model"]`, { timeout: 10000 });
   await page.waitForSelector(`${inspector} [aria-label="Revisions"] li`, { timeout: 10000 });
+
+  // Deleting the remix: the Delete dialog (a Radix checkbox in a form), typed to confirm, then the page leaves it.
+  await versionMenu('Delete…');
+  await page.click('[role="dialog"] button[role="checkbox"]');
+  await page.waitForSelector('[role="dialog"] button[role="checkbox"][data-state="checked"]', { timeout: 10000 });
+  await page.type('[role="dialog"] input[data-slot="input"]', 'CSP remix');
+  await dialogButton('Delete version');
+  await page.waitForFunction(() => location.pathname === '/versions/original' && !document.querySelector('[role="dialog"]'), { timeout: 10000 });
+  expect(await page.$('a[href="/versions/csp-remix"]')).toBeNull();
 
   // The library (a lazily loaded chunk): poster cards load under img-src 'self'. Deleting the render whose version is
   // gone goes through the confirmation dialog (a modal: Radix's scroll lock again) and the token-guarded DELETE.

@@ -6,6 +6,7 @@
 import { existsSync } from 'node:fs';
 import { snapshotOf, rememberSnapshot } from '../snapshot.js';
 import { N, chapterOfFrame, framesOfChapter, engineHash, segmentKeys, currentShas } from './keys.js';
+import { PRIORITIES } from './pool.js';
 
 // A paint-ahead sweep keeps at most this many of its frames queued in the pool at once, queueing the next as each is
 // done: the rest of a song is thousands of frames, and they don't all need to sit in the queue.
@@ -152,11 +153,11 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // snapshot, from where it started, so a changed chapter is painted again under its new key. It stops at the end,
   // or when a frame of it can't be painted (broken, superseded, the pool gone); the player re-aims it when it stalls.
   // Progress shows as `frames` events, as for any paint. Returns { from, end }, or null for no such version.
-  let sweep = null;   // the running sweep's token
+  let sweep = null;   // the running sweep's token: { versionId }
   function paintAhead(versionId, from) {
     let cur = current(versionId);
     if (!cur) return null;
-    const token = {};
+    const token = { versionId };
     sweep = token;
     pool.supersede(null, 'background');
     let end = playableEnd(cur, from), next = from, active = 0;
@@ -182,6 +183,15 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     };
     more();
     return { from, end };
+  }
+
+  // A version that was deleted: whatever of it is still queued in the pool goes, at every priority, and its sweep
+  // stops. A frame being painted right now finishes (into the cache, where it ages out like any unused segment).
+  // The segments themselves aren't touched: the cache is keyed by content, not by version, so another version may
+  // share them, and nothing of the deleted one is pinned (it has no render running: deleting waits for its jobs).
+  function dropVersion(versionId) {
+    if (sweep?.versionId === versionId) sweep = null;
+    for (const prio of PRIORITIES) pool.supersede(versionId, prio);
   }
 
   // Paints every missing frame of a final render (frames from..to, the whole song by default) at render priority,
@@ -229,5 +239,5 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return { snapshot: cur.snap, keys: cur.keys, files: frames.map(i => files.get(i)), release };
   }
 
-  return { frame, read, coverage, prefetch, paintAhead, fillForRender, cache };
+  return { frame, read, coverage, prefetch, paintAhead, dropVersion, fillForRender, cache };
 }

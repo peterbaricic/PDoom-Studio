@@ -531,6 +531,35 @@ test('a paint-ahead sweep replaces every version\'s earlier one: only the page b
   } finally { await one.close(); }
 }, T);
 
+test('a deleted version\'s queued paints are dropped at every priority, and its sweep stops; other versions\' stay', async () => {
+  const painted = [];
+  const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
+    onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
+  const svc = createFrameService({ db, cache, pool: one, events, root });
+  const queued = versionId => one.stats().queued.filter(q => q.versionId === versionId);
+  try {
+    fastVersion('doomed');
+    svc.paintAhead('doomed', 2000);
+    await until(() => painted.some(p => p.versionId === 'doomed'));
+    svc.prefetch('doomed', 3000, 10);
+    const held = svc.frame('doomed', 3500, 'preview');
+    svc.prefetch('rev', 3000, 10);
+    expect(new Set(queued('doomed').map(q => q.prio))).toEqual(new Set(['preview', 'prefetch', 'background']));
+    expect(queued('rev').length).toBeGreaterThan(0);
+
+    db.deleteVersion('doomed', { videos: false });
+    svc.dropVersion('doomed');
+    expect(queued('doomed')).toEqual([]);
+    expect(queued('rev').length).toBeGreaterThan(0);
+    expect(await held.pending).toMatchObject({ retry: expect.any(String) });
+    // at most the frame being painted when it was deleted is the doomed version's; then only the other's
+    const count = painted.length;
+    await until(() => painted.filter((p, k) => k > count && p.versionId === 'rev').length >= 3);
+    expect(painted.slice(count + 1).every(p => p.versionId === 'rev')).toBe(true);
+    expect(queued('doomed')).toEqual([]);
+  } finally { await one.close(); }
+}, T);
+
 test('a paint-ahead sweep stops at the first chapter that is not written or is broken', async () => {
   db.createVersion({ id: 'sweepy' });
   db.writeFiles('sweepy', [

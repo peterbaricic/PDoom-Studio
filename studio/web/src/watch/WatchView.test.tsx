@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Manifest, Render, Revision } from '@/api/types';
 import { calls, job, mockApi, renderInRouter } from '../test-utils';
+import { storyboardQuery } from '@/workspace/inspectorControls';
 import { WatchView } from './WatchView';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -230,6 +231,40 @@ describe('WatchView', () => {
     // one request for the version (a 404 isn't retried), none for what depends on it
     expect(calls(fetchMock).filter(c => c === 'GET /api/versions/gone')).toHaveLength(1);
     expect(calls(fetchMock).some(c => /history|jobs|STORYBOARD/.test(c))).toBe(false);
+  });
+
+  test('a version deleted while it is watched: the stale manifest drives nothing, and nothing about it is asked again', async () => {
+    let gone = false;
+    const notFound = () => new Response(JSON.stringify({ error: 'no such version' }), { status: 404 });
+    const { fetchMock, queryClient } = watch({
+      renderId: 5,
+      answers: {
+        'GET /api/versions/mine': () => (gone ? notFound() : MANIFEST),
+        'GET /api/versions/mine/history': () => (gone ? [] : HISTORY),
+        'GET /api/jobs?version=mine': () => (gone ? [] : JOBS),
+        'GET /v/mine/STORYBOARD.md': () => (gone ? notFound() : new Response('# Storyboard')),
+      },
+    });
+    const made = await screen.findByRole('region', { name: 'How it was made' });
+    await within(made).findByText(/6 revisions/);
+    expect(screen.getByRole('list', { name: 'Walkthrough' })).toBeInTheDocument();
+
+    // deleted: the `version` event refetches it, and the query keeps the manifest it had, alongside the 404
+    gone = true;
+    const before = calls(fetchMock).length;
+    await queryClient.invalidateQueries({ queryKey: ['version', 'mine'] });
+    expect(await within(made).findByText(/This version was deleted/)).toBeInTheDocument();
+    expect(queryClient.getQueryData(['version', 'mine'])).toEqual(MANIFEST);
+    expect(screen.queryByRole('list', { name: 'Walkthrough' })).toBeNull();
+    // the refetch asked for the version and what was invalidated with it, once each; then nothing more
+    const asked = calls(fetchMock).slice(before);
+    expect(asked.filter(c => c === 'GET /api/versions/mine')).toHaveLength(1);
+    expect(new Set(asked).size).toBe(asked.length);
+    await new Promise(r => setTimeout(r, 50));
+    expect(calls(fetchMock).slice(before)).toEqual(asked);
+    // and a storyboard that's not there (404) isn't asked for again and again
+    const retry = storyboardQuery('mine', true).retry;
+    expect([retry(0, new Error('not found')), retry(0, new Error('HTTP 500')), retry(3, new Error('HTTP 500'))]).toEqual([false, true, false]);
   });
 
   test('a version that fails to load for another reason says so, and still plays the render', async () => {

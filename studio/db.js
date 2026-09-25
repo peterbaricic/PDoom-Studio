@@ -299,6 +299,27 @@ class StudioDb {
 
     return this.getVersion(id);
   }
+  // Deletes one of the user's own versions: the version, its files, its revisions and its jobs (logs included), in one
+  // transaction. Its renders are deleted too only when `videos` is set; otherwise they stay in the library, listed
+  // under the title and logline stored with each (see listRenders). Refuses an example, and a version with a job
+  // still queued or running (that job would go on writing to, or rendering, a version that's gone). Returns the
+  // library files (videos and posters) of the renders it deleted, for the caller to remove from disk.
+  deleteVersion(id, { videos = false } = {}) {
+    if (this._isExample(id)) throw new Error('examples are read-only');
+    if (!this.getVersion(id)) throw new Error(`no such version: ${id}`);
+    const [busy] = this.findJobs({ versionId: id, kinds: ['storyboard', 'shared', 'chapter', 'render', 'thumbs'], statuses: ['queued', 'running'] });
+    if (busy) throw new Error(`a ${busy.kind} job for this version is still ${busy.status} — let it finish or cancel it first`);
+    return this.db.transaction(() => {
+      const renders = videos ? this.db.query('SELECT file, poster FROM renders WHERE version_id = $id ORDER BY id').all({ id }) : [];
+      if (videos) this.db.query('DELETE FROM renders WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM jobs WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM files WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM revisions WHERE version_id = $id').run({ id });
+      this.db.query('DELETE FROM versions WHERE id = $id').run({ id });
+      return { deletedRenders: renders.flatMap(r => [r.file, r.poster]).filter(Boolean) };
+    })();
+  }
+
   // promoteVersion's first step: v and its current files into default.db, on a separate writable connection.
   _writeExample(v, files) {
     const defDb = new Database(this.defaultPath, { strict: true });
