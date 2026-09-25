@@ -73,15 +73,25 @@ export function currentShas(snapshot) {
   return { ...snapshot.files, '*': sha256(chapters.map(p => `${p} ${snapshot.files[p]}`).join('\n')) };
 }
 
-// The dependencies of a frame of chapter n that read these CAST entries ({ key, path: the script that defined it, or
-// null }, as the painting page reports them): { path: content hash } for each other chapter whose entries it read.
-// Entries from shared.js or the frame's own chapter need nothing: both are part of its segment key already.
-export function depsOf(castReads, snapshot, n) {
-  const own = new Set(chapterPaths(snapshot.files, n)), deps = {};
-  for (const { path } of castReads) {
-    if (path === 'shared.js' || own.has(path)) continue;
-    if (path && path.startsWith('ch/') && snapshot.files[path]) deps[path] = snapshot.files[path];
-    else deps['*'] = currentShas(snapshot)['*'];
+// The dependencies of a frame of chapter n: { path: content hash } for each other chapter whose CAST entries it read,
+// '*' (see currentShas) if it read one no chapter defined. castReads are what the frame read while painting
+// ({ key, path: the script that defined it, or null }, as the painting page reports them); loadReads, what each script
+// read while it loaded ({ path: [read, ...] }). The frame's own chapter's load-time reads count as the frame's, and
+// so, for each chapter it takes an entry from, do that chapter's (an entry can wrap another chapter's). Entries from
+// shared.js or the frame's own chapter need nothing: both are part of its segment key already.
+export function depsOf(castReads, snapshot, n, loadReads = {}) {
+  const own = chapterPaths(snapshot.files, n), deps = {}, folded = new Set(own);
+  const todo = [...castReads, ...own.flatMap(p => loadReads[p] || [])];
+  while (todo.length) {
+    const { path } = todo.pop();
+    if (path === 'shared.js') continue;
+    if (!(path && path.startsWith('ch/') && snapshot.files[path])) { deps['*'] = currentShas(snapshot)['*']; continue; }
+    if (!own.includes(path)) deps[path] = snapshot.files[path];
+    if (!folded.has(path)) { folded.add(path); todo.push(...(loadReads[path] || [])); }
   }
   return deps;
 }
+
+// Names one set of dependencies: '-' for none, else a hash of them. A frame is cached once per set it was painted
+// with (see studio/frames/cache.js).
+export const depsHash = deps => deps && Object.keys(deps).length ? sha256(canonicalJson(deps)) : '-';

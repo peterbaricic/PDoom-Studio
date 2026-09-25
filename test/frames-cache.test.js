@@ -1,8 +1,8 @@
 import { test, expect } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync, cpSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCache } from '../studio/frames/cache.js';
-import { framesOfChapter } from '../studio/frames/keys.js';
+import { framesOfChapter, depsHash } from '../studio/frames/keys.js';
 import { sha256 } from '../studio/snapshot.js';
 import { tempDir } from './helpers.js';
 
@@ -20,25 +20,48 @@ test('put, has and path; a frame lives at <dir>/<key>/f<i>.jpg', () => {
   expect(cache.path(key('a'), 3)).toBe(join(dir, key('a'), 'f3.jpg'));
   expect(readFileSync(cache.path(key('a'), 3))).toEqual(Buffer.from(jpeg(100)));
   // no dependencies, no sidecar
-  expect(existsSync(join(dir, key('a'), 'f3.deps.json'))).toBe(false);
+  expect(readdirSync(join(dir, key('a')))).toEqual(['f3.jpg']);
   expect(cache.usedBytes()).toBe(100);
-  // replacing a frame doesn't count it twice
-  cache.put(key('a'), 3, jpeg(150), {});
-  expect(cache.usedBytes()).toBe(150);
+  expect(cache.find(key('a'), 3, {})).toEqual({ path: join(dir, key('a'), 'f3.jpg'), depsHash: '-' });
+  expect(cache.find(key('a'), 4, {})).toBeNull();
+});
+
+test('a written frame is never replaced: a path handed out stays valid while its segment is there', () => {
+  const dir = tempDir('cache-'), cache = createCache({ dir, capBytes: 1 });
+  cache.pin(key('render'));
+  const first = cache.put(key('render'), 0, jpeg(100, 1), {});
+  const { ino } = statSync(first.path);
+  // painted again (a repaint of the same segment and dependencies draws the same frame): the file stays as it was
+  expect(cache.put(key('render'), 0, jpeg(120, 2), {})).toEqual(first);
+  expect(readFileSync(first.path)).toEqual(Buffer.from(jpeg(100, 1)));
+  expect(statSync(first.path).ino).toBe(ino);
+  expect(cache.usedBytes()).toBe(100);
+  // with other dependencies it's another file, beside the first
+  const other = cache.put(key('render'), 0, jpeg(100, 3), { 'ch/c03.js': sha256('three') });
+  expect(other.path).not.toBe(first.path);
+  expect(readFileSync(first.path)).toEqual(Buffer.from(jpeg(100, 1)));
+  expect(statSync(first.path).ino).toBe(ino);
 });
 
 test('a frame with dependencies counts as cached only while every listed chapter still has that content', () => {
   const dir = tempDir('cache-'), cache = createCache({ dir, capBytes: 1e9 });
-  const deps = { 'ch/c03_takeoff.js': sha256('three') };
-  cache.put(key('nine'), 3600, jpeg(10), deps);
-  expect(JSON.parse(readFileSync(join(dir, key('nine'), 'f3600.deps.json'), 'utf8'))).toEqual(deps);
+  const deps = { 'ch/c03_takeoff.js': sha256('three') }, h = depsHash(deps);
+  const put = cache.put(key('nine'), 3600, jpeg(10), deps);
+  expect(put).toEqual({ path: join(dir, key('nine'), `f3600-${h}.jpg`), depsHash: h });
+  expect(JSON.parse(readFileSync(join(dir, key('nine'), `f3600-${h}.deps.json`), 'utf8'))).toEqual(deps);
   expect(cache.has(key('nine'), 3600, { 'ch/c03_takeoff.js': sha256('three'), 'ch/c09.js': sha256('nine') })).toBe(true);
   expect(cache.has(key('nine'), 3600, { 'ch/c03_takeoff.js': sha256('three, revised') })).toBe(false);
   expect(cache.has(key('nine'), 3600, {})).toBe(false);
-  // repainted without dependencies: the old sidecar goes
-  cache.put(key('nine'), 3600, jpeg(10), {});
-  expect(existsSync(join(dir, key('nine'), 'f3600.deps.json'))).toBe(false);
-  expect(cache.has(key('nine'), 3600, {})).toBe(true);
+  // the same frame painted for a version with another chapter 3: both variants are kept, each found for its own files
+  const revised = { 'ch/c03_takeoff.js': sha256('three, revised') };
+  const other = cache.put(key('nine'), 3600, jpeg(10, 2), revised);
+  expect(other.path).not.toBe(put.path);
+  expect(cache.find(key('nine'), 3600, { 'ch/c03_takeoff.js': sha256('three') })).toEqual(put);
+  expect(cache.find(key('nine'), 3600, revised)).toEqual(other);
+  // and after a restart
+  const again = createCache({ dir, capBytes: 1e9 });
+  expect(again.find(key('nine'), 3600, { 'ch/c03_takeoff.js': sha256('three') })).toEqual(put);
+  expect(again.find(key('nine'), 3600, revised)).toEqual(other);
 });
 
 test('coverage merges cached frames of the current keys into ranges', () => {
@@ -128,4 +151,38 @@ test('the index in cache.json survives a restart', () => {
   expect(second.has(key('b'), 0, { 'ch/c02.js': sha256('two') })).toBe(false);
   expect(second.has(key('c'), 0, {})).toBe(true);
   expect(second.has(key('a'), 0, {})).toBe(true);
+});
+
+test('on start, the disk wins over the index: missing folders are dropped, unknown ones counted, sizes and leftovers reconciled', () => {
+  const dir = tempDir('cache-');
+  const first = createCache({ dir, capBytes: 1e9 });
+  for (const name of ['a', 'b', 'c']) first.put(key(name), 0, jpeg(100), {});
+  rmSync(join(dir, key('a')), { recursive: true });                               // gone behind the cache's back
+  cpSync(join(dir, key('c')), join(dir, key('d')), { recursive: true });           // a folder the index never saw
+  appendFileSync(join(dir, key('b'), 'f0.jpg'), new Uint8Array(50));              // a size the index would get wrong
+  writeFileSync(join(dir, key('b'), 'f1.jpg.tmp'), jpeg(70));                     // a write a crash cut short
+  writeFileSync(join(dir, 'cache.json.tmp'), '{');
+
+  const second = createCache({ dir, capBytes: 1e9 });
+  expect(second.has(key('a'), 0, {})).toBe(false);
+  expect(second.has(key('d'), 0, {})).toBe(true);
+  expect(second.usedBytes()).toBe(150 + 100 + 100);
+  expect(existsSync(join(dir, key('b'), 'f1.jpg.tmp'))).toBe(false);
+  expect(existsSync(join(dir, 'cache.json.tmp'))).toBe(false);
+  expect(Object.keys(JSON.parse(readFileSync(join(dir, 'cache.json'), 'utf8')).segments).sort()).toEqual([key('b'), key('c'), key('d')].sort());
+  // the unknown folder counts as the least recently used
+  const tight = createCache({ dir, capBytes: 300 });
+  tight.put(key('e'), 0, jpeg(10), {});
+  expect(tight.has(key('d'), 0, {})).toBe(false);
+  expect(tight.has(key('b'), 0, {})).toBe(true);
+});
+
+test('a segment folder deleted while the cache runs is dropped, not an error', () => {
+  const dir = tempDir('cache-'), cache = createCache({ dir, capBytes: 1e9 });
+  cache.put(key('a'), 0, jpeg(100), {});
+  const fresh = createCache({ dir, capBytes: 1e9 });   // hasn't read the folder yet
+  rmSync(join(dir, key('a')), { recursive: true });
+  expect(fresh.has(key('a'), 0, {})).toBe(false);
+  expect(fresh.coverage({ 1: key('a') }, {})).toEqual([]);
+  expect(fresh.usedBytes()).toBe(0);
 });

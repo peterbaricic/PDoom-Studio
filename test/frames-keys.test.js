@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { cpSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FPS, N, chapterOfFrame, framesOfChapter, engineHash, segmentKey, segmentKeys, currentShas, depsOf } from '../studio/frames/keys.js';
+import { FPS, N, chapterOfFrame, framesOfChapter, engineHash, segmentKey, segmentKeys, currentShas, depsOf, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 import { sha256 } from '../studio/snapshot.js';
 import { tempDir } from './helpers.js';
@@ -89,6 +89,31 @@ test('depsOf maps CAST reads to the other chapters that defined them', () => {
   expect(missing['*']).toBe(currentShas(snap)['*']);
   const withNewChapter = { ...snap, files: { ...snap.files, 'ch/c05.js': sha256('5') } };
   expect(currentShas(withNewChapter)['*']).not.toBe(missing['*']);
+});
+
+test('depsOf folds in what the frame\'s chapter, and every chapter it takes an entry from, read while loading', () => {
+  const files = { 'shared.js': sha256('s'), 'ch/c02.js': sha256('2'), 'ch/c05.js': sha256('5'), 'ch/c07.js': sha256('7'), 'ch/c09.js': sha256('9') };
+  const snap = { options: {}, files };
+  const loadReads = {
+    'ch/c09.js': [{ key: 'guest', path: 'ch/c02.js' }],        // const { guest } = CAST, at load
+    'ch/c05.js': [{ key: 'inner', path: 'ch/c07.js' }],        // chapter 5's wrapper took chapter 7's entry at load
+    'ch/c07.js': [],
+    'shared.js': [{ key: 'early', path: null }],               // shared.js loads first and is in every key anyway
+  };
+  expect(depsOf([], snap, 9, loadReads)).toEqual({ 'ch/c02.js': files['ch/c02.js'] });
+  expect(depsOf([{ key: 'wrapper', path: 'ch/c05.js' }], snap, 9, loadReads))
+    .toEqual({ 'ch/c02.js': files['ch/c02.js'], 'ch/c05.js': files['ch/c05.js'], 'ch/c07.js': files['ch/c07.js'] });
+  // another chapter's load-time reads don't concern a frame that takes nothing from it
+  expect(depsOf([], snap, 3, loadReads)).toEqual({});
+});
+
+test('depsHash names a set of dependencies, whatever its key order, and "-" for none', () => {
+  expect(depsHash({})).toBe('-');
+  expect(depsHash(null)).toBe('-');
+  const a = depsHash({ 'ch/c02.js': sha256('2'), 'ch/c03.js': sha256('3') });
+  expect(a).toMatch(/^[0-9a-f]{64}$/);
+  expect(depsHash({ 'ch/c03.js': sha256('3'), 'ch/c02.js': sha256('2') })).toBe(a);
+  expect(depsHash({ 'ch/c02.js': sha256('2') })).not.toBe(a);
 });
 
 // A copy of the files engineHash covers, so one byte can be changed without touching the repo.

@@ -124,17 +124,28 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     ['GET', /^\/thumbs\/(.+)$/, (req, [, p]) => file(req, dirs.thumbs, p, NO_STORE)],
 
     // Frames, painted by the server (chapter code never runs in the user's browser), and the cache they live in: UI
-    // hosts only. A frame's URL names a version, not content, so its ETag is the segment key it was painted under.
+    // hosts only. A frame's URL names a version, not content, so it's revalidated on every use: its ETag names the
+    // frame's content (segment key and the dependencies it was painted with), and a match is answered 304.
     ['GET', /^\/api\/frames\/([a-z0-9-]+)\/(\d+)\.jpg$/, async (req, [, id, i]) => {
       if (onRenderer(req) || !frames || +i >= N) return error(404, 'not found');
       const prio = new URL(req.url).searchParams.get('prio') === 'prefetch' ? 'prefetch' : 'preview';
-      let r = frames.frame(id, +i, prio);
-      if (r.pending) r = await Promise.race([r.pending, Bun.sleep(frameHoldMs).then(() => ({ retry: 'still painting' }))]);
+      // Held while it's painted, up to frameHoldMs; a request that gives up (the client going away, or the hold
+      // running out) is withdrawn from the painting queue.
+      const withdraw = new AbortController(), giveUp = () => withdraw.abort();
+      req.signal?.addEventListener('abort', giveUp);
+      const timer = setTimeout(giveUp, frameHoldMs);
+      let r;
+      try {
+        r = frames.frame(id, +i, prio, { signal: withdraw.signal });
+        if (r.pending) r = await r.pending;
+      } finally { clearTimeout(timer); req.signal?.removeEventListener('abort', giveUp); }
       if (r.missing) return error(404, r.missing);
       if (r.broken) return error(409, r.broken);
       const got = r.file && await frames.read(id, +i);
       if (!got) return new Response(null, { status: 202, headers: { 'retry-after': '1', ...NO_STORE } });
-      return new Response(got.bytes, { headers: { 'content-type': 'image/jpeg', etag: `"${got.key}"`, 'cache-control': 'private, max-age=31536000, immutable' } });
+      const headers = { etag: `"${got.key}.${got.depsHash}"`, 'cache-control': 'private, no-cache' };
+      if ((req.headers.get('if-none-match') || '').split(',').some(t => t.trim().replace(/^W\//, '') === headers.etag)) return new Response(null, { status: 304, headers });
+      return new Response(got.bytes, { headers: { 'content-type': 'image/jpeg', ...headers } });
     }],
     ['GET', /^\/api\/coverage\/([a-z0-9-]+)$/, (req, [, id]) => {
       if (onRenderer(req) || !frames) return error(404, 'not found');

@@ -9,9 +9,9 @@ import { snapshotOf } from '../studio/snapshot.js';
 import { createCache } from '../studio/frames/cache.js';
 import { createPool } from '../studio/frames/pool.js';
 import { createFrameService } from '../studio/frames/service.js';
-import { N, engineHash, segmentKeys, currentShas } from '../studio/frames/keys.js';
+import { N, engineHash, segmentKeys, currentShas, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { tempDir, tempDefaultDb } from './helpers.js';
+import { tempDir, tempDefaultDb, captureHosts } from './helpers.js';
 
 // One sealed painting pool for the file, over a throwaway data root and user database holding small versions whose
 // chapters paint in a few tens of milliseconds (the Original's take up to a second a frame).
@@ -33,9 +33,11 @@ const freePort = () => { const s = Bun.serve({ hostname: '127.0.0.1', port: 0, f
 // A frame through the service, painted if need be.
 const frameOf = async (versionId, i, prio = 'preview') => { const r = service.frame(versionId, i, prio); return r.pending ? r.pending : r; };
 const keysOf = versionId => segmentKeys(snapshotOf(db, versionId), engineHash(root));
+const until = async (check, ms = 20000) => { const end = Date.now() + ms; while (!(await check())) { if (Date.now() > end) throw new Error('timed out waiting'); await Bun.sleep(100); } };
 const at = (host, path, init = {}) => srv.app.fetch(new Request(`http://${host}${path}`, { ...init, headers: { host, ...init.headers } }));
 
-beforeAll(() => {
+let cap;
+beforeAll(async () => {
   data = tempDir();
   db = openDb(join(data, 'user.db'), { defaultPath: tempDefaultDb() });
   fastVersion('tiny');
@@ -61,16 +63,40 @@ beforeAll(() => {
     { path: 'ch/c08.js', content: fastChapter(8, 'Object.keys(CAST);') },
     { path: 'ch/c09_end.js', content: fastChapter(9, 'CAST.guest(); CAST.nobody;') },
   ], { source: 'manual' });
+  // CAST entries taken while loading: chapter 9 takes chapter 2's guest at load; chapter 5 wraps it at load, and
+  // chapter 8 calls the wrapper while painting
+  db.createVersion({ id: 'loadcast' });
+  db.writeFiles('loadcast', [
+    { path: 'ch/c02.js', content: "CAST.guest = () => 1;\n" + fastChapter(2) },
+    { path: 'ch/c05.js', content: "{ const g = CAST.guest; CAST.wrapper = () => g(); }\n" + fastChapter(5) },
+    { path: 'ch/c08.js', content: fastChapter(8, 'CAST.wrapper();') },
+    { path: 'ch/c09.js', content: "const { guest } = CAST;\n" + fastChapter(9, 'guest();') },
+  ], { source: 'manual' });
+  // a chapter whose script never finishes loading
+  db.createVersion({ id: 'hangload' });
+  db.writeFiles('hangload', [
+    { path: 'ch/c01.js', content: fastChapter(1) },
+    { path: 'ch/c03.js', content: 'for (;;) {}' },
+  ], { source: 'manual' });
+  // a chapter that tries to reach other hosts, while loading and while painting
+  cap = await captureHosts(['fetch', 'image', 'open', 'link', 'beacon']);
+  const leak = when => `fetch('${cap.url('fetch')}/${when}', { mode: 'no-cors' }).catch(() => {});
+    new Image().src = '${cap.url('image')}/${when}';
+    try { document.open('${cap.url('open')}/${when}', '_blank', ''); } catch {}
+    { const a = document.createElement('a'); a.href = '${cap.url('link')}/${when}'; a.target = '_blank'; document.body.append(a); a.click(); }
+    try { navigator.sendBeacon('${cap.url('beacon')}/${when}', 'x'); } catch {}`;
+  db.createVersion({ id: 'leaky' });
+  db.writeFiles('leaky', [{ path: 'ch/c01.js', content: leak('load') + '\n' + fastChapter(1, leak('paint')) }], { source: 'manual' });
 
   port = freePort();
   events = createEvents();
   cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: 1e12 });
-  pool = createPool({ port, baseUrl: `http://localhost:${port}`, painters: PAINTERS, paintTimeoutMs: 2000,
+  pool = createPool({ port, baseUrl: `http://localhost:${port}`, painters: PAINTERS, paintTimeoutMs: 2000, brokenTtlMs: 4000,
     onPainted: p => { painted.push(p); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
   service = createFrameService({ db, cache, pool, events, root });
   srv = serve({ db, root, data, token, events, port, frames: service });
 });
-afterAll(async () => { await pool?.close(); srv?.stop(); });
+afterAll(async () => { await pool?.close(); srv?.stop(); cap?.stop(); });
 
 test('a frame is painted once, then served from the cache', async () => {
   const before = pool.stats().painted;
@@ -84,12 +110,15 @@ test('a frame is painted once, then served from the cache', async () => {
   expect(again.file).toBe(a.file);
   expect(pool.stats().painted - before).toBe(1);
 
-  // over HTTP: the JPEG itself, immutable, tagged with its segment key
+  // over HTTP: the JPEG itself, revalidated on every use, tagged with its content (segment key and dependencies)
   const res = await fetch(`${srv.url}/api/frames/tiny/48.jpg`);
   expect(res.status).toBe(200);
   expect(res.headers.get('content-type')).toBe('image/jpeg');
-  expect(res.headers.get('etag')).toBe(`"${keysOf('tiny')[1]}"`);
-  expect(res.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+  expect(res.headers.get('etag')).toBe(`"${keysOf('tiny')[1]}.-"`);
+  expect(res.headers.get('cache-control')).toBe('private, no-cache');
+  const same = await fetch(`${srv.url}/api/frames/tiny/48.jpg`, { headers: { 'if-none-match': res.headers.get('etag') } });
+  expect(same.status).toBe(304);
+  expect(same.headers.get('etag')).toBe(res.headers.get('etag'));
   const jpeg = new Uint8Array(await res.arrayBuffer());
   expect([jpeg[0], jpeg[1]]).toEqual([0xff, 0xd8]);
   expect(jpeg.length).toBeGreaterThan(10000);
@@ -137,12 +166,17 @@ test('the Original\'s curtain call records its CAST reads as dependencies; chang
   const [bows, runOn, curtain, puppet] = [3480, 3375, 3672, 3312];
   const results = await Promise.all([bows, runOn, curtain, puppet].map(i => frameOf('orig', i)));
   for (const r of results) expect(r.file).toBeDefined();
-  const keys = keysOf('orig'), files = snapshotOf(db, 'orig').files;
-  const depsOf = (n, i) => { const f = join(cache.path(keys[n], i).replace(/\.jpg$/, '.deps.json')); return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null; };
-  expect(depsOf(9, bows)).toEqual(Object.fromEntries(['ch/c02_chorus1.js', 'ch/c03_takeoff.js', 'ch/c04_chorus2.js', 'ch/c05_obsolete.js', 'ch/c07_scale.js'].map(p => [p, files[p]])));
+  const keys = keysOf('orig'), files = snapshotOf(db, 'orig').files, shasBefore = currentShas(snapshotOf(db, 'orig'));
+  const depsOf = (n, i) => { const f = cache.find(keys[n], i, shasBefore).path.replace(/\.jpg$/, '.deps.json'); return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null; };
+  const bowsDeps = Object.fromEntries(['ch/c02_chorus1.js', 'ch/c03_takeoff.js', 'ch/c04_chorus2.js', 'ch/c05_obsolete.js', 'ch/c07_scale.js'].map(p => [p, files[p]]));
+  expect(depsOf(9, bows)).toEqual(bowsDeps);
   expect(depsOf(9, runOn)).toEqual({ 'ch/c02_chorus1.js': files['ch/c02_chorus1.js'] });
   expect(depsOf(9, curtain)).toBeNull();
   expect(depsOf(8, puppet)).toEqual({ 'ch/c04_chorus2.js': files['ch/c04_chorus2.js'] });
+  const etagOf = async i => (await fetch(`${srv.url}/api/frames/orig/${i}.jpg`)).headers.get('etag');
+  const [bowsTag, curtainTag] = [await etagOf(bows), await etagOf(curtain)];
+  expect(bowsTag).toBe(`"${keys[9]}.${depsHash(bowsDeps)}"`);
+  expect(curtainTag).toBe(`"${keys[9]}.-"`);
 
   db.writeFiles('orig', [{ path: 'ch/c03_takeoff.js', content: db.getFile('orig', 'ch/c03_takeoff.js').content + '\n// revised' }], { source: 'manual' });
   const after = keysOf('orig'), shas = currentShas(snapshotOf(db, 'orig'));
@@ -154,31 +188,56 @@ test('the Original\'s curtain call records its CAST reads as dependencies; chang
   const ranges = service.coverage('orig').ranges;
   expect(ranges).toContainEqual([runOn, runOn]);
   expect(ranges.some(([a, b]) => a <= bows && bows <= b)).toBe(false);
+  // a browser holding the old frame asks again and gets the new one; the curtain it may keep
+  const fresh = await fetch(`${srv.url}/api/frames/orig/${bows}.jpg`, { headers: { 'if-none-match': bowsTag } });
+  expect(fresh.status).toBe(200);
+  expect(fresh.headers.get('etag')).not.toBe(bowsTag);
+  expect(fresh.headers.get('etag')).toStartWith(`"${keys[9]}.`);
+  expect((await fresh.arrayBuffer()).byteLength).toBeGreaterThan(10000);
+  expect((await fetch(`${srv.url}/api/frames/orig/${curtain}.jpg`, { headers: { 'if-none-match': curtainTag } })).status).toBe(304);
 
   // Another version with the same chapter 9 (so the same segment key) but the old chapter 3, asking for a frame of the
-  // bows (t = 146 s) at the same time: one paint can't serve both, so each gets a frame painted from its own files.
+  // bows (t = 146 s) at the same time: one paint can't serve both, so each gets a frame painted from its own files,
+  // kept side by side.
   db.remixVersion('original', { id: 'orig2' });
   expect(keysOf('orig2')[9]).toBe(keys[9]);
   const bow = 3504, before = pool.stats().painted;
   const both = await Promise.all(['orig', 'orig2'].map(v => frameOf(v, bow, 'prefetch')));
   expect(both.map(r => !!r.file)).toEqual([true, true]);
+  expect(both[0].file).not.toBe(both[1].file);
   expect(pool.stats().painted - before).toBe(2);
-  // one frame file per segment and frame, so the last paint (whichever it was) is the one cached; the other version
-  // doesn't take it for its own, over HTTP either
-  const valid = ['orig', 'orig2'].filter(v => cache.has(keys[9], bow, currentShas(snapshotOf(db, v))));
-  expect(valid).toHaveLength(1);
-  const other = valid[0] === 'orig' ? 'orig2' : 'orig';
-  expect(await service.read(other, bow)).toBeNull();
-  expect((await service.read(valid[0], bow)).key).toBe(keys[9]);
-  expect((await fetch(`${srv.url}/api/frames/${other}/${bow}.jpg`)).status).toBe(200);   // repainted for it
-  expect(cache.has(keys[9], bow, currentShas(snapshotOf(db, other)))).toBe(true);
+  for (const [k, v] of ['orig', 'orig2'].entries()) {
+    expect(cache.find(keys[9], bow, currentShas(snapshotOf(db, v))).path).toBe(both[k].file);
+    const deps = JSON.parse(readFileSync(both[k].file.replace(/\.jpg$/, '.deps.json'), 'utf8'));
+    expect(deps['ch/c03_takeoff.js']).toBe(snapshotOf(db, v).files['ch/c03_takeoff.js']);
+    const got = await fetch(`${srv.url}/api/frames/${v}/${bow}.jpg`);
+    expect(got.status).toBe(200);
+    expect(Buffer.from(await got.arrayBuffer())).toEqual(readFileSync(both[k].file));
+  }
+  expect(pool.stats().painted - before).toBe(2);
+}, T);
+
+test('CAST entries a chapter takes while loading are dependencies of its frames, through wrappers too', async () => {
+  const [nine, eight, two] = [3500, 3100, 600];
+  for (const r of await Promise.all([nine, eight, two].map(i => frameOf('loadcast', i, 'prefetch')))) expect(r.file).toBeDefined();
+  const keys = keysOf('loadcast'), shas = currentShas(snapshotOf(db, 'loadcast'));
+  const deps = (n, i) => JSON.parse(readFileSync(cache.find(keys[n], i, shas).path.replace(/\.jpg$/, '.deps.json'), 'utf8'));
+  expect(deps(9, nine)).toEqual({ 'ch/c02.js': shas['ch/c02.js'] });
+  expect(deps(8, eight)).toEqual({ 'ch/c05.js': shas['ch/c05.js'], 'ch/c02.js': shas['ch/c02.js'] });
+  // revising the chapter that defined the guest: frames that took it, directly or wrapped, go; its own stay
+  db.writeFiles('loadcast', [{ path: 'ch/c02.js', content: "CAST.guest = () => 2;\n" + fastChapter(2) }], { source: 'manual' });
+  const now = currentShas(snapshotOf(db, 'loadcast'));
+  expect(keysOf('loadcast')[9]).toBe(keys[9]);
+  expect(cache.has(keys[9], nine, now)).toBe(false);
+  expect(cache.has(keys[8], eight, now)).toBe(false);
+  expect(service.coverage('loadcast').ranges).toEqual([]);   // chapter 2's own key changed, the rest depended on it
 }, T);
 
 test('reading a CAST entry nobody defined, or listing them, depends on the whole set of chapters', async () => {
   const [nine, eight] = [3500, 3100];
   for (const r of await Promise.all([nine, eight].map(i => frameOf('casty', i, 'prefetch')))) expect(r.file).toBeDefined();
   const keys = keysOf('casty'), shas = currentShas(snapshotOf(db, 'casty'));
-  const deps = (n, i) => JSON.parse(readFileSync(cache.path(keys[n], i).replace(/\.jpg$/, '.deps.json'), 'utf8'));
+  const deps = (n, i) => JSON.parse(readFileSync(cache.find(keys[n], i, shas).path.replace(/\.jpg$/, '.deps.json'), 'utf8'));
   expect(deps(9, nine)).toEqual({ 'ch/c02.js': shas['ch/c02.js'], '*': shas['*'] });
   // listing them reads each listed entry's descriptor too, so chapter 2's guest counts as well
   expect(deps(8, eight)).toEqual({ 'ch/c02.js': shas['ch/c02.js'], '*': shas['*'] });
@@ -214,9 +273,49 @@ test('a chapter that throws, one that never finishes and one whose script throws
   expect((await frameOf('bad', 25)).file).toBeDefined();
   expect((await frameOf('tiny', 100)).file).toBeDefined();
 
+  // a timeout might be a one-off: it's tried again once brokenTtlMs (4 s here) has passed; the chapter's own error stays
+  await until(() => !service.frame('bad', 1201, 'prefetch').broken, 10000);
+  expect(service.frame('bad', 601).broken).toBe('chapter two is broken');
+  expect((await frameOf('bad', 1201, 'prefetch')).broken).toBe('painting frame 1201 took over 2 s');
+
   // fixed, the chapter paints again
   db.writeFiles('bad', [{ path: 'ch/c02.js', content: fastChapter(2) }], { source: 'manual' });
   expect((await frameOf('bad', 601)).file).toBeDefined();
+}, T);
+
+test('a chapter that never finishes loading breaks only itself, fails fast after that, and holds no more than one page', async () => {
+  // a pool of its own, with a short load timeout (the shared one keeps the default, so a slow machine's loads aren't
+  // taken for hangs)
+  const own = createPool({ port, baseUrl: `http://localhost:${port}`, painters: PAINTERS, loadTimeoutMs: 5000,
+    onPainted: p => cache.put(p.key, p.frame, p.jpeg, p.deps) });
+  const svc = createFrameService({ db, cache, pool: own, events, root });
+  const get = async (v, i, prio = 'prefetch') => { const r = svc.frame(v, i, prio); return r.pending ? r.pending : r; };
+  try {
+    const t0 = Date.now();
+    const hangs = get('hangload', 1200), fine = get('hangload', 24);
+    await Bun.sleep(200);
+    // meanwhile another version's preview paints: the hanging load holds one page, not every one
+    const p0 = Date.now();
+    expect((await get('tiny', 130, 'preview')).file).toBeDefined();
+    expect(Date.now() - p0).toBeLessThan(4000);
+    expect((await hangs).broken).toBe('chapter 3 did not finish loading within 5 s');
+    // the version's other chapters load without it and paint
+    expect((await fine).file).toBeDefined();
+    expect(Date.now() - t0).toBeLessThan(30000);
+    // and from now on the chapter fails at once, without loading a page
+    const loads = own.stats().loads, t1 = Date.now();
+    expect((await get('hangload', 1201)).broken).toBe('chapter 3 did not finish loading within 5 s');
+    expect(svc.frame('hangload', 1202).broken).toBe('chapter 3 did not finish loading within 5 s');
+    expect(Date.now() - t1).toBeLessThan(500);
+    expect(own.stats().loads).toBe(loads);
+    expect(svc.coverage('hangload').broken).toEqual([{ chapter: 3, error: 'chapter 3 did not finish loading within 5 s' }]);
+  } finally { await own.close(); }
+}, T);
+
+test('a chapter cannot reach another host from a painting page, while loading or painting', async () => {
+  expect((await frameOf('leaky', 30, 'prefetch')).file).toBeDefined();
+  await Bun.sleep(1500);
+  expect(cap.hits).toEqual({});
 }, T);
 
 test('rapid preview requests supersede each other: at most one queued per version, and the latest painted first (Review Focus 3)', async () => {
@@ -244,6 +343,20 @@ test('a render backlog delays a preview request by at most the frame being paint
     const fill = svc.fillForRender('tiny', null, { from: 300, to: 319 });
     const preview = svc.frame('tiny', 400, 'preview');
     expect(one.stats().queued.filter(q => q.prio === 'render').length).toBe(19);   // one is already being painted
+    // a request withdrawn (its client gone) leaves the queue at once
+    const withdraw = new AbortController();
+    const gone = svc.frame('tiny', 410, 'prefetch', { signal: withdraw.signal });
+    expect(one.stats().queued.some(q => q.frame === 410)).toBe(true);
+    withdraw.abort();
+    expect(one.stats().queued.some(q => q.frame === 410)).toBe(false);
+    expect((await gone.pending).retry).toBe('cancelled');
+    // prefetch queues are bounded per version: the newest 240 stay
+    const many = Array.from({ length: 300 }, (_, k) => svc.frame('tiny', 1000 + k, 'prefetch'));
+    const queuedPrefetch = one.stats().queued.filter(q => q.prio === 'prefetch' && q.versionId === 'tiny');
+    expect(queuedPrefetch).toHaveLength(240);
+    expect(Math.min(...queuedPrefetch.map(q => q.frame))).toBe(1060);
+    expect((await many[0].pending).retry).toContain('superseded');
+    svc.prefetch('tiny', 0, 0);   // drops the version's queued prefetch again, to get on with the test
     await preview.pending;
     expect(onePainted.indexOf(400)).toBeLessThanOrEqual(1);
     const { files, release } = await fill;
@@ -267,8 +380,8 @@ test('a request held past the hold time is answered 202, to be asked again', asy
   const res = await get('/api/frames/slow/48.jpg');
   expect(res.status).toBe(202);
   expect(res.headers.get('retry-after')).toBe('1');
-  await Bun.sleep(3000);
-  expect((await get('/api/frames/slow/48.jpg')).status).toBe(200);
+  // painting went on (the request was already being painted): asked again, it's there
+  await until(async () => (await get('/api/frames/slow/48.jpg')).status === 200);
 }, T);
 
 test('missing versions, chapters and frames are 404s', async () => {

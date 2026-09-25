@@ -2,25 +2,32 @@
 // engine options. ?v=<id> loads a version from the database, ?work=<jobId> a job's work folder, ?snapshot=<id> a
 // content-addressed snapshot (its scripts are already full /api/blob/<sha> URLs); default: the original.
 // CAST: guest characters shared between chapters (e.g. for the curtain call). With ?record-cast (the studio's painting
-// pool, studio/frames/pool.js), it remembers which script defined each entry, and window.castRecorder collects the
-// entries a painted frame reads (paintAt in core.js returns them), so the frame cache knows which other chapters a
-// frame depends on: { key, path } for each, path being the defining script's, or null for an entry no script defined.
+// pool, studio/frames/pool.js), it remembers which script defined each entry and which entries each script read while
+// it loaded (a chapter can take an entry at load time: `const { guest } = CAST`), and window.castRecorder collects
+// the entries a painted frame reads (paintAt in core.js returns them), so the frame cache knows which other chapters
+// a frame depends on. A read is { key, path }, path being the defining script's, or null for an entry no script
+// defined (or for listing the entries, which depends on which exist at all).
 const CAST = new URLSearchParams(location.search).has('record-cast') ? (() => {
-  const definedBy = new Map();
+  const definedBy = new Map(), loadReads = new Map();
   let loading = null, reads = null;
+  const list = m => [...m].map(([key, path]) => ({ key, path }));
   window.castRecorder = {
-    loading(path) { loading = path; },
+    loading(path) { loading = path; if (path && !loadReads.has(path)) loadReads.set(path, new Map()); },
     begin() { reads = new Map(); },
-    end() { const r = [...(reads || [])].map(([key, path]) => ({ key, path })); reads = null; return r; },
+    end() { const r = list(reads || []); reads = null; return r; },
+    loadReads() { return Object.fromEntries([...loadReads].map(([path, m]) => [path, list(m)])); },
   };
-  const read = (o, k) => { if (reads && typeof k === 'string') reads.set(k, Object.hasOwn(o, k) ? definedBy.get(k) ?? null : null); };
+  const note = (k, path) => {
+    const into = reads || (loading && loadReads.get(loading));
+    if (into) into.set(k, path);
+  };
+  const read = (o, k) => { if (typeof k === 'string') note(k, Object.hasOwn(o, k) ? definedBy.get(k) ?? null : null); };
   const define = k => { if (typeof k === 'string') definedBy.set(k, loading); };
   return new Proxy({}, {
     get(o, k) { read(o, k); return Reflect.get(o, k); },
     has(o, k) { read(o, k); return Reflect.has(o, k); },
     getOwnPropertyDescriptor(o, k) { read(o, k); return Reflect.getOwnPropertyDescriptor(o, k); },
-    // Listing the entries depends on which exist at all, like reading one nobody defined.
-    ownKeys(o) { if (reads) reads.set('(all entries)', null); return Reflect.ownKeys(o); },
+    ownKeys(o) { note('(all entries)', null); return Reflect.ownKeys(o); },
     set(o, k, v) { define(k); return Reflect.set(o, k, v); },
     defineProperty(o, k, d) { define(k); return Reflect.defineProperty(o, k, d); },
   });

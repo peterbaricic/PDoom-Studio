@@ -27,6 +27,12 @@ const data = process.env.STUDIO_DATA ? resolve(process.env.STUDIO_DATA) : root;
 const userPath = process.env.USER_DB || process.env.STUDIO_DB || join(data, 'user.db');
 const defaultPath = process.env.DEFAULT_DB || join(root, 'studio/default.db');
 
+// The frame cache's cap in GB (default 5) and the number of painting pages (default 3): refused if they aren't sane,
+// rather than silently running with a cache of NaN bytes or no painter at all.
+const cacheGb = Number(process.env.STUDIO_CACHE_GB ?? 5), painters = Number(process.env.STUDIO_PAINTERS ?? 3);
+if (!(Number.isFinite(cacheGb) && cacheGb > 0)) { console.error(`STUDIO_CACHE_GB must be a positive number of gigabytes, not "${process.env.STUDIO_CACHE_GB}"`); process.exit(1); }
+if (!(Number.isInteger(painters) && painters >= 1 && painters <= 8)) { console.error(`STUDIO_PAINTERS must be a whole number from 1 to 8, not "${process.env.STUDIO_PAINTERS}"`); process.exit(1); }
+
 // Refuse to start rather than silently running with no examples: a missing default.db almost certainly means a
 // misconfigured DEFAULT_DB, not an intentionally examples-free studio.
 if (!existsSync(defaultPath)) {
@@ -55,8 +61,8 @@ const claude = createClaudeRunner({ db, root, data, baseUrl, events });
 const { render, thumbs } = createRenderRunner({ db, root, data, baseUrl, events });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 // Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
-const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: +(process.env.STUDIO_CACHE_GB || 5) * 1e9 });
-const pool = createPool({ port, baseUrl, painters: +(process.env.STUDIO_PAINTERS || 3), onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
+const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
+const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root });
 const srv = serve({ db, root, data, token, queue, events, port, frames });
 // Stopping, close the painting browser too (at most a few seconds' wait), so it doesn't outlive the studio.

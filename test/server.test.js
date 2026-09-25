@@ -51,6 +51,24 @@ test('refuses to start when DEFAULT_DB does not exist', async () => {
   expect(err).toContain('no examples database');
 }, { timeout: 30000 });
 
+test('refuses to start with a frame cache cap or a painter count that makes no sense', async () => {
+  const userPath = join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db');
+  for (const [extra, message] of [
+    [{ STUDIO_CACHE_GB: 'lots' }, 'STUDIO_CACHE_GB must be a positive number'],
+    [{ STUDIO_CACHE_GB: '0' }, 'STUDIO_CACHE_GB must be a positive number'],
+    [{ STUDIO_CACHE_GB: '-1' }, 'STUDIO_CACHE_GB must be a positive number'],
+    [{ STUDIO_PAINTERS: '0' }, 'STUDIO_PAINTERS must be a whole number from 1 to 8'],
+    [{ STUDIO_PAINTERS: '2.5' }, 'STUDIO_PAINTERS must be a whole number from 1 to 8'],
+    [{ STUDIO_PAINTERS: '9' }, 'STUDIO_PAINTERS must be a whole number from 1 to 8'],
+  ]) {
+    const p = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { env: envFor(userPath, extra), stdout: 'ignore', stderr: 'pipe' });
+    const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+    expect(code).toBe(1);
+    expect(err).toContain(message);
+  }
+  expect(existsSync(userPath)).toBe(false);   // refused before anything was opened
+}, { timeout: 30000 });
+
 test('a second server on the same USER_DB refuses to start', async () => {
   const userPath = join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db');
   const first = await start(userPath);
