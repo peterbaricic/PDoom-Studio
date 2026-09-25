@@ -7,8 +7,9 @@ import { versionManifest, workManifest } from './versions.js';
 import { parseStoryboard } from './storyboard.js';
 import { isValidPath } from './db.js';
 
-// Repo files anyone may load: the player, the shared engine, the libraries and the song. Nothing else.
-const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/];
+// Repo files anyone may load: the player, the shared engine, the libraries, the song and the bundled fonts. Nothing else.
+const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
+  /^assets\/fonts\/[\w.-]+\.(?:css|woff2)$/];
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
 const CLAUDE_KINDS = ['storyboard', 'shared', 'chapter'];   // the kinds that write the version's files
@@ -32,7 +33,7 @@ const NO_STORE = { 'cache-control': 'no-store' };
 // beforeunload guard.
 const onRenderer = req => /^w\d+\.localhost:\d+$/.test(req.headers.get('host') || '');
 const studioCsp = port => ["default-src 'self'", "script-src 'self'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com", "font-src 'self' https://fonts.gstatic.com",
+  "style-src 'self' 'unsafe-inline'", "font-src 'self'",
   "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'", "worker-src 'none'", "frame-src 'none'", "object-src 'none'",
   "form-action 'none'", "base-uri 'none'",
   `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`,
@@ -235,6 +236,11 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
         catch (e) { return e.message === 'examples are read-only' ? error(403, 'examples are read-only — remix it first') : error(500, e.message); }
       }
     }
+    // Test-only: simulates the font files failing to load (fonts.css itself still loads, so the @font-face rules
+    // are registered — 404ing fonts.css instead would leave document.fonts with no matching face at all, and
+    // document.fonts.check() trivially returns true for a family it has never heard of), so render.mjs --check can
+    // be proven to fail on a missing font.
+    if (process.env.STUDIO_TEST_BREAK_FONTS && /^\/assets\/fonts\/.*\.woff2$/.test(path)) return error(404, 'not found');
     if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC.some(r => r.test(path.slice(1)))) return file(req, root, path.slice(1));
     return error(404, 'not found');
   };

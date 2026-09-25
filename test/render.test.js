@@ -55,6 +55,13 @@ test('check fails cleanly instead of crashing when the page cannot be reached', 
   expect(r.err).toContain('CHECK FAILED');
 }, T);
 
+test('check fails when the bundled fonts fail to load', async () => {
+  const r = await spawn(['bun', 'render.mjs', '--check=load'], { env: isolatedEnv(undefined, { STUDIO_TEST_BREAK_FONTS: '1' }) });
+  expect(r.code).toBe(1);
+  expect(r.err).toContain('CHECK FAILED');
+  expect(r.err).toContain('font not loaded');
+}, T);
+
 test('renders a short range of frames and encodes it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'frames-'));
   const f = await run('--frames=40:40.5', '--workers=2', `--frames-dir=${dir}`);
@@ -88,7 +95,7 @@ test('the synthetic key press that arms the navigation guard does not perturb th
 test('the network lockdown leaves the picture as it was: stills match the same frames painted without it, byte for byte', async () => {
   // render.mjs's browser (dead proxy, WebRTC policy, resolver rules, request interception, the guard gesture) against a
   // browser launched with the GPU flags alone, both painting the Original from the same server code. If anything in
-  // the lockdown kept something the picture needs from loading (Google Fonts, above all), the typefaces would differ.
+  // the lockdown kept something the picture needs from loading (the bundled fonts, above all), the typefaces would differ.
   const dir = mkdtempSync(join(tmpdir(), 'locked-')), times = [5, 40, 90, 150];
   const r = await run(`--stills=${times.join(',')}`, `--out=${dir}`);
   expect(r.code).toBe(0);

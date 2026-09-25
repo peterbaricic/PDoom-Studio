@@ -184,7 +184,13 @@ async function setup() {
   brush.scaleBrushes(5); defineBrushes();
   paperG = makePaper(); grainC = makeGrain(); letG = createGraphics(W, H); letG.pixelDensity(1);
   outC = document.getElementById('out'); outX = outC.getContext('2d');
-  await Promise.all([document.fonts.load('100px "Permanent Marker"'), document.fonts.load('800 50px "Shantell Sans"')]);
+  const FONTS = [['100px "Permanent Marker"', 'Permanent Marker'], ['800 50px "Shantell Sans"', 'Shantell Sans']];
+  // The fonts are bundled (assets/fonts/fonts.css). document.fonts.load() rejects if a declared @font-face's file
+  // fails to fetch, so that rejection alone is caught rather than trusted: a missing font must still fail loudly,
+  // which is what the explicit check() below is for (and check() is what actually needs to be true for the letters
+  // in drawLetters() to render as the real typeface instead of silently falling back to a system font).
+  await Promise.all(FONTS.map(([spec]) => document.fonts.load(spec))).catch(() => {});
+  for (const [spec, family] of FONTS) if (!document.fonts.check(spec)) { window.loadError = `font not loaded: ${family}`; break; }
   // The version's chapters arrive from the server; a failure is reported, not hidden, but the page still becomes ready.
   // Re-applying the manifest to window.VERSION here (rather than trusting loader.js's early assignment) matters:
   // p5's global-mode init runs right before setup() and reassigns its own `VERSION` global, clobbering ours.

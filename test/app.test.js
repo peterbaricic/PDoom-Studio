@@ -72,8 +72,10 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   const csp = Object.fromEntries(res.headers.get('content-security-policy').split(';').map(d => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
   expect(csp['default-src']).toEqual(["'self'"]);
   expect(csp['script-src']).toEqual(["'self'"]);
-  expect(csp['style-src']).toEqual(["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']);
-  expect(csp['font-src']).toEqual(["'self'", 'https://fonts.gstatic.com']);
+  expect(csp['style-src']).toEqual(["'self'", "'unsafe-inline'"]);
+  expect(csp['font-src']).toEqual(["'self'"]);
+  expect(res.headers.get('content-security-policy')).not.toContain('fonts.googleapis.com');
+  expect(res.headers.get('content-security-policy')).not.toContain('fonts.gstatic.com');
   expect(csp['img-src']).toEqual(["'self'", 'data:', 'blob:']);
   expect(csp['connect-src']).toEqual(["'self'"]);
   expect(csp['media-src']).toEqual(["'self'"]);
@@ -153,6 +155,21 @@ test('serves engine files but nothing private', async () => {
   expect((await get('/src/core.js')).status).toBe(200);
   expect((await get('/node_modules/p5/lib/p5.min.js')).status).toBe(200);
   for (const p of ['/studio.db', '/.git/config', '/package.json', '/studio/db.js', '/src/../package.json']) expect((await get(p)).status).toBe(404);
+});
+
+test('the bundled fonts are served on both the studio and renderer hosts, with their content types', async () => {
+  for (const host of ['localhost:8080', 'w0.localhost:8080']) {
+    const css = await getOn(host, '/assets/fonts/fonts.css');
+    expect(css.status).toBe(200);
+    expect(css.headers.get('content-type')).toContain('text/css');
+    expect(await css.text()).toContain('Permanent Marker');
+    for (const [file, family] of [['PermanentMarker-Regular.woff2', 'Permanent Marker'], ['ShantellSans-ExtraBold.woff2', 'Shantell Sans']]) {
+      const font = await getOn(host, `/assets/fonts/${file}`);
+      expect([family, font.status, font.headers.get('content-type')]).toEqual([family, 200, 'font/woff2']);
+    }
+  }
+  // license texts and anything else in the folder are not served
+  expect((await get('/assets/fonts/LICENSE-PermanentMarker.txt')).status).toBe(404);
 });
 
 test('changes need the token', async () => {

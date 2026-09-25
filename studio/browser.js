@@ -1,5 +1,5 @@
 // browser.js: find a Chromium-based browser and launch it headless with the GPU flags the renderer needs, cut off from
-// every host but the studio's own server and Google Fonts.
+// every host but the studio's own server.
 // Order: an explicit path, $CHROME_PATH (unless fromEnv is false), an installed Chrome/Chromium/Edge/Brave, then a
 // standalone chrome-headless-shell (`bun run get-browser` puts one in .browsers/; Puppeteer's and Playwright's caches too).
 import puppeteer from 'puppeteer-core';
@@ -50,25 +50,26 @@ export const gpuArgs = (angle = ANGLE) => ['--ignore-gpu-blocklist', ...(angle ?
 // order and win over the catch-all MAP that follows, so they have to come first. IP literals go through these rules
 // too (verified: without its EXCLUDE, 127.0.0.1 fails with ERR_NAME_NOT_RESOLVED), so any address but the two loopback
 // ones is refused as well; an IPv6 literal is matched without its brackets (`[::1]` never matches, `::1` does).
-export const HOST_RESOLVER_RULES = ['localhost', '*.localhost', '127.0.0.1', '::1', 'fonts.googleapis.com', 'fonts.gstatic.com']
+export const HOST_RESOLVER_RULES = ['localhost', '*.localhost', '127.0.0.1', '::1']
   .map(h => `EXCLUDE ${h}`).concat('MAP * ~NOTFOUND').join(', ');
 
-// Version code must not reach any host but this studio (and Google Fonts, whose stylesheet studio.html loads).
-// studio.html's policy and sandbox and render.mjs's request interception and popup and navigation guards each close
-// some ways out, but none closes them all: <link rel=prerender> and preconnect, and WebRTC's TURN over TCP, go around
-// the page and its policy altogether, and so, before the sandbox, did popups (their requests aren't the page's to
-// intercept). So the network stack itself is closed: every connection goes to a proxy that isn't there (127.0.0.1:9,
-// the discard port, where nothing normally listens), except to the studio's own port on loopback and to Google Fonts, which go
-// direct. Chrome sends everything on loopback direct by default, whatever the port — <-loopback> turns that
-// off, so that only the studio's port is reachable, not every other service on this machine. (Verified against
-// Chrome: without <-loopback>, 127.0.0.1, localhost and *.localhost on another port all bypass the proxy; with it and
-// these port-pinned entries, only the studio's port and the fonts load, and anything else fails with
-// ERR_PROXY_CONNECTION_FAILED.) The WebRTC policy keeps WebRTC to proxied TCP (it needs both: without the policy,
-// STUN over UDP still gets out past the proxy; without the proxy, TURN over TCP gets out past the policy), and
-// host-resolver-rules stays as a second layer under the proxy. `port` is the studio server's.
+// Version code must not reach any host but this studio (the fonts studio.html uses are bundled in assets/fonts/, so
+// no exception is needed for Google Fonts any more). studio.html's policy and sandbox and render.mjs's request
+// interception and popup and navigation guards each close some ways out, but none closes them all: <link
+// rel=prerender> and preconnect, and WebRTC's TURN over TCP, go around the page and its policy altogether, and so,
+// before the sandbox, did popups (their requests aren't the page's to intercept). So the network stack itself is
+// closed: every connection goes to a proxy that isn't there (127.0.0.1:9, the discard port, where nothing normally
+// listens), except to the studio's own port on loopback, which goes direct. Chrome sends everything on loopback
+// direct by default, whatever the port — <-loopback> turns that off, so that only the studio's port is reachable,
+// not every other service on this machine. (Verified against Chrome: without <-loopback>, 127.0.0.1, localhost and
+// *.localhost on another port all bypass the proxy; with it and these port-pinned entries, only the studio's port
+// loads, and anything else fails with ERR_PROXY_CONNECTION_FAILED.) The WebRTC policy keeps WebRTC to proxied TCP
+// (it needs both: without the policy, STUN over UDP still gets out past the proxy; without the proxy, TURN over TCP
+// gets out past the policy), and host-resolver-rules stays as a second layer under the proxy. `port` is the studio
+// server's.
 export function isolationArgs(port) {
   if (!(Number.isInteger(+port) && +port > 0 && +port < 65536)) throw new Error(`isolationArgs needs the studio server's port, not ${port}`);
-  const direct = ['<-loopback>', ...['localhost', '*.localhost', '127.0.0.1', '[::1]'].map(h => `${h}:${+port}`), 'fonts.googleapis.com', 'fonts.gstatic.com'];
+  const direct = ['<-loopback>', ...['localhost', '*.localhost', '127.0.0.1', '[::1]'].map(h => `${h}:${+port}`)];
   return ['--proxy-server=http://127.0.0.1:9', '--proxy-bypass-list=' + direct.join(';'),
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--host-resolver-rules=' + HOST_RESOLVER_RULES];

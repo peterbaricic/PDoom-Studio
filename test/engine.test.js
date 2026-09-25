@@ -39,7 +39,19 @@ test('loads the original by default on w0.localhost and renders a frame, within 
   await page.close();
 }, T);
 
-test('the launched browser goes direct only to the studio port and Google Fonts; everything else hits a dead proxy', async () => {
+test('the bundled fonts load, and studio.html makes no request to any non-loopback host', async () => {
+  const page = await browser.newPage(), requests = [];
+  page.on('request', r => requests.push(r.url()));
+  await page.goto(`${srv.url}/studio.html?render`);
+  await page.waitForFunction('window.ready === true', { timeout: 60000 });
+  expect(await page.evaluate(() => window.loadError || null)).toBeNull();
+  expect(await page.evaluate(() => [document.fonts.check('100px "Permanent Marker"'), document.fonts.check('800 50px "Shantell Sans"')])).toEqual([true, true]);
+  const hosts = requests.map(u => new URL(u).hostname);
+  expect(hosts.every(h => h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.endsWith('.localhost'))).toBe(true);
+  await page.close();
+}, T);
+
+test('the launched browser goes direct only to the studio port; everything else hits a dead proxy', async () => {
   const cap = await captureHosts(['other-port']), otherPort = cap.port('other-port');
   const probe = await browser.newPage();
   await probe.goto(`${srv.url}/api/health`);   // any page on the studio's own origin
@@ -56,14 +68,14 @@ test('the launched browser goes direct only to the studio port and Google Fonts;
     `[::1]:${otherPort} net::ERR_PROXY_CONNECTION_FAILED`, `localhost:${otherPort} net::ERR_PROXY_CONNECTION_FAILED`,
     `w1.localhost:${otherPort} net::ERR_PROXY_CONNECTION_FAILED`].sort());
   for (const h of ['localhost', 'w0.localhost', 'w7.localhost', '127.0.0.1', '[::1]']) expect(await tryFetch(`http://${h}:${srv.port}/src/core.js`)).toBe('ok');
-  expect(await tryFetch('https://fonts.googleapis.com/')).toBe('ok');
-  expect(await tryFetch('https://fonts.gstatic.com/')).toBe('ok');
+  expect(await tryFetch('https://fonts.googleapis.com/')).toBe('failed');
+  expect(await tryFetch('https://fonts.gstatic.com/')).toBe('failed');
   await probe.close();
   cap.stop();
   expect(cap.hits).toEqual({});
 }, T);
 
-test('behind the proxy, --host-resolver-rules still refuses to resolve hosts outside the allow-list', async () => {
+test('behind the proxy, --host-resolver-rules still refuses to resolve any host outside the allow-list', async () => {
   // The proxy means Chrome never resolves a proxied host itself, so the rules can't be seen at work through the
   // launched browser; they're checked on their own here (and that launchBrowser passes them, below).
   const bare = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: ['--host-resolver-rules=' + HOST_RESOLVER_RULES] });
@@ -72,21 +84,21 @@ test('behind the proxy, --host-resolver-rules still refuses to resolve hosts out
     await probe.goto('about:blank');
     const failures = [];
     probe.on('requestfailed', r => failures.push(r.failure()?.errorText));
-    const host = `probe-${Date.now()}-${Math.random().toString(36).slice(2)}.example`;
-    await probe.evaluate(h => fetch(`https://${h}/`, { mode: 'no-cors' }).catch(() => {}), host);
-    expect(failures).toEqual(['net::ERR_NAME_NOT_RESOLVED']);
-    expect(await probe.evaluate(() => fetch('https://fonts.googleapis.com/', { mode: 'no-cors' }).then(() => 'ok', e => e.message))).toBe('ok');
-    expect(await probe.evaluate(() => fetch('https://fonts.gstatic.com/', { mode: 'no-cors' }).then(() => 'ok', e => e.message))).toBe('ok');
+    for (const host of [`probe-${Date.now()}-${Math.random().toString(36).slice(2)}.example`, 'fonts.googleapis.com', 'fonts.gstatic.com']) {
+      await probe.evaluate(h => fetch(`https://${h}/`, { mode: 'no-cors' }).catch(() => {}), host);
+    }
+    expect(failures).toEqual(['net::ERR_NAME_NOT_RESOLVED', 'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_NAME_NOT_RESOLVED']);
   } finally {
     await bare.close();
   }
   expect(browser.process().spawnargs).toContain('--host-resolver-rules=' + HOST_RESOLVER_RULES);
 }, T);
 
-test('a chapter cannot leak data through dns-prefetch/preconnect, and Google Fonts still loads through the same lockdown', async () => {
-  // Chrome's net-log records every lookup its host resolver makes: the chapter's hostnames must never reach it (the
-  // proxy means none is needed, and the resolver rules would answer NOTFOUND without a real query), while Google
-  // Fonts' do — which shows the log really does record lookups. The same flags as launchBrowser, plus the log.
+test('a chapter cannot leak data through dns-prefetch/preconnect, under the same network lockdown that loads the bundled fonts', async () => {
+  // Chrome's net-log records every lookup its host resolver makes: the chapter's injected hostname must never reach
+  // it (the proxy means none is needed, and the resolver rules would answer NOTFOUND without a real query), while a
+  // lookup for the studio's own loopback host does — which shows the log really does record lookups. The same flags
+  // as launchBrowser, plus the log.
   const host = `leak-${Date.now()}-${Math.random().toString(36).slice(2)}.example`, netlog = join(tempDir('netlog-'), 'net.json');
   db.createVersion({ id: 'dns-probe' });
   db.writeFiles('dns-probe', [{ path: 'ch/c01.js', content: [
@@ -98,8 +110,9 @@ test('a chapter cannot leak data through dns-prefetch/preconnect, and Google Fon
   try {
     const { page, errors } = await open('v=dns-probe', logged);
     expect(errors).toEqual([]);
-    // core.js's setup() awaits document.fonts.load() for both families before window.ready is ever set, so getting
-    // here at all already proves Google Fonts loaded through the lockdown; this double-checks the faces are usable.
+    // core.js's setup() checks document.fonts.check() for both families and sets window.loadError on failure, so
+    // this proves the bundled fonts loaded through the lockdown and the faces are usable.
+    expect(await page.evaluate(() => window.loadError || null)).toBeNull();
     expect(await page.evaluate(() => [document.fonts.check('100px "Permanent Marker"'), document.fonts.check('800 50px "Shantell Sans"')])).toEqual([true, true]);
     await Bun.sleep(500);
   } finally {
@@ -109,7 +122,7 @@ test('a chapter cannot leak data through dns-prefetch/preconnect, and Google Fon
   const types = Object.fromEntries(Object.entries(log.constants.logEventTypes).map(([name, id]) => [id, name]));
   const looked = log.events.filter(e => types[e.type]?.startsWith('HOST_RESOLVER') && e.params).map(e => JSON.stringify(e.params));
   expect(looked.filter(p => p.includes(host))).toEqual([]);
-  expect(looked.some(p => p.includes('fonts.googleapis.com'))).toBe(true);
+  expect(looked.some(p => p.includes('localhost'))).toBe(true);
 }, T);
 
 test('loads a database version with its engine options', async () => {

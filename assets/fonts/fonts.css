@@ -1,0 +1,17 @@
+/* Bundled fonts: Permanent Marker (Apache 2.0, LICENSE-PermanentMarker.txt) and Shantell Sans at weight 800
+   (SIL OFL 1.1, LICENSE-ShantellSans.txt), the latin subsets from Google Fonts. Loaded locally so the render
+   browser needs no network access beyond the studio's own port. */
+@font-face {
+  font-family: 'Permanent Marker';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('PermanentMarker-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Shantell Sans';
+  font-style: normal;
+  font-weight: 800;
+  font-display: block;
+  src: url('ShantellSans-ExtraBold.woff2') format('woff2');
+}
