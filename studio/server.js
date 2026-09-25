@@ -57,13 +57,13 @@ const interrupted = db.markInterrupted();
 if (interrupted) console.log(`${interrupted} unfinished job${interrupted === 1 ? '' : 's'} marked as interrupted (retry them in the studio).`);
 
 const events = createEvents(), token = randomBytes(24).toString('hex'), baseUrl = `http://localhost:${port}`;
-const claude = createClaudeRunner({ db, root, data, baseUrl, events });
-const { render, thumbs } = createRenderRunner({ db, root, data, baseUrl, events });
-const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 // Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root });
+const claude = createClaudeRunner({ db, root, data, baseUrl, events });
+const { render, thumbs } = createRenderRunner({ db, root, data, baseUrl, events, frames });
+const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 const srv = serve({ db, root, data, token, queue, events, port, frames });
 // Stopping, close the painting browser too (at most a few seconds' wait), so it doesn't outlive the studio.
 const stop = async () => { await Promise.race([pool.close(), Bun.sleep(5000)]); process.exit(0); };

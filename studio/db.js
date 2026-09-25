@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   cost_usd REAL NOT NULL DEFAULT 0, model TEXT, error TEXT, created_at INTEGER, started_at INTEGER, finished_at INTEGER);
 CREATE TABLE IF NOT EXISTS renders (
   id INTEGER PRIMARY KEY, version_id TEXT NOT NULL, file TEXT NOT NULL, revision_ids TEXT NOT NULL DEFAULT '[]',
+  snapshot_id TEXT, title TEXT NOT NULL DEFAULT '', logline TEXT NOT NULL DEFAULT '',
   duration_s REAL, render_s REAL, size_bytes INTEGER, poster TEXT, created_at INTEGER);
 `;
 
@@ -80,6 +81,7 @@ export function openDb(path = 'studio.db', { defaultPath } = {}) {
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
   migrateShaColumn(db);
+  migrateRenderColumns(db);
   if (hasDef) db.query('ATTACH DATABASE ? AS def').run(readOnlyUri(defaultPath));
   return new StudioDb(db, { defaultPath, hasDef });
 }
@@ -124,6 +126,19 @@ function migrateShaColumn(db) {
       for (const r of missing) db.query('UPDATE revisions SET sha256 = $sha256 WHERE id = $id').run({ id: r.id, sha256: contentHash(r.content) });
     })();
   }
+}
+
+// Adds renders.snapshot_id/title/logline to a database created before they existed (as migrateShaColumn does for
+// revisions.sha256). A render's title and logline are its own stored copy — the version's own, as of when it was
+// rendered — so a render still lists correctly once its version is gone (listRenders falls back to these when the
+// join finds no version). No backfill needed: an old render's stored copy is blank, and until its version is
+// actually deleted, listRenders keeps reading the version's current title and logline instead, exactly as before
+// this column existed.
+function migrateRenderColumns(db) {
+  const columns = db.query('PRAGMA table_info(renders)').all().map(c => c.name);
+  if (!columns.includes('snapshot_id')) db.exec('ALTER TABLE renders ADD COLUMN snapshot_id TEXT');
+  if (!columns.includes('title')) db.exec("ALTER TABLE renders ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+  if (!columns.includes('logline')) db.exec("ALTER TABLE renders ADD COLUMN logline TEXT NOT NULL DEFAULT ''");
 }
 
 // Builds "a = $a, b = $b" from the allowed keys present in patch; objects are stored as JSON.
@@ -347,14 +362,19 @@ class StudioDb {
   }
 
   // ---------- renders ----------
-  addRender({ versionId, file, revisionIds, durationS, renderS, sizeBytes, poster }) {
-    const { lastInsertRowid } = this.db.query(`INSERT INTO renders (version_id, file, revision_ids, duration_s, render_s, size_bytes, poster, created_at)
-      VALUES ($versionId, $file, $revisionIds, $durationS, $renderS, $sizeBytes, $poster, $t)`)
-      .run({ versionId, file, revisionIds: JSON.stringify(revisionIds), durationS, renderS, sizeBytes, poster, t: Date.now() });
+  // title/logline are the version's own, captured at render time — see migrateRenderColumns.
+  addRender({ versionId, file, revisionIds = [], snapshotId = null, title = '', logline = '', durationS, renderS, sizeBytes, poster }) {
+    const { lastInsertRowid } = this.db.query(`INSERT INTO renders (version_id, file, revision_ids, snapshot_id, title, logline, duration_s, render_s, size_bytes, poster, created_at)
+      VALUES ($versionId, $file, $revisionIds, $snapshotId, $title, $logline, $durationS, $renderS, $sizeBytes, $poster, $t)`)
+      .run({ versionId, file, revisionIds: JSON.stringify(revisionIds), snapshotId, title, logline, durationS, renderS, sizeBytes, poster, t: Date.now() });
     return Number(lastInsertRowid);
   }
+  // Named after the version currently holding version_id when there is one (v.title/v.logline via the LEFT JOIN);
+  // once that version is gone (deleted, or never existed), the render's own stored title/logline stand in instead.
   listRenders() {
-    return this.db.query(`SELECT r.*, v.title, v.logline FROM renders r JOIN (${this._versionsSql()}) v ON v.id = r.version_id
+    return this.db.query(`SELECT r.id, r.version_id, r.file, r.revision_ids, r.snapshot_id, r.duration_s, r.render_s, r.size_bytes, r.poster, r.created_at,
+        COALESCE(v.title, r.title) AS title, COALESCE(v.logline, r.logline) AS logline
+      FROM renders r LEFT JOIN (${this._versionsSql()}) v ON v.id = r.version_id
       ORDER BY r.created_at DESC, r.id DESC`).all().map(parseRender);
   }
   getRender(id) { return parseRender(this.db.query('SELECT * FROM renders WHERE id = $id').get({ id })); }
