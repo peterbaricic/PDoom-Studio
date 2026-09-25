@@ -5,7 +5,11 @@
 // most every 500 ms.
 import { existsSync } from 'node:fs';
 import { snapshotOf, rememberSnapshot } from '../snapshot.js';
-import { N, chapterOfFrame, engineHash, segmentKeys, currentShas } from './keys.js';
+import { N, chapterOfFrame, framesOfChapter, engineHash, segmentKeys, currentShas } from './keys.js';
+
+// A paint-ahead sweep keeps at most this many of its frames queued in the pool at once, queueing the next as each is
+// done: the rest of a song is thousands of frames, and they don't all need to sit in the queue.
+const SWEEP_BATCH = 6;
 
 export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500 }) {
   const engine = engineHash(root);
@@ -129,6 +133,52 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return queued;
   }
 
+  // The first frame from `from` on that the version can't play: the start of the first chapter (from `from`'s own)
+  // that isn't written or is broken, or N.
+  const playableEnd = (cur, from) => {
+    if (live(failedSnapshots, cur.snap.id)) return from;
+    for (let i = from; i < N;) {
+      const n = chapterOfFrame(i), key = cur.keys[n];
+      if (!key || brokenOf(key)) return i;
+      i = framesOfChapter(n)[1] + 1;
+    }
+    return N;
+  };
+
+  // A background sweep per version: paints its missing frames from `from` to the end of what can play, at the
+  // lowest priority (after previews, prefetch, renders and thumbs), SWEEP_BATCH at a time. A new sweep replaces the
+  // version's earlier one (a seek re-aims it); a sweep stops when its version's code changes, or a frame of it
+  // can't be painted (broken, superseded, the pool gone). Progress shows as `frames` events, as for any paint.
+  // Returns { from, end }, or null for a version that doesn't exist.
+  const sweeps = new Map();   // versionId -> the running sweep's token
+  function paintAhead(versionId, from) {
+    const cur = current(versionId);
+    if (!cur) return null;
+    const token = {};
+    sweeps.set(versionId, token);
+    pool.supersede(versionId, 'background');
+    const end = playableEnd(cur, from);
+    let next = from, active = 0;
+    const going = () => sweeps.get(versionId) === token;
+    const more = () => {
+      if (!going()) return;
+      if (current(versionId)?.snap.id !== cur.snap.id) { sweeps.delete(versionId); return; }
+      while (active < SWEEP_BATCH && next < end) {
+        const i = next++;
+        if (lookup(cur.keys[chapterOfFrame(i)], i, cur.shas)) continue;
+        active++;
+        paint(versionId, cur, i, 'background').then(r => {
+          active--;
+          if (r.file) more();
+          else if (going()) sweeps.delete(versionId);
+        });
+      }
+      if (next >= end && !active && going()) sweeps.delete(versionId);
+    };
+    more();
+    return { from, end };
+  }
+
   // Paints every missing frame of a final render (frames from..to, the whole song by default) at render priority,
   // with the segments pinned so eviction can't take them before they're encoded (and a frame file, once written, is
   // never replaced). Resolves to { snapshot, keys, files: the frame files in order, release() }: the caller releases
@@ -174,5 +224,5 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return { snapshot: cur.snap, keys: cur.keys, files: frames.map(i => files.get(i)), release };
   }
 
-  return { frame, read, coverage, prefetch, fillForRender, cache };
+  return { frame, read, coverage, prefetch, paintAhead, fillForRender, cache };
 }

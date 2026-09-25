@@ -420,6 +420,78 @@ test('a render backlog delays a preview request by at most the frame being paint
   } finally { await one.close(); }
 }, T);
 
+test('a paint-ahead sweep paints at the lowest priority, a few frames queued at a time, and a new one re-aims it', async () => {
+  // one painter, so the order is exact
+  const order = [];
+  const one = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1,
+    onPainted: p => { order.push(p.frame); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
+  const svc = createFrameService({ db, cache, pool: one, events, root });
+  const bg = () => one.stats().queued.filter(q => q.prio === 'background').map(q => q.frame);
+  try {
+    expect(svc.paintAhead('tiny', 2400)).toEqual({ from: 2400, end: N });
+    expect(bg().length).toBeLessThanOrEqual(6);   // bounded: not the 1359 frames to the end
+    await until(() => order.length >= 1);
+    // everything else goes first: a render fill, thumbs, prefetch and a preview queued after it
+    const fill = svc.fillForRender('tiny', null, { from: 2600, to: 2609 });
+    const via = (i, prio) => { const r = svc.frame('tiny', i, prio); return r.pending ?? r; };
+    const thumbs = via(2700, 'thumbs');
+    const prefetch = via(2800, 'prefetch');
+    const preview = via(2900, 'preview');
+    const queuedAt = order.length;   // plus the one frame being painted then, which may be the sweep's
+    await Promise.all([fill.then(f => f.release()), thumbs, prefetch, preview]);
+    const started = order.length;
+    await until(() => order.length >= started + 3);
+    const at = f => order.indexOf(f);
+    const others = [2600, 2601, 2602, 2603, 2604, 2605, 2606, 2607, 2608, 2609, 2700, 2800, 2900];
+    const sweepAfter = order.map((f, k) => (k > queuedAt && f >= 2400 && f < 2600 ? k : -1)).filter(k => k >= 0);
+    expect(sweepAfter.length).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...others.map(at))).toBeLessThan(Math.min(...sweepAfter));
+    expect(at(2900)).toBeLessThan(at(2800));   // preview, then prefetch,
+    expect(at(2800)).toBeLessThan(at(2600));   // then render,
+    expect(Math.max(...others.slice(0, 10).map(at))).toBeLessThan(at(2700));   // then thumbs
+    // the sweep goes on after them, in order, and is still bounded
+    expect(order.slice(started).every(f => f > 2400 && f < 2600)).toBe(true);
+    expect(bg().length).toBeLessThanOrEqual(6);
+    // a new sweep replaces it
+    svc.paintAhead('tiny', 3700);
+    await until(() => bg().length > 0 && bg().every(f => f >= 3700));
+    const count = order.length;
+    await until(() => order.length >= count + 2);
+    expect(order.slice(count + 1).every(f => f >= 3700)).toBe(true);
+  } finally { await one.close(); }
+}, T);
+
+test('a paint-ahead sweep stops at the first chapter that is not written or is broken', async () => {
+  db.createVersion({ id: 'sweepy' });
+  db.writeFiles('sweepy', [
+    { path: 'ch/c01.js', content: fastChapter(1) },
+    { path: 'ch/c02.js', content: "chapter('c2', 23, 38.5, [[23, t => { throw new Error('two'); }]]);" },
+    { path: 'ch/c04.js', content: fastChapter(4) },
+  ], { source: 'manual' });
+  expect(service.paintAhead('sweepy', 1500)).toEqual({ from: 1500, end: 1752 });   // chapter 5 isn't written
+  expect(service.paintAhead('sweepy', 1000)).toEqual({ from: 1000, end: 1000 });   // nor chapter 3
+  expect((await frameOf('sweepy', 600)).broken).toBe('two');
+  expect(service.paintAhead('sweepy', 100)).toEqual({ from: 100, end: 552 });      // chapter 2 is broken
+  expect(service.paintAhead('sweepy', 600)).toEqual({ from: 600, end: 600 });
+  expect(service.paintAhead('nope', 0)).toBeNull();
+  await until(() => !pool.stats().queued.some(q => q.prio === 'background'), 60000);
+}, T);
+
+test('POST /api/frames/<v>/paint-ahead: UI hosts, the token, a known version and a frame index', async () => {
+  const post = (body, { host = `localhost:${port}`, tok = token, id = 'tiny' } = {}) => at(host, `/api/frames/${id}/paint-ahead`, {
+    method: 'POST', body: JSON.stringify(body),
+    headers: { origin: `http://localhost:${port}`, 'content-type': 'application/json', ...(tok && { 'x-studio-token': tok }) },
+  });
+  expect((await post({ from: 3740 }, { tok: null })).status).toBe(403);
+  expect((await post({ from: 3740 }, { host: `w0.localhost:${port}` })).status).toBe(404);
+  expect((await post({ from: 3740 }, { id: 'nope' })).status).toBe(404);
+  for (const from of [-1, N, 1.5, '12', null]) expect((await post({ from })).status).toBe(400);
+  const res = await post({ from: 3740 });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ from: 3740, end: N });
+  await until(() => service.coverage('tiny').ranges.some(([a, b]) => a <= 3740 && b >= 3758), 60000);
+}, T);
+
 test('a request held past the hold time is answered 202, to be asked again', async () => {
   const app = createApp({ db, root, data, token, events, port, frames: service, frameHoldMs: 100 });
   const get = path => app.fetch(new Request(`http://localhost:${port}${path}`, { headers: { host: `localhost:${port}` } }));

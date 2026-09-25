@@ -179,6 +179,16 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       if ((req.headers.get('if-none-match') || '').split(',').some(t => t.trim().replace(/^W\//, '') === headers.etag)) return new Response(null, { status: 304, headers });
       return new Response(got.bytes, { headers: { 'content-type': 'image/jpeg', ...headers } });
     }],
+    // Paint the rest of the version from `from` in the background (the preview player's look-ahead past what it
+    // fetches itself): answered at once; progress shows as `frames` events. A new call re-aims the version's sweep.
+    ['POST', /^\/api\/frames\/([a-z0-9-]+)\/paint-ahead$/, async (req, [, id]) => {
+      if (onRenderer(req) || !frames) return error(404, 'not found');
+      const missing = needVersion(id); if (missing) return missing;
+      const { from } = await body(req);
+      if (!Number.isInteger(from) || from < 0 || from >= N) return error(400, `from must be a frame index (0..${N - 1})`);
+      const r = frames.paintAhead(id, from);
+      return r ? json(r) : error(404, 'no such version');
+    }],
     ['GET', /^\/api\/coverage\/([a-z0-9-]+)$/, (req, [, id]) => {
       if (onRenderer(req) || !frames) return error(404, 'not found');
       const c = frames.coverage(id);

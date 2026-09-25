@@ -1,7 +1,8 @@
 // pool.js: paints frames for the frame cache in a pool of pages of one sealed render browser (studio/browser.js),
 // launched on first use. Each page loads one snapshot (studio.html?render&record-cast&snapshot=<id> on w0.localhost,
 // with the guards of studio/frames/page.js) and paints one frame at a time, so a more urgent request waits at most
-// for the frames already being painted. The queue runs preview, then prefetch, then render, then thumbs; the newest
+// for the frames already being painted. The queue runs preview, then prefetch, then render, then thumbs, then
+// background (a version's paint-ahead sweep, studio/frames/service.js: only when nothing else waits); the newest
 // preview request goes first, and each version keeps at most MAX_PREFETCH prefetch requests queued: those nearest
 // the newest request's playhead (`near`, by default the frame it asks for).
 //
@@ -27,7 +28,7 @@ import { getSnapshot, rememberSnapshot, sha256, canonicalJson } from '../snapsho
 import { openSealedPage } from './page.js';
 import { FPS, chapterOfFrame, chapterPaths, depsOf, depsHash } from './keys.js';
 
-export const PRIORITIES = ['preview', 'prefetch', 'render', 'thumbs'];
+export const PRIORITIES = ['preview', 'prefetch', 'render', 'thumbs', 'background'];
 const PREFETCH = 1, MAX_PREFETCH = 240;
 
 // The chapter's (or the version's) own fault: its segment is broken, for good (until = null) or until then.
