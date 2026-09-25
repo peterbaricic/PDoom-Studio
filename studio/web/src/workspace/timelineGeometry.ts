@@ -37,12 +37,6 @@ export function xToTime(x: number, duration: number, width: number): number {
   return width > 0 ? (clamp(x, 0, width) / width) * duration : 0;
 }
 
-// The chapter (1..9) playing at t, as the engine picks it (start inclusive, end exclusive); the last one at the end.
-export function chapterAt(chapters: Array<[number, number]>, t: number): number {
-  const k = chapters.findIndex(([start, end]) => t >= start && t < end);
-  return k >= 0 ? k + 1 : t < 0 ? 1 : chapters.length;
-}
-
 // m:ss, rounded down (a clock: 0:09 until the tenth second has begun).
 export function formatClock(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds + 1e-6));

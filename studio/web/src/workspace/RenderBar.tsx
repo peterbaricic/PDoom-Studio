@@ -13,8 +13,8 @@ import { formatDuration } from '@/shell/jobFormat';
 
 export interface RenderBarProps {
   versionId: string;
-  // How many of the nine chapters are written.
-  chapters: number;
+  // How many of the nine chapters are written; undefined while that isn't known yet.
+  chapters: number | undefined;
   // This version's jobs.
   jobs: Job[];
 }
@@ -35,13 +35,21 @@ export function RenderBar({ versionId, chapters, jobs }: RenderBarProps) {
   });
 
   const reason =
-    chapters < 9 ? `needs all 9 chapters (${chapters} of 9 written)` : running ? 'a render is running' : queued ? 'a render is queued' : null;
+    chapters === undefined
+      ? null
+      : chapters < 9
+        ? `needs all 9 chapters (${chapters} of 9 written)`
+        : running
+          ? 'a render is running'
+          : queued
+            ? 'a render is queued'
+            : null;
 
   return (
     <div className="bg-card flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border px-3 py-2 text-sm">
       <Button
         size="sm"
-        disabled={!!reason || start.isPending}
+        disabled={chapters === undefined || !!reason || start.isPending}
         aria-describedby={reason ? reasonId : undefined}
         onClick={() => start.mutate()}
       >

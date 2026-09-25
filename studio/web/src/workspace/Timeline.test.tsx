@@ -50,6 +50,12 @@ describe('Timeline', () => {
     expect(router.state.location.pathname).toBe('/versions/mine');
   });
 
+  test('clicking a block also seeks directly, so the selected block seeks back to its start even when the URL already says so', async () => {
+    const { onSeek } = renderTimeline({ selected: 3, time: 50 });
+    fireEvent.click(await block(3));
+    expect(onSeek).toHaveBeenCalledWith(38.5);
+  });
+
   test('the selected chapter is marked', async () => {
     renderTimeline({ selected: 4 });
     expect(await block(4)).toHaveAttribute('aria-pressed', 'true');

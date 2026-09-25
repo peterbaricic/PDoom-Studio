@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { chapterAt, timeToX, timelineGeometry, xToTime } from './timelineGeometry';
+import { timeToX, timelineGeometry, xToTime } from './timelineGeometry';
 
 // The song's real chapter windows (studio/storyboard.js's CHAPTER_WINDOWS, as /api/song sends them).
 const CHAPTERS: Array<[number, number]> = [
@@ -56,15 +56,5 @@ describe('timeToX / xToTime', () => {
 
   test('a track with no width yet maps everything to the start', () => {
     expect(xToTime(10, DURATION, 0)).toBe(0);
-  });
-});
-
-describe('chapterAt', () => {
-  test('picks the chapter the engine would (start inclusive, end exclusive), and the last one at the very end', () => {
-    expect(chapterAt(CHAPTERS, 0)).toBe(1);
-    expect(chapterAt(CHAPTERS, 22.99)).toBe(1);
-    expect(chapterAt(CHAPTERS, 23)).toBe(2);
-    expect(chapterAt(CHAPTERS, 156.58)).toBe(9);
-    expect(chapterAt(CHAPTERS, 156.6)).toBe(9);
   });
 });

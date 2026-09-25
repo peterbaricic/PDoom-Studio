@@ -29,13 +29,16 @@ class FakeAudio extends EventTarget {
   paused = true;
   muted = false;
   preload = '';
+  // A real <audio> fires `pause` in a later task than pause() itself; this one does too when asked to.
+  asyncPauseEvent = false;
   play = vi.fn(async () => {
     this.paused = false;
   });
   pause = vi.fn(() => {
     if (this.paused) return;
     this.paused = true;
-    this.dispatchEvent(new Event('pause'));
+    if (this.asyncPauseEvent) setTimeout(() => this.dispatchEvent(new Event('pause')), 0);
+    else this.dispatchEvent(new Event('pause'));
   });
 }
 
@@ -47,6 +50,7 @@ interface Pending {
   resolve: (r: Response) => void;
 }
 let requests: Pending[];
+let paintAhead: number[]; // the `from` of every POST /api/frames/mine/paint-ahead
 let fetchMock: ReturnType<typeof vi.fn>;
 const open = () => requests.filter(r => !r.signal.aborted && !answered.has(r));
 const answered = new Set<Pending>();
@@ -83,9 +87,14 @@ beforeEach(() => {
     toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'Date', 'performance'],
   });
   requests = [];
+  paintAhead = [];
   answered.clear();
   drawn = [];
   fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
+    if (url === '/api/frames/mine/paint-ahead' && init.method === 'POST') {
+      paintAhead.push(JSON.parse(String(init.body)).from);
+      return Promise.resolve(new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }));
+    }
     const m = /^\/api\/frames\/([a-z0-9-]+)\/(\d+)\.jpg(?:\?prio=(\w+))?$/.exec(url);
     if (!m) throw new Error(`unexpected fetch ${url}`);
     return new Promise<Response>((resolve, reject) => {
@@ -146,23 +155,23 @@ async function serveAll(segments: Coverage['segments'], { except = new Set<numbe
 }
 
 describe('scheduling', () => {
-  test('requests frames ahead of the playhead, at most 6 in flight, the playhead frame as a preview', async () => {
+  test('requests frames ahead of the playhead, at most 4 in flight, the playhead frame as a preview', async () => {
     const p = mount({ initialTime: 10 });
     await flush();
-    expect(framesAsked()).toEqual([240, 241, 242, 243, 244, 245]);
-    expect(requests.map(r => r.prio)).toEqual(['preview', 'prefetch', 'prefetch', 'prefetch', 'prefetch', 'prefetch']);
+    expect(framesAsked()).toEqual([240, 241, 242, 243]);
+    expect(requests.map(r => r.prio)).toEqual(['preview', 'prefetch', 'prefetch', 'prefetch']);
     expect(p.result.current.time).toBe(10);
 
     answerFrame(240, 'a1');
     answerFrame(241, 'a1');
     await flush();
-    expect(framesAsked().slice(6)).toEqual([246, 247]);
-    expect(open()).toHaveLength(6);
+    expect(framesAsked().slice(4)).toEqual([244, 245]);
+    expect(open()).toHaveLength(4);
 
-    // nothing more while all six are still out, however long it takes
+    // nothing more while all four are still out, however long it takes
     await flush(10_000);
-    expect(open()).toHaveLength(6);
-    expect(requests).toHaveLength(8);
+    expect(open()).toHaveLength(4);
+    expect(requests).toHaveLength(6);
   });
 
   test('frames already on screen or in memory are not asked for again, and cached frames past the window are not asked for at all', async () => {
@@ -175,26 +184,42 @@ describe('scheduling', () => {
     expect(p.result.current.painting).toBe(false);
   });
 
-  test('keeps the painter busy on uncached frames past the window, so the rest of the song gets painted', async () => {
-    mount({ initialTime: 0, coverage: coverage([[0, 47]], keys('a')) });
-    await flush();
-    await serveAll(keys('a'), { rounds: 8 });
-    // once the window is in memory, frames from 48 on are asked for (to be painted), still at most 6 at a time
-    expect(framesAsked().filter(i => i >= 48).slice(0, 6)).toEqual([48, 49, 50, 51, 52, 53]);
-    expect(open().length).toBeLessThanOrEqual(6);
-    expect(requests.filter(r => r.frame >= 48).every(r => r.prio === 'prefetch')).toBe(true);
+  test('past the window, the server is asked to paint ahead from the playhead instead of being sent requests', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 47]], keys('a')) });
+    await flush(1_000);
+    expect(paintAhead).toEqual([0]); // on start
+    await serveAll(keys('a'), { rounds: 20 });
+    expect(Math.max(...framesAsked())).toBe(47); // nothing past the paused window is fetched
+
+    // a scrub re-aims it once it settles, not once per step
+    for (let s = 1; s <= 10; s++) {
+      act(() => p.result.current.seek(s * 3));
+      await flush(50);
+    }
+    expect(paintAhead).toEqual([0]);
+    await flush(1_000);
+    expect(paintAhead).toEqual([0, 720]);
+
+    // new code for a chapter: aimed again
+    p.update({ segmentKeys: keys('a', { 2: 'b2' }), coverage: coverage([], keys('a', { 2: 'b2' })) });
+    await flush(1_000);
+    expect(paintAhead).toEqual([0, 720, 720]);
+    // the same keys again (a coverage refresh): not
+    p.update({ segmentKeys: keys('a', { 2: 'b2' }), coverage: coverage([[720, 730]], keys('a', { 2: 'b2' })) });
+    await flush(1_000);
+    expect(paintAhead).toEqual([0, 720, 720]);
   });
 
   test('a seek cancels the in-flight requests it no longer needs (AbortController) and asks from the new playhead', async () => {
     const p = mount({ initialTime: 0 });
     await flush();
     const before = [...requests];
-    expect(before).toHaveLength(6);
+    expect(before).toHaveLength(4);
 
     act(() => p.result.current.seek(100));
     await flush();
     expect(before.every(r => r.signal.aborted)).toBe(true);
-    expect(open().map(r => r.frame)).toEqual([2400, 2401, 2402, 2403, 2404, 2405]);
+    expect(open().map(r => r.frame)).toEqual([2400, 2401, 2402, 2403]);
     expect(open()[0]!.prio).toBe('preview');
     expect(p.result.current.time).toBe(100);
   });
@@ -205,9 +230,21 @@ describe('scheduling', () => {
     for (let s = 1; s <= 30; s++) {
       act(() => p.result.current.seek(s * 5));
       await flush(16);
-      expect(open().length).toBeLessThanOrEqual(6);
+      expect(open().length).toBeLessThanOrEqual(4);
     }
     expect(open().every(r => r.frame >= 150 * 24)).toBe(true);
+  });
+
+  test('a seek onto a frame already on its way as a prefetch asks for it again as a preview', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    const prefetched = requests.find(r => r.frame === 2)!;
+    expect(prefetched.prio).toBe('prefetch');
+    act(() => p.result.current.seek(2 / 24));
+    await flush();
+    expect(prefetched.signal.aborted).toBe(true);
+    expect(open().find(r => r.frame === 2)!.prio).toBe('preview');
+    expect(requests.find(r => r.frame === 3)!.signal.aborted).toBe(false); // still in the new window
   });
 
   test('a frame whose answer comes after a seek is dropped, not drawn', async () => {
@@ -365,11 +402,68 @@ describe('playback', () => {
     expect(drawn.at(-1)).toBe('frame 250 a1');
   });
 
+  test('after "Play now" stops at a gap, it resumes only once the rest can play without stopping', async () => {
+    const p = mount({ initialTime: 10, coverage: coverage([[240, 249], [252, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'), { except: new Set([250, 251]) });
+    act(() => p.result.current.playNow());
+    p.audio.currentTime = 250 / 24 + 0.01;
+    await flush(20);
+    expect(p.result.current.state).toBe('waiting');
+    expect(p.result.current.starting).toBe(false);
+
+    answerFrame(250, 'a1'); // the first missing frame: 251 still isn't there
+    await flush(20);
+    expect(p.result.current.state).toBe('waiting');
+    expect(p.audio.play).toHaveBeenCalledTimes(1);
+
+    answerFrame(251, 'a1');
+    await flush(20);
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.play).toHaveBeenCalledTimes(2);
+  });
+
+  test('a late pause event from a gap doesn\'t stop playback that has already resumed', async () => {
+    const GAP = 250;
+    const p = mount({ initialTime: 10, coverage: coverage([[240, N - 1]], keys('a')) });
+    p.audio.asyncPauseEvent = true;
+    await flush();
+    await serveAll(keys('a'), { except: new Set([GAP]) });
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('playing');
+    // jumping onto the missing frame stops the song at a gap; the frame arrives (and playback resumes) before the
+    // song's pause event has fired
+    await act(async () => {
+      p.result.current.seek(GAP / 24);
+      expect(p.audio.pause).toHaveBeenCalledTimes(1);
+      answerFrame(GAP, 'a1');
+      for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r));
+      expect(p.audio.play).toHaveBeenCalledTimes(2);
+    });
+    await flush(50); // now the stale pause event fires
+    expect(p.result.current.state).toBe('playing');
+    expect(p.audio.paused).toBe(false);
+  });
+
+  test('a pause from outside (a media key) is followed', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, N - 1]], keys('a')) });
+    p.audio.asyncPauseEvent = true;
+    await flush();
+    await serveAll(keys('a'));
+    act(() => p.result.current.play());
+    act(() => {
+      p.audio.pause();
+    });
+    await flush(10);
+    expect(p.result.current.state).toBe('paused');
+  });
+
   test('"Play now" on a cached frame not fetched yet starts as soon as it arrives', async () => {
     const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
     await flush();
     act(() => p.result.current.playNow());
     expect(p.result.current.state).toBe('waiting');
+    expect(p.result.current.starting).toBe(true);
     answerFrame(0, 'a1');
     await flush();
     expect(p.result.current.state).toBe('playing');
@@ -428,12 +522,10 @@ describe('a broken segment (Review Focus 1)', () => {
     await flush();
     expect(p.result.current.error).toContain('chapter one is broken');
     const chapterOneAsks = requests.filter(r => r.frame < CH2).length;
-    expect(chapterOneAsks).toBeLessThanOrEqual(6);
+    expect(chapterOneAsks).toBeLessThanOrEqual(4);
 
     await flush(30_000);
     expect(requests.filter(r => r.frame < CH2)).toHaveLength(chapterOneAsks);
-    // chapter 2 onwards is still painted
-    expect(requests.some(r => r.frame >= CH2)).toBe(true);
 
     act(() => p.result.current.play());
     expect(p.result.current.state).not.toBe('playing');
@@ -447,8 +539,9 @@ describe('a broken segment (Review Focus 1)', () => {
     for (const r of open().filter(r => r.frame < CH2)) answer(r, new Response(JSON.stringify({ error: "chapter 1 isn't written yet" }), { status: 404 }));
     await flush(10_000);
     expect(onStaleKeys).toHaveBeenCalledTimes(1);
-    expect(requests.filter(r => r.frame < CH2)).toHaveLength(6);
-    expect(p.result.current.error).toMatch(/not found/);
+    expect(requests.filter(r => r.frame < CH2)).toHaveLength(4);
+    // the server's reason, as a chapter that can't play rather than a broken one
+    expect(p.result.current.error).toBe("Chapter 1 isn't written yet.");
   });
 
   test('a chapter the coverage lists as broken is not asked for at all', async () => {

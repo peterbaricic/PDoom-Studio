@@ -11,12 +11,15 @@ import type { PreviewPlayer as Player } from './usePreviewPlayer';
 export interface PreviewPlayerProps {
   player: Player;
   duration: number;
+  // Why the player can't know what's painted (the coverage didn't load).
+  loadError?: string | null;
 }
 
 // What the player is up to, in a line.
-function statusLine({ state, safeIn, error }: Player): string | null {
+function statusLine({ state, safeIn, error, starting }: Player): string | null {
   if (error) return null;
   if (state === 'playing') return 'Playing';
+  if (starting) return 'Starting…';
   const wait = safeIn == null ? null : formatClock(Math.ceil(safeIn));
   if (state === 'waiting') return wait ? `Starts by itself in about ${wait}` : 'Starts by itself once it can play without stopping';
   if (safeIn === 0) return 'Ready to play without stopping';
@@ -25,11 +28,15 @@ function statusLine({ state, safeIn, error }: Player): string | null {
 
 const typing = (el: EventTarget | null) =>
   el instanceof HTMLElement && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(el.tagName));
+// A dialog or sheet is open (or has focus): the space bar is its business.
+const modalOpen = (el: EventTarget | null) =>
+  !!document.querySelector('[role="dialog"][data-state="open"]') || (el instanceof Element && !!el.closest('[role="dialog"]'));
 
-export function PreviewPlayer({ player, duration }: PreviewPlayerProps) {
+export function PreviewPlayer({ player, duration, loadError }: PreviewPlayerProps) {
   const box = useRef<HTMLDivElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const { state, time, safeIn, aheadReady, error, painting, play, playNow, canvasRef } = player;
+  const { state, time, safeIn, aheadReady, painting, play, playNow, canvasRef } = player;
+  const error = player.error ?? loadError ?? null;
 
   useEffect(() => {
     const onChange = () => setFullscreen(!!document.fullscreenElement && document.fullscreenElement === box.current);
@@ -40,7 +47,7 @@ export function PreviewPlayer({ player, duration }: PreviewPlayerProps) {
   // Space plays and pauses, unless it's meant for a field or a button.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code !== 'Space' || e.repeat || typing(e.target)) return;
+      if (e.code !== 'Space' || e.repeat || typing(e.target) || modalOpen(e.target)) return;
       e.preventDefault();
       play();
     };
@@ -53,7 +60,7 @@ export function PreviewPlayer({ player, duration }: PreviewPlayerProps) {
     else void box.current?.requestFullscreen?.();
   };
 
-  const status = statusLine(player);
+  const status = statusLine({ ...player, error });
   const showPlayNow = state !== 'playing' && !error && safeIn !== 0 && aheadReady >= 1;
 
   return (

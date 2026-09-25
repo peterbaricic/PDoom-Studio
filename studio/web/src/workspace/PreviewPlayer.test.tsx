@@ -17,6 +17,7 @@ function player(overrides: Partial<Player> = {}): Player {
     aheadReady: 0,
     error: null,
     painting: false,
+    starting: false,
     canvasRef: vi.fn(),
     ...overrides,
   };
@@ -59,6 +60,32 @@ describe('PreviewPlayer', () => {
     expect(screen.getByText('Starts by itself in about 0:42')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(p.play).toHaveBeenCalled();
+  });
+
+  test('"Play now" waiting only for the playhead frame says it is starting, not a countdown', () => {
+    render(<PreviewPlayer player={player({ state: 'waiting', starting: true, safeIn: 300 })} duration={156.6} />);
+    expect(screen.getByText('Starting…')).toBeInTheDocument();
+    expect(screen.queryByText(/Starts by itself/)).toBeNull();
+  });
+
+  test('a coverage that could not be loaded shows as an error', () => {
+    render(<PreviewPlayer player={player()} duration={156.6} loadError="Couldn't load the frame coverage: HTTP 500" />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load the frame coverage: HTTP 500");
+  });
+
+  test('the space bar is left alone while a dialog is open', () => {
+    const p = player();
+    render(
+      <>
+        <PreviewPlayer player={p} duration={156.6} />
+        <div role="dialog" data-state="open">
+          <p>Log</p>
+        </div>
+      </>,
+    );
+    fireEvent.keyDown(document.body, { key: ' ', code: 'Space' });
+    fireEvent.keyDown(screen.getByText('Log'), { key: ' ', code: 'Space' });
+    expect(p.play).not.toHaveBeenCalled();
   });
 
   test('playing: the button pauses', () => {

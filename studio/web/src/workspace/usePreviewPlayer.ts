@@ -3,16 +3,18 @@
 // content (studio/frames/). This page only fetches, decodes (createImageBitmap, off the main thread) and draws them onto
 // a <canvas>, with the picture following the song's clock (audio.currentTime).
 //
-// Scheduling: at most MAX_IN_FLIGHT requests at once.
-//   - First the window ahead of the playhead (48 frames while paused, 120 while playing): fetched and kept in memory
-//     as JPEG blobs; only a few frames around the playhead are decoded to bitmaps at a time (1080p bitmaps are 8 MB).
-//     The playhead frame goes as a `preview` (the server paints it first and drops older previews); the rest as
-//     `prefetch`.
-//   - Then, with any request left over, frames past the window the server hasn't cached yet (from the coverage), so
-//     the rest of the song gets painted and "safe to play" comes closer. Their bytes aren't kept. A window frame
-//     that needs a slot takes one from these.
-//   - A seek cancels (AbortController) every request the new position doesn't need: the server withdraws them from
-//     its painting queue (Review Focus 3).
+// Scheduling:
+//   - The window ahead of the playhead (48 frames while paused, 120 while playing) is fetched, at most MAX_IN_FLIGHT
+//     requests at once (a held frame request is a connection: Chrome allows 6 per origin, and the event stream and
+//     the page's other API calls need theirs), and kept in memory as JPEG blobs; only a few frames around the
+//     playhead are decoded to bitmaps at a time (1080p bitmaps are 8 MB). The playhead frame goes as a `preview`
+//     (the server paints it first and drops older previews); the rest as `prefetch`.
+//   - Past the window, the server paints the rest of what can play by itself, at its lowest priority (after renders
+//     and thumbs): POST /api/frames/<v>/paint-ahead { from: playhead }, sent (debounced) on start, on a seek and when
+//     segment keys change; progress arrives as coverage (`frames` events). That's what brings "safe to play" closer.
+//   - A seek cancels (AbortController) every request the new position doesn't need, and re-asks for the new playhead
+//     frame as a `preview` if it was on its way as `prefetch`: the server withdraws cancelled requests from its
+//     painting queue (Review Focus 3).
 //
 // Rules, as the old player had them: never stutter. Play waits until every frame from the playhead to the end (or to
 // the first chapter that can't be shown) is cached, then plays. "Play now" plays what's cached from the playhead on,
@@ -24,9 +26,10 @@
 //
 // Broken segments (Review Focus 1): a 409 (or the coverage's broken list) marks the chapter's key broken; its frames
 // aren't asked for again until the key changes or the server stops reporting it broken, playback stops where it
-// starts, and the error is shown.
+// starts, and the error is shown. A 404 (the server has no such chapter) makes the chapter unplayable, with the
+// server's reason, until the keys change.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { frameUrl } from '@/api/client';
+import { api, frameUrl } from '@/api/client';
 import type { Coverage, Song } from '@/api/types';
 
 export type PlayerState = 'paused' | 'waiting' | 'playing';
@@ -60,16 +63,19 @@ export interface PreviewPlayer {
   error: string | null;
   // The playhead's frame isn't on screen yet (being fetched or painted).
   painting: boolean;
+  // "Play now" was pressed and only waits for the playhead's frame (cached on the server) to reach the page.
+  starting: boolean;
   canvasRef: (el: HTMLCanvasElement | null) => void;
 }
 
-export const MAX_IN_FLIGHT = 6;
+export const MAX_IN_FLIGHT = 4;
 const WINDOW_PAUSED = 48;
 const WINDOW_PLAYING = 120;
 const KEEP_BEHIND = 24; // blobs kept behind the playhead, for a small step back
 const DECODE_AHEAD = 8;
 const RATE_WINDOW_MS = 20_000; // paint rate measured over this much coverage history
 const PUMP_EVERY_MS = 500;
+const PAINT_AHEAD_DEBOUNCE_MS = 300;
 
 interface Snapshot {
   state: PlayerState;
@@ -78,11 +84,12 @@ interface Snapshot {
   aheadReady: number;
   error: string | null;
   painting: boolean;
+  starting: boolean;
 }
 
 interface InFlight {
   ctrl: AbortController;
-  keep: boolean; // a window frame: its bytes are kept
+  prio: 'preview' | 'prefetch';
 }
 
 // The segment key in a frame's ETag: "<segment key>.<deps hash>".
@@ -97,6 +104,7 @@ export class PreviewEngine {
   private local = new Set<number>(); // fetched under the current key: cached, whatever the coverage says yet
   private coverageBroken = new Map<number, string>(); // chapter -> error, from the coverage
   private localBroken = new Map<string, string>(); // segment key -> error, from a 409
+  private unplayable = new Map<string, string>(); // segment key -> why, from a 404 (e.g. "chapter 7 isn't written yet")
   private samples: Array<[number, number]> = []; // [time ms, frames covered], for the paint rate
 
   private ph = 0;
@@ -116,6 +124,7 @@ export class PreviewEngine {
   private nowPending = false; // "Play now" pressed before the playhead's (cached) frame reached this page
   private raf = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private last: Snapshot | null = null;
 
@@ -141,6 +150,7 @@ export class PreviewEngine {
       this.pump();
       this.notify();
     }, PUMP_EVERY_MS);
+    this.aimPaintAhead();
     this.pump();
     this.notify();
   }
@@ -152,12 +162,13 @@ export class PreviewEngine {
     this.audio.removeEventListener('ended', this.onAudioEnded);
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.aheadTimer) clearTimeout(this.aheadTimer);
+    this.aheadTimer = null;
     cancelAnimationFrame(this.raf);
-    if (this.mode === 'playing') {
-      this.ownPause = true;
-      this.audio.pause();
-    }
+    this.ownPause = true;
+    this.audio.pause();
     this.mode = 'paused';
+    this.nowPending = false;
     for (const i of [...this.inflight.keys()]) this.abort(i);
     for (const i of [...this.bitmaps.keys()]) this.dropBitmap(i);
   }
@@ -183,7 +194,7 @@ export class PreviewEngine {
     this.pendingKeys = keys;
     this.coverage = coverage;
     if (!this.frames) return; // applied once the song is known
-    this.applyKeys(keys);
+    if (this.applyKeys(keys)) this.aimPaintAhead();
     this.applyCoverage(coverage);
     if (this.mode === 'playing') {
       if (this.blockedAt(this.ph)) this.stopAt(this.ph);
@@ -195,14 +206,15 @@ export class PreviewEngine {
     this.notify();
   }
 
-  private applyKeys(keys: Segments | undefined) {
-    if (!keys) return;
+  // Whether the keys changed (or came for the first time).
+  private applyKeys(keys: Segments | undefined): boolean {
+    if (!keys) return false;
     const old = this.keys;
     const changed = [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(n => (old?.[n] ?? null) !== (keys[n] ?? null));
-    if (old && !changed.length) return;
+    if (old && !changed.length) return false;
     this.keys = { ...keys };
     this.staleReported = false;
-    if (!old) return;
+    if (!old) return true;
     // A chapter's code (or the options, or shared.js) changed: whatever this page holds for it is from older code.
     const stale = (i: number) => changed.includes(this.chapterOf[i]!);
     for (const i of [...this.inflight.keys()]) if (stale(i)) this.abort(i);
@@ -212,6 +224,7 @@ export class PreviewEngine {
     for (const i of [...this.mismatched.keys()]) if (stale(i)) this.mismatched.delete(i);
     for (const i of [...this.retryAt.keys()]) if (stale(i)) this.retryAt.delete(i);
     this.samples = [];
+    return true;
   }
 
   private applyCoverage(coverage: Coverage | undefined) {
@@ -260,6 +273,8 @@ export class PreviewEngine {
     const n = this.chapterOf[i]!;
     const key = this.keys[n];
     if (!key) return `Chapter ${n} isn't written yet.`;
+    const why = this.unplayable.get(key);
+    if (why != null) return `${why.charAt(0).toUpperCase()}${why.slice(1)}.`.replace(/\.\.$/, '.');
     const error = this.coverageBroken.get(n) ?? this.localBroken.get(key);
     return error == null ? null : `Chapter ${n} failed to paint: ${error}`;
   }
@@ -318,6 +333,7 @@ export class PreviewEngine {
       aheadReady: ahead / this.fps,
       error: ready ? this.blockedAt(this.ph) : null,
       painting: !(this.shown === this.ph && this.shownKey != null && this.shownKey === this.keyOf(this.ph)),
+      starting: this.mode === 'waiting' && this.nowPending,
     };
   }
 
@@ -331,7 +347,8 @@ export class PreviewEngine {
       last.safeIn === next.safeIn &&
       last.aheadReady === next.aheadReady &&
       last.error === next.error &&
-      last.painting === next.painting
+      last.painting === next.painting &&
+      last.starting === next.starting
     ) {
       return;
     }
@@ -359,25 +376,23 @@ export class PreviewEngine {
   private pump() {
     if (!this.running || !this.frames || !this.keys) return;
     // requests for frames the playhead has passed are of no use any more
-    for (const [i, f] of this.inflight) if (f.keep && i < this.ph) this.abort(i);
-    const end = this.endFrom(this.ph);
-    const windowEnd = Math.min(end, this.ph + this.window());
-    const want: Array<{ i: number; keep: boolean }> = [];
-    for (let i = this.ph; i < windowEnd && want.length < MAX_IN_FLIGHT; i++) {
-      if (!this.hasBlob(i) && this.wanted(i)) want.push({ i, keep: true });
+    for (const i of [...this.inflight.keys()]) if (i < this.ph) this.abort(i);
+    const windowEnd = Math.min(this.endFrom(this.ph), this.ph + this.window());
+    for (let i = this.ph; i < windowEnd && this.inflight.size < MAX_IN_FLIGHT; i++) {
+      if (!this.hasBlob(i) && this.wanted(i)) this.request(i);
     }
-    for (let i = Math.max(windowEnd, this.ph); i < this.frames && want.length < MAX_IN_FLIGHT; i++) {
-      if (!this.isCached(i) && this.wanted(i)) want.push({ i, keep: false });
-    }
-    for (const { i, keep } of want) {
-      if (this.inflight.size >= MAX_IN_FLIGHT) {
-        // a window frame takes the slot of the farthest frame that is only being painted
-        const far = [...this.inflight].filter(([, f]) => !f.keep).sort((a, b) => b[0] - a[0])[0];
-        if (!keep || !far) break;
-        this.abort(far[0]);
-      }
-      this.request(i, keep);
-    }
+  }
+
+  // Re-aims the server's paint-ahead sweep at the playhead, once things settle (a scrub sends one, not dozens).
+  private aimPaintAhead() {
+    if (!this.running || !this.frames || !this.keys) return;
+    if (this.aheadTimer) clearTimeout(this.aheadTimer);
+    this.aheadTimer = setTimeout(() => {
+      this.aheadTimer = null;
+      if (!this.running) return;
+      const path = `/api/frames/${encodeURIComponent(this.versionId)}/paint-ahead`;
+      api.post(path, { from: this.ph }).catch(() => {}); // best effort: the window's own requests still paint
+    }, PAINT_AHEAD_DEBOUNCE_MS);
   }
 
   private abort(i: number) {
@@ -387,12 +402,12 @@ export class PreviewEngine {
     f.ctrl.abort();
   }
 
-  private request(i: number, keep: boolean) {
+  private request(i: number) {
     const ctrl = new AbortController();
     const key = this.keyOf(i)!;
-    this.inflight.set(i, { ctrl, keep });
+    const prio = i === this.ph ? 'preview' : 'prefetch';
+    this.inflight.set(i, { ctrl, prio });
     const mine = () => this.inflight.get(i)?.ctrl === ctrl;
-    const prio = keep && i === this.ph ? 'preview' : 'prefetch';
     const settle = (retryInMs?: number) => {
       if (!mine()) return false;
       this.inflight.delete(i);
@@ -404,7 +419,7 @@ export class PreviewEngine {
         if (!mine()) return;
         if (res.status === 200) {
           const painted = keyOfEtag(res.headers.get('etag'));
-          const blob = keep ? await res.blob() : (await res.body?.cancel().catch(() => {}), null);
+          const blob = await res.blob();
           if (!settle()) return;
           this.arrived(i, painted, blob);
         } else if (res.status === 409) {
@@ -416,9 +431,13 @@ export class PreviewEngine {
           this.localBroken.set(key, error || 'the chapter failed to paint');
         } else if (res.status === 404) {
           // the server has no such chapter (or version): what this page knows of the version is out of date. The
-          // chapter waits for new keys rather than being asked for frame by frame.
+          // chapter can't play (it isn't broken) until new keys come, rather than being asked for frame by frame.
+          const why = await res
+            .json()
+            .then((b: { error?: string }) => b.error)
+            .catch(() => undefined);
           if (!settle()) return;
-          this.localBroken.set(key, 'not found on the server');
+          this.unplayable.set(key, why || `chapter ${this.chapterOf[i]} isn't on the server`);
           this.mismatch(i);
         } else {
           // 202: not painted within the server's hold time; ask again, as Retry-After says
@@ -443,13 +462,13 @@ export class PreviewEngine {
     }
   }
 
-  private arrived(i: number, painted: string, blob: Blob | null) {
+  private arrived(i: number, painted: string, blob: Blob) {
     if (painted !== this.keyOf(i)) {
       this.mismatch(i);
       return;
     }
     this.local.add(i);
-    if (blob && i >= this.ph - KEEP_BEHIND && i < this.ph + WINDOW_PLAYING) this.blobs.set(i, { key: painted, blob });
+    if (i >= this.ph - KEEP_BEHIND && i < this.ph + WINDOW_PLAYING) this.blobs.set(i, { key: painted, blob });
     if (i === this.ph && this.mode !== 'playing') this.draw(i);
     this.maybeResume();
   }
@@ -495,7 +514,9 @@ export class PreviewEngine {
   // ---- playback ----
 
   private onAudioPause = () => {
-    if (this.ownPause || this.mode !== 'playing') return;
+    // A pause event comes in a later task than the pause() behind it: one of ours (a gap) may land after playback
+    // resumed, when the song is playing again. Only a pause from outside, of a song that is paused, counts.
+    if (this.ownPause || this.mode !== 'playing' || !this.audio.paused) return;
     // paused from outside (a media key, the system): follow it
     cancelAnimationFrame(this.raf);
     this.mode = 'paused';
@@ -623,9 +644,11 @@ export class PreviewEngine {
     const i = this.frameOf(t);
     this.ph = i;
     this.nowPending = false; // "Play now" was for where the playhead was
-    // cancel what the new position doesn't need: everything outside its window, and every paint-only request
-    for (const [k, f] of [...this.inflight]) if (!f.keep || k < i || k >= i + this.window()) this.abort(k);
+    // cancel what the new position doesn't need (everything outside its window), and the new playhead frame if it's
+    // on its way as a prefetch: it's asked for again as a preview, which the server paints first
+    for (const [k, f] of [...this.inflight]) if (k < i || k >= i + this.window() || (k === i && f.prio !== 'preview')) this.abort(k);
     this.trim();
+    this.aimPaintAhead();
     if (this.mode === 'playing') {
       if (this.blockedAt(i)) this.stopAt(i);
       else if (this.hasBlob(i)) this.audio.currentTime = i / this.fps;

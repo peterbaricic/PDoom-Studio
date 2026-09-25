@@ -58,7 +58,14 @@ export function Workspace({ versionId }: { versionId: string }) {
     );
   }
   return (
-    <WorkspaceBody versionId={versionId} song={song.data} manifest={manifest.data} coverage={coverage.data} jobs={jobs} />
+    <WorkspaceBody
+      versionId={versionId}
+      song={song.data}
+      manifest={manifest.data}
+      coverage={coverage.data}
+      coverageError={coverage.error?.message ?? null}
+      jobs={jobs}
+    />
   );
 }
 
@@ -67,10 +74,11 @@ interface BodyProps {
   song: Song;
   manifest: Manifest | undefined;
   coverage: Coverage | undefined;
+  coverageError: string | null;
   jobs: Job[];
 }
 
-function WorkspaceBody({ versionId, song, manifest, coverage, jobs }: BodyProps) {
+function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, jobs }: BodyProps) {
   const queryClient = useQueryClient();
   const search = useSearch({ from: '/versions/$id' });
   const navigate = useNavigate();
@@ -91,6 +99,14 @@ function WorkspaceBody({ versionId, song, manifest, coverage, jobs }: BodyProps)
   // URL -> player: a new t (or chapter) in the URL that isn't where the player already is.
   const applied = useRef(urlTime);
   const { seek } = player;
+  // A seek from the timeline (a scrub, a block): what the URL will say next is already applied.
+  const seekHere = useCallback(
+    (to: number) => {
+      applied.current = to;
+      seek(to);
+    },
+    [seek],
+  );
   useEffect(() => {
     if (urlTime === undefined || urlTime === applied.current) return;
     applied.current = urlTime;
@@ -109,12 +125,16 @@ function WorkspaceBody({ versionId, song, manifest, coverage, jobs }: BodyProps)
     return () => clearTimeout(timer);
   }, [playing, t, urlTime, navigate, versionId]);
 
-  const written = new Set((manifest?.files ?? []).map(f => /^ch\/c0(\d)/.exec(f)?.[1]).filter(Boolean)).size;
+  const written = manifest && new Set(manifest.files.map(f => /^ch\/c0(\d)/.exec(f)?.[1]).filter(Boolean)).size;
   const duration = songEnd(song.chapters);
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-3 p-4">
-      <PreviewPlayer player={player} duration={duration} />
+      <PreviewPlayer
+        player={player}
+        duration={duration}
+        loadError={coverageError ? `Couldn't load which frames are painted: ${coverageError}` : null}
+      />
       <div className="flex flex-col gap-1">
         <Timeline
           versionId={versionId}
@@ -124,7 +144,7 @@ function WorkspaceBody({ versionId, song, manifest, coverage, jobs }: BodyProps)
           walkthrough={manifest?.walkthrough}
           selected={search.ch}
           time={player.time}
-          onSeek={seek}
+          onSeek={seekHere}
         />
         <LyricsTrack lyrics={song.lyrics} duration={duration} time={player.time} />
       </div>

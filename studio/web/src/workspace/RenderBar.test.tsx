@@ -21,7 +21,10 @@ const render = (overrides: Partial<Render> & Pick<Render, 'id'>): Render => ({
   ...overrides,
 });
 
-function renderBar({ chapters = 9, jobs = [] as Job[], renders = [] as Render[], answers = {} } = {}) {
+function renderBar(opts: { chapters?: number; jobs?: Job[]; renders?: Render[]; answers?: Record<string, unknown> } = {}) {
+  // chapters: undefined (given as such) means still loading
+  const { jobs = [], renders = [], answers = {} } = opts;
+  const chapters = 'chapters' in opts ? opts.chapters : 9;
   const fetchMock = mockApi({ 'GET /api/library': renders, ...answers });
   const utils = renderInRouter(<RenderBar versionId="mine" chapters={chapters} jobs={jobs} />, { path: '/versions/mine' });
   return { ...utils, fetchMock };
@@ -36,6 +39,13 @@ describe('RenderBar', () => {
     expect(b).toBeDisabled();
     expect(b).toHaveAccessibleDescription(/needs all 9 chapters/);
     expect(screen.getByText(/needs all 9 chapters/)).toBeInTheDocument();
+  });
+
+  test('while the version is still loading it is disabled, without claiming chapters are missing', async () => {
+    renderBar({ chapters: undefined });
+    expect(await button()).toBeDisabled();
+    expect(screen.queryByText(/needs all 9 chapters/)).toBeNull();
+    expect(await button()).not.toHaveAccessibleDescription(/needs/);
   });
 
   test('is disabled with the reason "a render is running" while one runs, and shows its progress', async () => {

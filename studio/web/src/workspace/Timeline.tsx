@@ -81,7 +81,11 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, selecte
                   aria-label={`Chapter ${b.n}${name ? ` · ${name}` : ''}, ${span}${status ? `, ${status}` : ''}`}
                   aria-pressed={selected === b.n}
                   data-broken={error ? 'true' : undefined}
-                  onClick={() => navigate({ to: '/versions/$id', params: { id: versionId }, search: { ch: b.n, t: b.start } })}
+                  onClick={() => {
+                    // seek here too: re-selecting the selected block (while playing, say) leaves the URL as it was
+                    onSeek(b.start);
+                    void navigate({ to: '/versions/$id', params: { id: versionId }, search: { ch: b.n, t: b.start } });
+                  }}
                   className={cn(
                     'absolute inset-y-0 flex flex-col items-start justify-between overflow-hidden rounded-sm border px-1.5 py-1 text-left text-xs transition-colors',
                     'hover:bg-accent focus-visible:ring-ring/50 outline-none focus-visible:ring-[3px]',

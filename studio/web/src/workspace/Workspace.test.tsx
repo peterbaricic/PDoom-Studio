@@ -35,18 +35,20 @@ const MANIFEST = {
 } satisfies Manifest;
 
 // The app's API, with frame requests left waiting (painting takes as long as the test likes).
-function stubApi() {
+function stubApi(overrides: Record<string, unknown> = {}) {
   const frames: string[] = [];
   const api = mockApi({
     'GET /api/song': SONG,
     'GET /api/versions/mine': MANIFEST,
     'GET /api/coverage/mine': COVERAGE,
+    ...overrides,
     'GET /api/jobs?version=mine': [],
     'GET /api/library': [],
   });
   vi.stubGlobal(
     'fetch',
     vi.fn((path: string, init?: RequestInit) => {
+      if (path.endsWith('/paint-ahead')) return Promise.resolve(new Response('{}'));
       if (!path.startsWith('/api/frames/')) return api(path, init);
       frames.push(path);
       return new Promise(() => {});
@@ -101,6 +103,12 @@ describe('Workspace', () => {
     fireEvent.pointerUp(track, { clientX: 1000, pointerId: 1 });
     expect(await screen.findByText('1:40 / 2:36')).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.search).toEqual({ t: 100 }));
+  });
+
+  test('a coverage that can\'t be loaded shows as an error in the player', async () => {
+    stubApi({ 'GET /api/coverage/mine': new Response(JSON.stringify({ error: 'the frame service is down' }), { status: 500 }) });
+    renderWorkspace('/versions/mine');
+    expect(await screen.findByRole('alert')).toHaveTextContent('the frame service is down');
   });
 
   test('shows the lyrics and the render bar', async () => {

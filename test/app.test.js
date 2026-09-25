@@ -540,7 +540,7 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   });
   const pageErrors = [], frames = [];
   page.on('pageerror', e => pageErrors.push(e.message));
-  page.on('response', r => { if (r.url().includes('/api/frames/')) frames.push(`${r.status()} ${r.headers()['content-type']}`); });
+  page.on('response', r => { if (r.url().includes('/api/frames/')) frames.push(`${r.request().method()} ${r.status()} ${r.headers()['content-type']}`); });
   // Not networkidle0: the app opens an EventSource('/api/events') that's meant to stay open, so the network is
   // never idle.
   await page.goto(`${cspServer.url}/`, { waitUntil: 'domcontentloaded' });
@@ -553,7 +553,10 @@ test('the built SPA loads under the SPA CSP with no violations (so, no inline sc
   // through the CSSOM, which the CSP allows; a <style> tag it doesn't).
   await page.waitForSelector('[role="slider"][aria-label="Playhead"]', { timeout: 10000 });
   await page.waitForSelector('[data-painting="false"] canvas', { timeout: 40000 });
-  expect(frames).toContain('200 image/jpeg');
+  expect(frames).toContain('GET 200 image/jpeg');
+  // past what it fetches, the player has the server paint ahead (a token-guarded POST)
+  await page.waitForFunction(() => performance.getEntriesByType('resource').some(e => e.name.endsWith('/paint-ahead')), { timeout: 10000 });
+  expect(frames.filter(f => f.startsWith('POST')).map(f => f.split(';')[0])).toContain('POST 200 application/json');
   await page.hover('button[aria-label^="Chapter 2"]');
   await page.waitForSelector('[role="tooltip"]', { timeout: 10000 });
 
