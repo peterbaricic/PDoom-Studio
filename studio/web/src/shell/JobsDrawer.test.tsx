@@ -94,6 +94,22 @@ describe('JobsDrawer', () => {
     await waitFor(() => expect(calls(fetchMock).filter(c => c === 'GET /api/jobs?version=mine').length).toBeGreaterThanOrEqual(3));
   });
 
+  test('each job stays busy until its own request settles, whatever else is clicked meanwhile', async () => {
+    const never = () => new Promise(() => {});
+    mockApi({
+      'GET /api/jobs?version=mine': [job({ id: 2, status: 'running' }), job({ id: 1, status: 'queued' })],
+      'POST /api/jobs/2/cancel': never,
+      'POST /api/jobs/1/cancel': never,
+    });
+    renderDrawer();
+    const [a, b] = await rows();
+    fireEvent.click(within(a!).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(within(a!).getByRole('button', { name: 'Cancel' })).toBeDisabled());
+    fireEvent.click(within(b!).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(within(b!).getByRole('button', { name: 'Cancel' })).toBeDisabled());
+    expect(within(a!).getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  });
+
   test('Log opens the log viewer on that job', async () => {
     mockApi({
       'GET /api/jobs?version=mine': [job({ id: 2, status: 'running' })],

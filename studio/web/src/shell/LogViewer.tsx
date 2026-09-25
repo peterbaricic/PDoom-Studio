@@ -29,12 +29,16 @@ export function JobLogProvider({ children }: { children: ReactNode }) {
 // Within this many pixels of the end still counts as "at the bottom" (sub-pixel scroll positions, zoom).
 const AT_BOTTOM_SLACK = 8;
 
-export function LogViewer({ jobId, onClose }: { jobId: number | null; onClose: () => void }) {
-  const open = jobId != null;
+// jobId: the job to show, or null to close. While it closes (its exit animation), the dialog keeps showing the job
+// it last showed rather than an empty "Loading…" one.
+export function LogViewer({ jobId: requestedId, onClose }: { jobId: number | null; onClose: () => void }) {
+  const open = requestedId != null;
+  const [jobId, setJobId] = useState(requestedId);
+  if (requestedId != null && requestedId !== jobId) setJobId(requestedId);
   const { data: job, error } = useQuery({
     queryKey: ['job', jobId],
     queryFn: () => api.get<JobWithLog>(`/api/jobs/${jobId}`),
-    enabled: open,
+    enabled: open, // a closed viewer keeps its cached copy to show on the way out, but stops refetching it
   });
 
   const viewport = useRef<HTMLDivElement>(null);

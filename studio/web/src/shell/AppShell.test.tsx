@@ -52,6 +52,19 @@ describe('AppShell', () => {
   });
 });
 
+test('a version whose id is "watch" is not taken for the watch view', async () => {
+  mockApi({
+    'GET /api/versions': [...versions, version({ id: 'watch', title: 'Watchful' })],
+    'GET /api/library': [],
+    'GET /api/jobs': [],
+    'GET /api/health': { claude: true, claudeSignedIn: true, ffmpeg: true },
+  });
+  renderRouteTree(routeTree, { path: '/versions/watch' });
+  const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+  expect(await within(breadcrumb).findByText('Watchful')).toHaveAttribute('aria-current', 'page');
+  expect(within(breadcrumb).queryByText('Watch')).toBeNull();
+});
+
 describe('useSelectedVersion', () => {
   function Probe() {
     return <output>{useSelectedVersion() ?? 'none'}</output>;

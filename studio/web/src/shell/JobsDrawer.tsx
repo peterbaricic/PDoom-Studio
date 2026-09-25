@@ -1,7 +1,7 @@
 // JobsDrawer.tsx: every job, newest first, for this version or all of them: kind, chapter, status, when it started,
 // how long it ran and what it cost, with its log, and Cancel or Retry where either makes sense.
 import { useState } from 'react';
-import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { queryOptions, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
 import type { Job, JobStatus } from '@/api/types';
@@ -42,15 +42,22 @@ export function JobsDrawer({ open, onOpenChange }: { open: boolean; onOpenChange
   const queryClient = useQueryClient();
   const onSettled = () => queryClient.invalidateQueries({ queryKey: ['jobs'] });
   const cancel = useMutation({
+    mutationKey: ['job-action', 'cancel'],
     mutationFn: (id: number) => api.post(`/api/jobs/${id}/cancel`),
     onSettled,
     onError: e => toast.error(`Couldn't cancel the job: ${e.message}`),
   });
   const retry = useMutation({
+    mutationKey: ['job-action', 'retry'],
     mutationFn: (id: number) => api.post(`/api/jobs/${id}/retry`),
     onSettled,
     onError: e => toast.error(`Couldn't retry the job: ${e.message}`),
   });
+  // Every job with a Cancel or Retry still in flight. Not cancel.variables: a mutation only remembers its latest call,
+  // so cancelling A and then B would let A's button come back while A's request is still pending.
+  const busyIds = new Set(
+    useMutationState({ filters: { mutationKey: ['job-action'], status: 'pending' }, select: m => m.state.variables as number }),
+  );
   const openJobLog = useOpenJobLog();
 
   const scopeButton = (value: 'version' | 'all', label: string, disabled = false) => (
@@ -82,7 +89,7 @@ export function JobsDrawer({ open, onOpenChange }: { open: boolean; onOpenChange
           <ul aria-label="Jobs" className="flex flex-col divide-y">
             {sorted.map(j => {
               const duration = jobDuration(j);
-              const busy = (cancel.isPending && cancel.variables === j.id) || (retry.isPending && retry.variables === j.id);
+              const busy = busyIds.has(j.id);
               return (
                 <li key={j.id} data-job-id={j.id} data-status={j.status} className="flex items-center gap-3 py-2 text-sm">
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">

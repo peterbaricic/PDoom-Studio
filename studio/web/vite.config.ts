@@ -40,12 +40,22 @@ function devTokenPlugin(): Plugin {
 // no CSP violations. (The dev server serves no CSP, and its pre-bundled dependencies skip both, harmlessly.)
 function sonnerWithoutInjectedCss(): Plugin {
   const injector = 'function __insertCSS(code) {';
+  let patched = false;
   return {
     name: 'studio-sonner-without-injected-css',
+    apply: 'build',
+    buildStart() {
+      patched = false;
+    },
     transform(code, id) {
       if (!/[\\/]node_modules[\\/]sonner[\\/]dist[\\/]index\.m?js$/.test(id)) return null;
       if (!code.includes(injector)) this.error(`${id} no longer defines __insertCSS: check how this sonner injects its CSS`);
+      patched = true;
       return { code: code.replace(injector, `${injector} return;`), map: null };
+    },
+    // And if sonner's entry file is ever renamed, the transform above never matches at all: fail then too.
+    buildEnd(error) {
+      if (!error && !patched) this.error("sonner's runtime CSS injector was never patched: did sonner's entry file move?");
     },
   };
 }

@@ -21,14 +21,15 @@ export function newQueryClient() {
 type Answer = unknown | ((init: RequestInit) => unknown);
 
 // Stubs the global fetch with a table of "<METHOD> <path>" answers: a value is sent as a 200 JSON body, a Response
-// as is, and a function is called with the request's init first. Anything not in the table is a 404, so a request a
+// as is, and a function is called with the request's init first (it may return a promise; one that never settles
+// keeps the request in flight). Anything not in the table is a 404, so a request a
 // test didn't expect shows up as a failure rather than hanging.
 export function mockApi(answers: Record<string, Answer>) {
   const fn = vi.fn(async (path: string, init: RequestInit = {}) => {
     const key = `${init.method ?? 'GET'} ${path}`;
     if (!(key in answers)) return new Response(JSON.stringify({ error: `no mock for ${key}` }), { status: 404 });
     const answer = answers[key];
-    const body = typeof answer === 'function' ? (answer as (init: RequestInit) => unknown)(init) : answer;
+    const body = await (typeof answer === 'function' ? (answer as (init: RequestInit) => unknown)(init) : answer);
     if (body instanceof Response) return body;
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   });
