@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { CheckIcon, LoaderCircleIcon, PencilIcon } from 'lucide-react';
 import { toast } from 'sonner';
-import { api } from '@/api/client';
+import { ApiError, api } from '@/api/client';
 import type { Job, Manifest, VersionOptions } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -24,6 +24,16 @@ export interface StoryboardPanelProps {
   // STORYBOARD.md's text: undefined while it loads (or when there is none), with the error if it couldn't be read.
   storyboard: string | undefined;
   storyboardError: string | null;
+}
+
+// A hand edit in progress: the text being written, and what it started from (the storyboard's text and revision
+// then), so a storyboard that changes underneath it (a Claude job, another tab) is noticed instead of overwritten.
+interface Draft {
+  text: string;
+  base: string;
+  baseRevision: number | null;
+  // The server refused the save: the storyboard had moved on from baseRevision.
+  refused: boolean;
 }
 
 const OPTIONS: Array<[keyof VersionOptions & string, string]> = [
@@ -48,20 +58,34 @@ export function StoryboardPanel({ versionId, manifest, jobs, storyboard, storybo
   const [feedback, setFeedback] = useState('');
   // The concept as edited here, or null while it's untouched (then the saved one shows, and follows changes).
   const [concept, setConcept] = useState<string | null>(null);
-  // The storyboard text being edited, or null when not editing.
-  const [draft, setDraft] = useState<string | null>(null);
+  // The hand edit in progress, or null when not editing.
+  const [draft, setDraft] = useState<Draft | null>(null);
 
   const storyboardJob = jobs.filter(j => j.kind === 'storyboard').sort((a, b) => b.id - a.id)[0];
   const writing = storyboardJob && ACTIVE.includes(storyboardJob.status) ? storyboardJob : undefined;
-
+  // shared.js and the chapters being built: the server refuses to approve meanwhile.
+  const building = jobs.find(j => (j.kind === 'shared' || j.kind === 'chapter') && ACTIVE.includes(j.status));
+  const currentRevision = manifest.fileRevisions['STORYBOARD.md'] ?? null;
   const save = useMutation({
-    mutationFn: (content: string) => api.put<{ revision: number | null; errors: string[] }>(`${vpath}/files/STORYBOARD.md`, { content }),
+    mutationFn: (d: Draft) =>
+      api.put<{ revision: number | null; errors: string[] }>(`${vpath}/files/STORYBOARD.md`, { content: d.text, baseRevision: d.baseRevision }),
     onSuccess: async () => {
       await refreshVersion();
       setDraft(null);
     },
-    onError: e => toast.error(`Couldn't save the storyboard: ${e.message}`),
+    onError: async e => {
+      if (e instanceof ApiError && e.status === 409) {
+        setDraft(cur => cur && { ...cur, refused: true });
+        await refreshVersion();
+      } else toast.error(`Couldn't save the storyboard: ${e.message}`);
+    },
   });
+  // The storyboard moved on since the edit started (read again after a `version` event, or the save was refused).
+  // Not while saving: the save's own re-read changes both, and the server checks the base anyway.
+  const conflict =
+    !!draft && !save.isPending && (draft.refused || currentRevision !== draft.baseRevision || (storyboard !== undefined && storyboard !== draft.base));
+  const openEditor = () => setDraft({ text: storyboard ?? '', base: storyboard ?? '', baseRevision: currentRevision, refused: false });
+
   const ask = useMutation({
     mutationFn: (text: string) =>
       api.post<{ id: number }>('/api/jobs', { kind: 'storyboard', versionId, params: { feedback: text }, model: model || null }),
@@ -108,9 +132,13 @@ export function StoryboardPanel({ versionId, manifest, jobs, storyboard, storybo
       ? 'Already approved'
       : writing
         ? 'Wait for the storyboard job to finish'
-        : problems.length
-          ? "Fix the storyboard's problems first"
-          : null;
+        : building
+          ? `Wait for the ${building.kind} job that is ${building.status}`
+          : draft
+            ? 'Save or cancel your edit first'
+            : problems.length
+              ? "Fix the storyboard's problems first"
+              : null;
 
   // Approve and the model every Claude action here uses. While the storyboard waits for review, this leads the panel;
   // afterwards it sits under the storyboard, Approve off.
@@ -178,8 +206,9 @@ export function StoryboardPanel({ versionId, manifest, jobs, storyboard, storybo
             size="sm"
             variant="outline"
             className="self-end"
-            disabled={hasStoryboard && storyboard === undefined}
-            onClick={() => setDraft(storyboard ?? '')}
+            disabled={(hasStoryboard && storyboard === undefined) || !!writing}
+            title={writing ? 'Wait for the storyboard job to finish' : undefined}
+            onClick={openEditor}
           >
             <PencilIcon aria-hidden />
             Edit text
@@ -187,14 +216,37 @@ export function StoryboardPanel({ versionId, manifest, jobs, storyboard, storybo
         )}
         {draft !== null ? (
           <>
+            {conflict && (
+              <div role="alert" className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+                <p>
+                  <span className="font-medium">The storyboard changed while you were editing.</span> Reload to see the new text
+                  (your edit is discarded), or keep editing to save yours over it.
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => setDraft(null)}>
+                    Reload
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    // rebased onto the storyboard as it is now: Save then deliberately replaces it
+                    disabled={!!writing || (hasStoryboard && storyboard === undefined)}
+                    onClick={() => setDraft(d => d && { ...d, base: storyboard ?? '', baseRevision: currentRevision, refused: false })}
+                  >
+                    Keep editing
+                  </Button>
+                </div>
+              </div>
+            )}
             <Textarea
               aria-label="Storyboard text"
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
+              value={draft.text}
+              onChange={e => setDraft({ ...draft, text: e.target.value })}
               className="min-h-96 font-mono text-xs"
             />
+            {writing && <p className="text-muted-foreground text-xs">Claude is writing the storyboard: wait for it before saving.</p>}
             <div className="flex gap-2">
-              <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(draft)}>
+              <Button size="sm" disabled={save.isPending || conflict || !!writing} onClick={() => save.mutate(draft)}>
                 Save
               </Button>
               <Button size="sm" variant="ghost" disabled={save.isPending} onClick={() => setDraft(null)}>

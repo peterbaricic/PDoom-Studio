@@ -6,7 +6,7 @@ import { JobLogProvider } from '@/shell/LogViewer';
 import { mockApi, renderInRouter } from '../test-utils';
 import { Inspector } from './Inspector';
 
-// A studio-format storyboard with a table, and raw HTML that must stay text.
+// A studio-format storyboard with a table, raw HTML that must stay text, a javascript: link and an outside image.
 export const STORYBOARD = `---
 title: The Bake-Off
 logline: Clawd bakes.
@@ -15,6 +15,8 @@ logline: Clawd bakes.
 # The Bake-Off: storyboard
 
 The idea: a baking show. <script>window.__pwned = true</script><img src=x onerror="window.__pwned = true">
+
+See [the recipe](javascript:window.__pwned=true) and ![a cat in an apron](http://example.com/cat.png).
 
 ## 1 · The Kitchen (0–23)
 
@@ -52,7 +54,7 @@ export function manifest(overrides: Partial<Manifest> = {}): Manifest {
       { n: 1, name: 'The Kitchen', start: 0, end: 23, text: 'Clawd preheats the oven.' },
       { n: 2, name: 'The Tent', start: 23, end: 38.5, text: 'The tent goes up.' },
     ],
-    fileRevisions: {},
+    fileRevisions: { 'STORYBOARD.md': 2 },
     storyboardErrors: [],
     ...overrides,
   };

@@ -23,7 +23,10 @@ describe('Inspector', () => {
     const { router } = renderInspector({ path: '/versions/mine?ch=2' });
     const feedback = await screen.findByRole('textbox', { name: 'What should change in this chapter?' });
     fireEvent.keyDown(feedback, { key: 'Escape' });
+    // a navigation would have landed by now (the positive case below lands within the same wait)
+    await new Promise(r => setTimeout(r, 50));
     expect(router.state.location.search).toEqual({ ch: 2 });
+    expect(screen.getByRole('heading', { name: /^Chapter 2/, level: 2 })).toBeInTheDocument();
     fireEvent.keyDown(document.body, { key: 'Escape' });
     await waitFor(() => expect(router.state.location.search).toEqual({}));
     expect(await screen.findByRole('heading', { name: 'Storyboard', level: 2 })).toBeInTheDocument();

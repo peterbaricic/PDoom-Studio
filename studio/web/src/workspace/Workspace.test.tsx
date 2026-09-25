@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
 import type { Coverage, Manifest, Song } from '@/api/types';
 import { mockApi, newQueryClient, renderRouteTree } from '../test-utils';
-import { Workspace, workspaceSearch } from './Workspace';
+import { InspectorBoundary, Workspace, workspaceSearch } from './Workspace';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -130,5 +130,32 @@ describe('Workspace', () => {
     renderWorkspace('/versions/mine');
     expect(await screen.findByText("I'm upping my P(doom)")).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: /Final render \(1080p MP4\)/ })).toBeEnabled();
+  });
+
+  test('an inspector that fails (its chunk not loading) shows the error in place, and Retry tries again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {}); // React reports the caught error
+    let failing = true;
+    function Flaky() {
+      if (failing) throw new Error('Failed to fetch dynamically imported module');
+      return <p>the inspector</p>;
+    }
+    const onRetry = vi.fn(() => {
+      failing = false;
+    });
+    render(
+      <div>
+        <p>the player</p>
+        <InspectorBoundary onRetry={onRetry}>
+          <Flaky />
+        </InspectorBoundary>
+      </div>,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load the inspector: Failed to fetch dynamically imported module");
+    expect(screen.getByText('the player')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(await screen.findByText('the inspector')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    vi.mocked(console.error).mockRestore();
   });
 });

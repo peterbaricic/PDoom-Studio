@@ -103,6 +103,19 @@ describe('ChapterPanel', () => {
     expect(calls(fetchMock)).toContain('POST /api/revisions/7/restore');
   });
 
+  test('a restore that goes through reads the history again', async () => {
+    const { fetchMock } = renderChapter({ answers: { 'POST /api/revisions/7/restore': { revision: 13 } } });
+    fireEvent.click(within(await revisionRow(7)).getByRole('button', { name: 'Restore' }));
+    await waitFor(() => expect(calls(fetchMock).filter(c => c === REVISIONS)).toHaveLength(2));
+    expect(calls(fetchMock).indexOf('POST /api/revisions/7/restore')).toBeLessThan(calls(fetchMock).lastIndexOf(REVISIONS));
+    await waitFor(async () => expect(within(await revisionRow(7)).getByRole('button', { name: 'Restore' })).toBeEnabled());
+  });
+
+  test.each(['queued', 'running'] as const)('Restore is off too while a job for this chapter is %s', async status => {
+    renderChapter({ jobs: [job({ id: 4, kind: 'chapter', params: { chapter: 2 }, status })] });
+    for (const id of [9, 7]) expect(within(await revisionRow(id)).getByRole('button', { name: 'Restore' })).toBeDisabled();
+  });
+
   test("lists this chapter's jobs, newest first, each with its log", async () => {
     const { fetchMock } = renderChapter({
       jobs: [

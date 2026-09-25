@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { calls, job } from '../test-utils';
-import { bodies, manifest, never, renderInspector } from './inspectorTestUtils';
+import { STORYBOARD, bodies, manifest, never, renderInspector } from './inspectorTestUtils';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,6 +24,17 @@ describe('StoryboardPanel', () => {
     expect(md).toHaveTextContent('<script>window.__pwned = true</script>');
     expect(container.querySelector('script, img')).toBeNull();
     expect((window as { __pwned?: boolean }).__pwned).toBeUndefined();
+  });
+
+  test('a javascript: link loses its URL, and an image shows only its alt text (nothing is loaded)', async () => {
+    const { container } = renderInspector();
+    const md = await screen.findByTestId('storyboard-markdown');
+    const link = within(md).getByText('the recipe').closest('a')!;
+    expect(link.getAttribute('href') ?? '').not.toMatch(/javascript:/i);
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(container.querySelector('img')).toBeNull();
+    expect(md).toHaveTextContent('[a cat in an apron]');
+    expect(container.innerHTML).not.toContain('example.com');
   });
 
   test('in "storyboard to review": Edit, Ask for changes, a prominent Approve, the concept with Redraft, the options', async () => {
@@ -74,7 +85,86 @@ describe('StoryboardPanel', () => {
     fireEvent.change(editor, { target: { value: 'new text' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled());
-    expect(bodies(fetchMock, 'PUT /api/versions/mine/files/STORYBOARD.md')).toEqual([{ content: 'new text' }]);
+    // the revision the edit started from, so the server can refuse it if the storyboard moved on meanwhile
+    expect(bodies(fetchMock, 'PUT /api/versions/mine/files/STORYBOARD.md')).toEqual([{ content: 'new text', baseRevision: 2 }]);
+  });
+
+  test('a storyboard that changes while you edit (read again after a version event) blocks Save until you choose', async () => {
+    let served = STORYBOARD;
+    const { fetchMock, queryClient } = renderInspector({
+      answers: {
+        'GET /v/mine/STORYBOARD.md': () => new Response(served),
+        'PUT /api/versions/mine/files/STORYBOARD.md': { revision: 9, errors: [] },
+      },
+    });
+    await screen.findByTestId('storyboard-markdown');
+    fireEvent.click(await button(/Edit text/));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Storyboard text' }), { target: { value: 'my edit' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    served = `${STORYBOARD}\nClaude's new ending.\n`;
+    await act(() => queryClient.invalidateQueries({ queryKey: ['version', 'mine'] }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The storyboard changed while you were editing');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Storyboard text' })).toHaveValue('my edit'); // nothing lost yet
+
+    // Keep editing: the edit now starts from the new text, and Save replaces it deliberately
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies(fetchMock, 'PUT /api/versions/mine/files/STORYBOARD.md')).toHaveLength(1));
+  });
+
+  test('Reload discards the edit and shows the storyboard as it is now', async () => {
+    let served = STORYBOARD;
+    const { queryClient } = renderInspector({ answers: { 'GET /v/mine/STORYBOARD.md': () => new Response(served) } });
+    await screen.findByTestId('storyboard-markdown');
+    fireEvent.click(await button(/Edit text/));
+    served = '## 1 · Rewritten by Claude (0–23)\n';
+    await act(() => queryClient.invalidateQueries({ queryKey: ['version', 'mine'] }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reload' }));
+    expect(screen.queryByRole('textbox', { name: 'Storyboard text' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: '1 · Rewritten by Claude (0–23)' })).toBeInTheDocument();
+  });
+
+  test('a save the server refuses (the storyboard moved on) shows the same choice, and Save stays blocked', async () => {
+    renderInspector({
+      answers: {
+        'PUT /api/versions/mine/files/STORYBOARD.md': new Response(
+          JSON.stringify({ error: 'the storyboard changed since you started editing it — reload it to see the new text' }),
+          { status: 409 },
+        ),
+      },
+    });
+    await screen.findByTestId('storyboard-markdown');
+    fireEvent.click(await button(/Edit text/));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The storyboard changed while you were editing');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Storyboard text' })).toBeInTheDocument();
+  });
+
+  test('Edit text waits while a storyboard job is queued or running', async () => {
+    renderInspector({ jobs: [job({ id: 3, kind: 'storyboard', version_id: 'mine', status: 'running' })] });
+    await screen.findByTestId('storyboard-markdown');
+    expect(await button(/Edit text/)).toBeDisabled();
+  });
+
+  test('Approve waits while an edit is open', async () => {
+    renderInspector();
+    await screen.findByTestId('storyboard-markdown');
+    expect(await approve()).toBeEnabled();
+    fireEvent.click(await button(/Edit text/));
+    expect(await approve()).toBeDisabled();
+    expect(screen.getByText('Save or cancel your edit first')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await approve()).toBeEnabled();
+  });
+
+  test.each(['shared', 'chapter'] as const)('Approve waits, saying why, while a %s job of this version is active', async kind => {
+    renderInspector({ jobs: [job({ id: 5, kind, version_id: 'mine', status: 'running', params: kind === 'chapter' ? { chapter: 1 } : {} })] });
+    expect(await approve()).toBeDisabled();
+    expect(screen.getByText(`Wait for the ${kind} job that is running`)).toBeInTheDocument();
   });
 
   test('a saved edit closes the editor', async () => {

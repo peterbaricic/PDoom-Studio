@@ -3,11 +3,12 @@
 // and the selected chapter live in the URL (?t=<seconds>&ch=<1-9>): the URL moves the player (a chapter block's link,
 // the browser's back button, a shared link), and the player writes its position back whenever it's not playing
 // (replacing the history entry, so scrubbing doesn't fill the history).
-import { Suspense, lazy, useCallback, useEffect, useRef } from 'react';
+import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { api } from '@/api/client';
 import type { Coverage, Job, Manifest, Song } from '@/api/types';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { jobsQuery } from '@/shell/JobsDrawer';
 import { LyricsTrack } from './LyricsTrack';
@@ -17,8 +18,38 @@ import { Timeline } from './Timeline';
 import { songEnd } from './timelineGeometry';
 import { usePreviewPlayer } from './usePreviewPlayer';
 
-// Its own chunk: the Markdown renderer it carries is too heavy for the bundle the player waits on.
-const Inspector = lazy(() => import('./Inspector').then(m => ({ default: m.Inspector })));
+// Its own chunk: the Markdown renderer it carries is too heavy for the bundle the player waits on. React.lazy keeps a
+// failed import failed for good, so a retry needs a fresh lazy component; kept at module level so that a workspace
+// opened later reuses the one that loaded.
+const loadInspector = () => lazy(() => import('./Inspector').then(m => ({ default: m.Inspector })));
+let LazyInspector = loadInspector();
+
+// Catches what goes wrong in the inspector (its chunk failing to load, say, after the studio was rebuilt) so it shows
+// in place, with Retry, and never takes the player and timeline down with it.
+export class InspectorBoundary extends Component<{ children: ReactNode; onRetry: () => void }, { error: Error | null }> {
+  override state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  override render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" className="bg-card flex flex-col items-start gap-2 rounded-md border p-3 text-sm">
+        <span>Couldn't load the inspector: {this.state.error.message}</span>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            this.props.onRetry();
+            this.setState({ error: null });
+          }}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+}
 
 export interface WorkspaceSearch {
   ch?: number;
@@ -135,6 +166,11 @@ function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, job
 
   // A chapter selected, or the whole storyboard again: the inspector starts at its top.
   const inspectorBox = useRef<HTMLDivElement>(null);
+  const [Inspector, setInspector] = useState(() => LazyInspector);
+  const retryInspector = useCallback(() => {
+    LazyInspector = loadInspector();
+    setInspector(() => LazyInspector);
+  }, []);
   useEffect(() => {
     if (inspectorBox.current) inspectorBox.current.scrollTop = 0;
   }, [search.ch]);
@@ -166,9 +202,11 @@ function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, job
         <RenderBar versionId={versionId} chapters={written} jobs={jobs} />
       </div>
       <div ref={inspectorBox} className="xl:sticky xl:top-4 xl:max-h-[calc(100dvh-6rem)] xl:w-[28rem] xl:shrink-0 xl:overflow-y-auto">
-        <Suspense fallback={<Skeleton className="h-64 w-full" />}>
-          <Inspector versionId={versionId} manifest={manifest} jobs={jobs} chapter={search.ch} />
-        </Suspense>
+        <InspectorBoundary onRetry={retryInspector}>
+          <Suspense fallback={<Skeleton className="h-64 w-full" />}>
+            <Inspector versionId={versionId} manifest={manifest} jobs={jobs} chapter={search.ch} />
+          </Suspense>
+        </InspectorBoundary>
       </div>
     </div>
   );

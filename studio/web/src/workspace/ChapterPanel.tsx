@@ -1,7 +1,7 @@
 // ChapterPanel.tsx: the inspector with chapter n selected: its section of the storyboard, a feedback box and
 // "Revise chapter" (a chapter job; off while one for this chapter is queued or running), the chapter's code history
-// with Restore on every revision but the current one, and this chapter's jobs. Examples show the section, history
-// and jobs only.
+// with Restore on every revision but the current one (off under the same condition), and this chapter's jobs.
+// Examples show the section, history and jobs only.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -138,7 +138,14 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
                   <span className="text-muted-foreground text-xs">current</span>
                 ) : (
                   editable && (
-                    <Button size="sm" variant="outline" disabled={restore.isPending} onClick={() => restore.mutate(r.id)}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      // a job for this chapter would write over the restored code when it finishes
+                      disabled={restore.isPending || !!reviseBlocked}
+                      title={reviseBlocked ?? undefined}
+                      onClick={() => restore.mutate(r.id)}
+                    >
                       Restore
                     </Button>
                   )
