@@ -30,6 +30,7 @@ import { launchBrowser } from '../browser.js';
 import { getSnapshot, rememberSnapshot, sha256, canonicalJson } from '../snapshot.js';
 import { openSealedPage } from './page.js';
 import { FPS, chapterOfFrame, chapterPaths, depsOf, depsHash } from './keys.js';
+import { CHAPTER_WINDOWS } from '../storyboard.js';
 
 export const PRIORITIES = ['preview', 'prefetch', 'render', 'thumbs', 'background'];
 const PREFETCH = 1, MAX_PREFETCH = 240;
@@ -279,7 +280,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       try {
         out = await within(page.evaluate(async t => {
           const r = await window.paintAt(t);
-          return { url: document.getElementById('out').toDataURL('image/jpeg', .94), castReads: r?.castReads || [] };
+          return { url: document.getElementById('out').toDataURL('image/jpeg', .94), castReads: r?.castReads || [], drawnBy: r?.drawnBy ?? null };
         }, frame / FPS), paintTimeoutMs, () => new Broken(`painting frame ${frame} took over ${paintTimeoutMs / 1000} s`, Date.now() + brokenTtlMs));
       } catch (e) {
         // Stuck: the page goes, and the slot gets a fresh one next time. The break's time counts from now, once the
@@ -293,6 +294,18 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       }
       if (typeof out?.url !== 'string' || !out.url.startsWith('data:image/jpeg;base64,')) throw new Broken('the painting page returned no JPEG');
       const snap = getSnapshot(snapshotId) || { options: {}, files: {} };
+      // The frame is keyed by its window's chapter: drawn by another chapter's registration (one reaching past its
+      // own window), it would change with that chapter's code, not this key's. Not this chapter's fault, so the break
+      // lasts brokenTtlMs: fixing the other chapter doesn't change this key. (Drawn by nothing, it's the engine's
+      // placeholder, which is this key's too.)
+      if (out.drawnBy) {
+        const owner = typeof out.drawnBy.owner === 'string' ? out.drawnBy.owner : null;
+        if (!chapterPaths(snap.files, n).includes(owner)) {
+          const [a, b] = CHAPTER_WINDOWS[n - 1];
+          throw new Broken(`frame ${frame} was drawn by ${owner || 'code outside the version\'s chapter files'}, not by chapter ${n}: `
+            + `a chapter() window reaches into chapter ${n}'s ${a}–${b} s`, Date.now() + brokenTtlMs);
+        }
+      }
       // What the page reports is chapter code's to tamper with, so it's only ever read as { path: string | null }.
       const clean = list => (Array.isArray(list) ? list : []).map(r => ({ path: typeof r?.path === 'string' ? r.path : null }));
       const loadReads = Object.fromEntries(Object.entries(slot.loadReads || {}).map(([p, list]) => [p, clean(list)]));

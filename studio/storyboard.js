@@ -2,6 +2,24 @@
 // their walkthrough blurbs) and reports anything that doesn't match, so a bad storyboard can go back to Claude.
 export const CHAPTER_WINDOWS = [[0, 23], [23, 38.5], [38.5, 59], [59, 73], [73, 95.4], [95.4, 109.4], [109.4, 123.5], [123.5, 140.5], [140.5, 156.6]];
 
+// The chapter() registrations a version's scripts made, as the painting page reports them ({ owner: the script's path
+// or null, name, start, end }), against CHAPTER_WINDOWS: the frame cache keys each frame by the window it falls in,
+// but the engine draws time t with whichever registration covers it, so a chapter registering past its own window
+// would paint its neighbour's frames under the neighbour's key. So only a chapter file may register, and only inside
+// its own window (as many sub-windows as it likes). The song ends inside the last window, so a registration may run
+// past its end (the Original's finale ends at DUR + 1). Returns the errors, one line each.
+export function chapterWindowErrors(registrations) {
+  const errors = [], eps = 1e-9, songEnd = CHAPTER_WINDOWS.at(-1)[1];
+  for (const { owner, name, start, end } of registrations) {
+    const what = `chapter('${name}', ${start}, ${end})`, n = +(/^ch\/c0([1-9])[_.]/.exec(owner || '')?.[1] || 0);
+    if (!n) { errors.push(`${what} is called from ${owner || 'outside the version\'s files'}: only a chapter file (ch/c0<n>…js) may call chapter()`); continue; }
+    const [a, b] = CHAPTER_WINDOWS[n - 1];
+    if (!(Number.isFinite(start) && Number.isFinite(end) && start < end)) errors.push(`${owner}: ${what} is not a window of time (start before end)`);
+    else if (start < a - eps || Math.min(end, songEnd) > b + eps) errors.push(`${owner}: ${what} reaches outside chapter ${n}'s window (${a}–${b} s)`);
+  }
+  return errors;
+}
+
 const HEADING = /^## (\d+)\s*[·:-]\s*(.+?)\s*\(([\d.]+)\s*[–-]\s*([\d.]+)\)\s*$/gm;
 
 export function parseStoryboard(text) {

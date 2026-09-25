@@ -65,9 +65,11 @@ window.versionLoaded = (async () => {
   window.VERSION = m;
   for (const [i, s] of m.scripts.entries()) {
     // A snapshot's scripts are blob URLs; its paths name them.
-    rec?.loading(m.paths?.[i] ?? s);
+    const path = m.paths?.[i] ?? s;
+    rec?.loading(path);
     await new Promise((ok, bad) => {
       const el = document.createElement('script');
+      el.dataset.path = path;   // whose chapter() registrations these are (see chapter() in timeline.js)
       el.src = base + s; el.onload = ok; el.onerror = () => bad(new Error('could not load ' + s));
       document.head.append(el);
     });

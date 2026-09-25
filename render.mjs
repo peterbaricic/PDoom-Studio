@@ -20,6 +20,7 @@ import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 import { openSealedPage } from './studio/frames/page.js';
 import { frameRange } from './studio/frames/keys.js';
+import { chapterWindowErrors } from './studio/storyboard.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
 // Relative paths the caller gives are theirs; everything else is relative to the project.
@@ -168,11 +169,17 @@ const writeSheet = async (page, ts, out) => {
 };
 
 if (args.check) {
-  // Validation for studio jobs: the version must load without errors, and each time must be covered by a chapter and
-  // paint within 20 s without throwing.
+  // Validation for studio jobs: the version must load without errors, every chapter() registration must lie inside its
+  // own chapter's window (see chapterWindowErrors), and each time must be covered by a chapter and paint within 20 s
+  // without throwing.
   // --check=load only loads the version (used for shared.js, which covers no time of its own).
   const errors = [], ts = times(args.check).filter(Number.isFinite);
   const page = await openPage('', errors).catch(e => { errors.push(e.message); return null; });
+  if (page && !errors.length) {
+    const registrations = await page.evaluate(() => CH.map(c => ({ owner: typeof c.owner === 'string' ? c.owner : null, name: String(c.name), start: +c.start, end: +c.end })))
+      .catch(e => { errors.push(e.message); return []; });
+    errors.push(...chapterWindowErrors(registrations));
+  }
   for (const t of (page && !errors.length) ? ts : []) {
     const covered = await page.evaluate(t => CH.some(c => t >= c.start && t < c.end), t).catch(e => { errors.push(e.message); return null; });
     if (covered === null) continue;

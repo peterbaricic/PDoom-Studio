@@ -233,14 +233,17 @@ slowTest('checkWithRenderer checks a chapter job at three times in its window an
   };
   const [a, b] = CHAPTER_WINDOWS[1];
   const good = job('chapter', { chapter: 2 }), bad = job('chapter', { chapter: 2 }), uncovered = job('chapter', { chapter: 2 }), shared = job('shared');
+  const overruns = job('chapter', { chapter: 2 });
   workFolder(good.id, { 'ch/c02.js': `chapter('c2', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
   workFolder(bad.id, { 'ch/c02.js': `chapter('c2', ${a}, ${b}, [[${a}, t => { throw new Error('chapter two paints nothing'); }]]);` });
   workFolder(uncovered.id, { 'ch/c02.js': `chapter('c2', ${a}, ${a + 1}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
   workFolder(shared.id, { 'shared.js': "throw new Error('shared.js does not load');" });
+  // chapter 2 reaching 1.5 s into chapter 3's window (and so painting frames the cache keys under chapter 3)
+  workFolder(overruns.id, { 'ch/c02.js': `chapter('c2', ${a}, ${b + 1.5}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
   const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, versionId: 'v', chapter: j.params?.chapter, ...extra });
   const thumb = join(data, '.studio/thumbs/v/c02.jpg');
   try {
-    const [passed, threw, notCovered, notLoaded] = await Promise.all([check(good), check(bad), check(uncovered), check(shared)]);
+    const [passed, threw, notCovered, notLoaded, overran] = await Promise.all([check(good), check(bad), check(uncovered), check(shared), check(overruns)]);
     expect(passed).toEqual([]);
     expect(readFileSync(thumb).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));   // a JPEG
     expect(threw.join('\n')).toContain('chapter two paints nothing');
@@ -248,6 +251,7 @@ slowTest('checkWithRenderer checks a chapter job at three times in its window an
     // the three times are 0.3 s inside each end and the middle: a chapter ending early leaves the last two uncovered
     expect(notCovered).toEqual([(a + b) / 2, b - .3].map(t => `no chapter covers t=${+t.toFixed(2)}`));
     expect(notLoaded.join('\n')).toContain('shared.js does not load');
+    expect(overran).toEqual([`ch/c02.js: chapter('c2', ${a}, ${b + 1.5}) reaches outside chapter 2's window (${a}–${b} s)`]);
     // cancelled, the check stops and says so
     const ctrl = new AbortController();
     const cancelled = check(good, { signal: ctrl.signal });

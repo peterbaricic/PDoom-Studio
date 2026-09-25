@@ -218,12 +218,13 @@ function composite(t) {
   c.globalCompositeOperation = 'source-over';
   drawKaraokeText(c);
 }
-// With ?record-cast (see CAST in loader.js), it returns { castReads }: the CAST entries this frame read.
+// With ?record-cast (see CAST in loader.js), it returns { castReads, drawnBy }: the CAST entries this frame read, and
+// which chapter registration drew it ({ owner: its script's path, or null }, or null when none covered t).
 window.paintAt = async t => {
   const rec = window.castRecorder;
   rec?.begin();
   T = t; await redraw(); composite(t);
-  if (rec) return { castReads: rec.end() };
+  if (rec) return { castReads: rec.end(), drawnBy: CH_DRAWN && { owner: CH_DRAWN.owner ?? null } };
 };
 window.renderAt = async (t, type = 'image/png', q = .92) => { await window.paintAt(t); return outC.toDataURL(type, q); };
 // Contact sheet of several times, for quick visual checks: returns { url, ms[] }.

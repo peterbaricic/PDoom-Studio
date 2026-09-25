@@ -3,9 +3,17 @@
 // Each chapter file calls chapter(name, start, end, shots) where shots = [[t0, fn], ...] in time order.
 // A shot function is called as fn(t, lt, dur): t = song time, lt = t - t0, dur = shot length. It paints the whole frame
 // (backgrounds included) and must be a pure function of t: frames render in parallel and out of order.
+// Each registration remembers the script that made it (owner: its path, as src/loader.js names it; null for one made
+// by anything but a version script as it loads), and CH_DRAWN the registration that drew the last frame (null: none
+// covered it). The studio caches frames per chapter window (studio/storyboard.js's CHAPTER_WINDOWS), so it checks that
+// a chapter registers only inside its own window, and that a frame was drawn by its own window's chapter.
 
 const CH = [];
-function chapter(name, start, end, shots) { CH.push({ name, start, end, shots }); CH.sort((a, b) => a.start - b.start); }
+let CH_DRAWN = null;
+function chapter(name, start, end, shots) {
+  CH.push({ name, start, end, shots, owner: document.currentScript?.dataset.path ?? null });
+  CH.sort((a, b) => a.start - b.start);
+}
 
 // Chapter breaks that get a brush wipe (cover by the boundary, reveal after it).
 const WIPES = [1.5, 38.5, 73.0, 109.4];
@@ -29,6 +37,7 @@ const LOOPS = {};
 function drawWorld(t) {
   if (window.LOOP) { window.LOOP(t); flushLetters(); return; }
   const ch = CH.find(c => t >= c.start && t < c.end);
+  CH_DRAWN = ch || null;
   if (!ch) placeholder(t);
   else {
     let i = 0; while (i + 1 < ch.shots.length && t >= ch.shots[i + 1][0]) i++;

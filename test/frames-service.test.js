@@ -320,6 +320,24 @@ slowTest('a chapter that throws, one that never finishes and one whose script th
   expect((await frameOf('bad', 601)).file).toBeDefined();
 }, T);
 
+slowTest('a frame drawn by another chapter\'s registration (one reaching past its own window) breaks its segment for a while, with a clear error', async () => {
+  // chapter 2 reaches 1.5 s into chapter 3's window: the frames there are keyed under chapter 3, but chapter 2 draws them
+  db.createVersion({ id: 'overrun' });
+  db.writeFiles('overrun', [
+    { path: 'ch/c02.js', content: fastChapter(2).replace(', 38.5, [[', ', 40, [[') },
+    { path: 'ch/c03.js', content: fastChapter(3) },
+  ], { source: 'manual' });
+  const into3 = 930;   // 38.75 s
+  const r = await frameOf('overrun', into3, 'prefetch');
+  expect(r.broken).toBe("frame 930 was drawn by ch/c02.js, not by chapter 3: a chapter() window reaches into chapter 3's 38.5–59 s");
+  expect(service.coverage('overrun').broken).toEqual([{ chapter: 3, error: r.broken }]);
+  expect(existsSync(cache.path(keysOf('overrun')[3], into3))).toBe(false);   // never cached under chapter 3's key
+  // chapter 2's own frames are fine; chapter 3's past the overrun too, once the break has run out (4 s here)
+  expect((await frameOf('overrun', 600, 'prefetch')).file).toBeDefined();
+  await until(() => !service.frame('overrun', 1000, 'prefetch').broken, 10000);
+  expect((await frameOf('overrun', 1000, 'prefetch')).file).toBeDefined();
+}, T);
+
 slowTest('a paint that times out stays broken for brokenTtlMs from when its answer arrives, not from the timeout', async () => {
   // Closing the stuck page comes first (Chrome takes about half a second to end a looping renderer here, up to the 5 s
   // closePage allows); that time used to come off the break, so a slow close could hand over a break already over.
