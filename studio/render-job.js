@@ -3,7 +3,7 @@
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CHAPTER_WINDOWS } from './storyboard.js';
-import { FPS, N, DURATION } from './frames/keys.js';
+import { FPS, DURATION, frameRange } from './frames/keys.js';
 
 // Runs ffmpeg directly, killing it on cancellation.
 async function runFfmpeg(argv, { root, ctx }) {
@@ -49,7 +49,7 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
   const render = async (job, ctx) => {
     const t0 = Date.now();
     const vid = job.version_id, range = job.params.frames || `0:${DURATION}`, [a, b] = range.split(':').map(Number);
-    const first = Math.max(0, Math.round(a * FPS)), last = Math.min(N - 1, Math.round(b * FPS) - 1);
+    const { first, last } = frameRange(a, b);
     if (last < first) throw new Error(`empty frame range: ${range}`);
     const version = db.getVersion(vid);
     if (!version) throw new Error(`no such version: ${vid}`);

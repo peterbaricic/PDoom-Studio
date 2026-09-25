@@ -19,6 +19,19 @@ const spawn = async (argv, opts) => {
   return { out, err, code };
 };
 const run = (...a) => spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv() });
+// An MP4's video frame count and each stream's length, from ffprobe.
+const probe = file => {
+  const r = Bun.spawnSync(['ffprobe', '-v', 'quiet', '-count_frames', '-print_format', 'json', '-show_streams', file]);
+  const streams = JSON.parse(r.stdout.toString()).streams, of = type => streams.find(st => st.codec_type === type);
+  return { frames: +of('video').nb_read_frames, video: +of('video').duration, audio: +of('audio').duration };
+};
+// Exactly n frames at 24 fps, and the song cut to the same length.
+const expectExactly = (file, n) => {
+  const p = probe(file);
+  expect(p.frames).toBe(n);
+  expect(Math.abs(p.video - n / 24)).toBeLessThan(.01);
+  expect(Math.abs(p.audio - n / 24)).toBeLessThan(.03);
+};
 const runSandboxed = (sandbox, ...a) => spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv(undefined, { STUDIO_SANDBOX: sandbox }) });
 
 // A studio job as Claude's Bash tool sees it: a job in a throwaway database, its work folder holding the original's
@@ -72,7 +85,14 @@ test('renders a short range of frames and encodes it', async () => {
   const out = join(dir, 'clip.mp4');
   const e = await run('--encode', `--frames-dir=${dir}`, `--out=${out}`, '--start=960');
   expect(e.code).toBe(0);
-  expect(existsSync(out)).toBe(true);
+  expectExactly(out, 12);
+}, T);
+
+test('a clip is exactly its frames, with the song cut to match', async () => {
+  const out = join(mkdtempSync(join(tmpdir(), 'clip-')), 'clip.mp4');
+  const c = await run('--clip=40:40.25', `--out=${out}`);
+  expect(c.code).toBe(0);
+  expectExactly(out, 6);
 }, T);
 
 test('the synthetic key press that arms the navigation guard does not perturb the picture', async () => {

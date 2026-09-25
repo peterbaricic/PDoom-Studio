@@ -19,6 +19,7 @@ import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
 import { openSealedPage } from './studio/frames/page.js';
+import { frameRange } from './studio/frames/keys.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map(a => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
 // Relative paths the caller gives are theirs; everything else is relative to the project.
@@ -94,7 +95,8 @@ if (args.encode) {
   await run('ffmpeg', ['-y', '-loglevel', 'error', '-stats', '-framerate', String(fps), '-start_number', String(start), '-i', `${FRAMES_DIR}/f%05d.jpg`,
     '-ss', String(start / fps), '-i', 'assets/pdoom.mp3',
     '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-    '-movflags', '+faststart', '-shortest', out]);
+    // Exactly the n frames, and the song cut to their length (-shortest lets the audio run on past the picture).
+    '-frames:v', String(n), '-t', (n / fps).toFixed(6), '-movflags', '+faststart', out]);
   console.log('wrote ' + out);
   process.exit(0);
 }
@@ -206,7 +208,7 @@ if (args.check) {
   // Parallel, resumable: each worker page pulls the next missing frame index; files are written atomically.
   const [a, b] = String(args.frames).split(':').map(Number), workers = +(args.workers || 4);
   mkdirSync(FRAMES_DIR, { recursive: true });
-  const first = Math.round(a * fps), last = Math.min(Math.ceil(DUR * fps) - 1, Math.round(b * fps) - 1);
+  const { first, last } = frameRange(a, b, fps, Math.ceil(DUR * fps));
   const todo = []; for (let i = first; i <= last; i++) { const f = `${FRAMES_DIR}/f${String(i).padStart(5, '0')}.jpg`; if (!existsSync(f) || statSync(f).size < 1000) todo.push(i); }
   console.log(`${todo.length} frames to render (${last - first + 1 - todo.length} already done), ${workers} workers`);
   let next = 0, done = 0; const start = Date.now();
@@ -228,11 +230,13 @@ if (args.check) {
   const page = await openPage();
   const [a, b] = args.clip ? String(args.clip).split(':').map(Number) : [0, DUR];
   const out = outPath('out/clip.mp4'); mkdirSync(dirname(out), { recursive: true });
+  // Every frame whose time falls in [a, b), the song's last partial frame included.
+  const n = Math.ceil((b - a) * fps - 1e-6), start = Date.now();
   const ff = child('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
     '-ss', String(a), '-t', String(b - a), '-i', 'assets/pdoom.mp3',
-    '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', out],
+    '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+    '-frames:v', String(n), '-t', (n / fps).toFixed(6), out],
     { stdio: ['pipe', 'inherit', 'inherit'] });
-  const n = Math.round((b - a) * fps), start = Date.now();
   for (let i = 0; i < n; i++) {
     const buf = await frameOf(page, a + i / fps, 'image/jpeg', .92);
     if (!ff.stdin.write(buf)) await new Promise(r => ff.stdin.once('drain', r));

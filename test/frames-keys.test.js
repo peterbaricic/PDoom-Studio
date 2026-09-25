@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { cpSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FPS, N, chapterOfFrame, framesOfChapter, engineHash, segmentKey, segmentKeys, currentShas, depsOf, depsHash } from '../studio/frames/keys.js';
+import { FPS, N, DURATION, frameRange, chapterOfFrame, framesOfChapter, engineHash, segmentKey, segmentKeys, currentShas, depsOf, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 import { sha256 } from '../studio/snapshot.js';
 import { tempDir } from './helpers.js';
@@ -11,6 +11,18 @@ const root = process.cwd();
 test('the song is 3759 frames at 24 fps', () => {
   expect(FPS).toBe(24);
   expect(N).toBe(3759);
+});
+
+test('frameRange turns a range in seconds into the frames whose times fall in it, the song\'s last partial frame included', () => {
+  expect(frameRange(0, DURATION)).toEqual({ first: 0, last: N - 1 });   // 0..3758: t = 156.583 is in the song
+  expect(frameRange(0, 999)).toEqual({ first: 0, last: N - 1 });
+  expect(frameRange(0, .25)).toEqual({ first: 0, last: 5 });
+  // Exact at frame boundaries, whatever the floating point does to first / FPS and (last + 1) / FPS.
+  for (const [f, l] of [[200, 223], [96, 105], [532, 571], [1, 1], [3700, 3758]]) expect(frameRange(f / FPS, (l + 1) / FPS)).toEqual({ first: f, last: l });
+  expect(frameRange(40, 40.5)).toEqual({ first: 960, last: 971 });
+  // Another frame rate, and its own frame count (render.mjs --fps).
+  expect(frameRange(0, DURATION, 30, Math.ceil(DURATION * 30))).toEqual({ first: 0, last: 4697 });
+  expect(frameRange(5, 5).last).toBeLessThan(frameRange(5, 5).first);   // empty
 });
 
 test('chapterOfFrame follows the chapter windows, boundaries included', () => {

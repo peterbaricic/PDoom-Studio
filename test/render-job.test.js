@@ -24,8 +24,8 @@ const fastChapter = (n, extra = '') => {
   return `chapter('c${n}', ${a}, ${b}, [[${a}, t => { ${extra} paint(rectPts(100 + (t - ${a}) * 20, 200, 300, 200), { wash: PAL.clay }); }]]);`;
 };
 const freePort = () => { const s = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() }); const p = s.port; s.stop(true); return p; };
-// Seconds bounds that render() turns back into exactly frames first..last (rangeFor(f,l) : Math.round(a*FPS) === f
-// and Math.round(b*FPS) - 1 === l, since f and l+1 are themselves whole numbers of frames).
+// Seconds bounds that render() turns back into exactly frames first..last (frameRange in studio/frames/keys.js: f and
+// l + 1 are whole numbers of frames, so each bound is exactly a frame's time).
 const rangeFor = (first, last) => `${first / FPS}:${(last + 1) / FPS}`;
 const keyOf = (versionId, n) => segmentKeys(snapshotOf(db, versionId), engineHash(root))[n];
 

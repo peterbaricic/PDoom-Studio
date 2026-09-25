@@ -11,6 +11,14 @@ import { sha256, canonicalJson } from '../snapshot.js';
 
 export const FPS = 24, DURATION = 156.6, N = Math.ceil(DURATION * FPS);
 
+// The frames a range of seconds [a, b) covers: those whose time i / fps falls in it, clamped to the song's n frames.
+// The song ends partway through its last frame (156.6 s is frame 3758.4), which is a frame all the same: the default
+// full range 0..DURATION is frames 0..N-1. The small epsilon keeps a bound that is exactly a frame's time (as
+// first / fps and (last + 1) / fps are, give or take floating point) on that frame.
+export function frameRange(a, b, fps = FPS, n = N) {
+  return { first: Math.max(0, Math.ceil(a * fps - 1e-6)), last: Math.min(n - 1, Math.ceil(b * fps - 1e-6) - 1) };
+}
+
 // Which chapter window each frame falls in, by t = i / FPS, exactly as the engine picks the chapter for t
 // (t >= start && t < end).
 const CHAPTER_OF = new Uint8Array(N).map((_, i) => 1 + CHAPTER_WINDOWS.findIndex(([a, b]) => i / FPS >= a && i / FPS < b));
