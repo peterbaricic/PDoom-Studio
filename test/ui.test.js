@@ -7,6 +7,7 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { rmSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { Database } from 'bun:sqlite';
 import { dirname, join } from 'node:path';
 import { launchBrowser } from '../studio/browser.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
@@ -76,9 +77,9 @@ const versionMenu = async item => {
   await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
 };
 const noDialog = () => page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 10000 });
-// How many frames the timeline's coverage shading covers.
-const shaded = () => page.$$eval('[aria-label="Playhead"] [data-range]', els =>
-  els.reduce((n, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return n + b - a + 1; }, 0));
+// How many of frames first..last the timeline's coverage shading covers (in the page, for waitForFunction too).
+const shadedIn = (first, last) => [...document.querySelectorAll('[aria-label="Playhead"] [data-range]')]
+  .reduce((n, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return n + Math.max(0, Math.min(b, last) - Math.max(a, first) + 1); }, 0);
 
 beforeAll(async () => {
   ({ proc: server, url, port } = await startServer());
@@ -137,16 +138,20 @@ test('a new version: its storyboard, approved, becomes nine ready chapter blocks
     { timeout: 10000 });
 }), 600000);
 
-test('the preview plays: server-painted frames arrive and the coverage shading grows', step(async () => {
+test('the preview plays: server-painted frames arrive and the coverage shading grows where it plays', step(async () => {
+  // From chapter 8's start, the far end of the song from where the player has been painting ahead so far (from 0).
+  // The shading is measured over the ten seconds played from there: the preview's own frames and its look-ahead fill
+  // it, while the thumbnails job (the only other painter here) paints at most one frame of it (0.3 s into the chapter).
+  const start = CHAPTER_WINDOWS[7][0], first = Math.ceil(start * 24 - 1e-6), last = first + 239;
+  await page.click('button[aria-pressed][aria-label^="Chapter 8"]');
+  await page.waitForFunction(t => Math.abs(document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') - t) < .1, { timeout: 10000 }, start);
   await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
-  const before = await shaded(), framesBefore = frameResponses.filter(r => r.startsWith('200')).length;
+  const before = await page.evaluate(shadedIn, first, last), framesBefore = frameResponses.filter(r => r.startsWith('200')).length;
   await clickButton('[data-painting]', 'Play');
-  await page.waitForFunction(n => document.querySelectorAll('[aria-label="Playhead"] [data-range]').length &&
-    [...document.querySelectorAll('[aria-label="Playhead"] [data-range]')].reduce((s, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return s + b - a + 1; }, 0) >= n,
-  { timeout: 120000, polling: 250 }, before + 48);
-  await page.waitForFunction(() => document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') > 0, { timeout: 120000, polling: 250 });
-  expect(frameResponses.filter(r => r.startsWith('200')).length).toBeGreaterThan(framesBefore);
-  expect(await shaded()).toBeGreaterThan(before);
+  await page.waitForFunction(`(${shadedIn})(${first}, ${last}) >= ${Math.min(before + 48, 240)}`, { timeout: 120000, polling: 250 });
+  await page.waitForFunction(t => +document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') > t, { timeout: 120000, polling: 250 }, start);
+  expect(frameResponses.slice(framesBefore).some(r => /^200 \/api\/frames\/e2e-test-show\/\d+\.jpg$/.test(r))).toBe(true);
+  expect(await page.evaluate(shadedIn, first, last)).toBeGreaterThan(Math.min(before, 239));
   // Stop it (Pause while playing; Cancel while it waits for frames).
   await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
 }), 300000);
@@ -167,8 +172,8 @@ test('a final render of a short range shows in the workspace, the library and th
   await page.click('article a[href^="/versions/e2e-test-show/watch"]');
   await page.waitForSelector('video[data-testid="watch-video"]', { timeout: 10000 });
   await page.waitForFunction(() => document.querySelector('video[data-testid="watch-video"]').readyState >= 1, { timeout: 10000 });
-  // The short range, not the whole song (ffmpeg's -shortest lets the audio run on past the video's 0.25 s a little).
-  expect(await page.$eval('video[data-testid="watch-video"]', v => v.duration >= .25 && v.duration < 2)).toBe(true);
+  // Exactly the range's 0.25 s, not the whole song.
+  expect(await page.$eval('video[data-testid="watch-video"]', v => Math.abs(v.duration - .25) < .05)).toBe(true);
   expect(await page.$$eval('ol[aria-label="Walkthrough"] li', l => l.length)).toBe(9);
 }), 240000);
 
@@ -238,13 +243,18 @@ test('after a server restart, the next change shows the reload banner; a reload 
 
 test("chapter code never ran in the browser: it loaded only the app's own Vite chunks as scripts", () => {
   expect(scripts.length).toBeGreaterThan(0);
-  expect(scripts.filter(u => !new RegExp(`^${url}/app-assets/[\\w.-]+\\.js$`).test(u))).toEqual([]);
+  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const own = new RegExp(`^${escaped}/app-assets/[\\w.-]+\\.js$`);
+  expect(scripts.filter(u => !own.test(u))).toEqual([]);
   // No version code, snapshot, blob, work folder or engine page was ever requested, as a script or otherwise.
   expect(requests.filter(u => /\/v\/[^/]+\/.*\.js(\?|$)|\/api\/blob\/|\/api\/snapshot\/|\/work\/|\/studio\.html|\/src\/[\w.-]+\.js/.test(new URL(u).pathname))).toEqual([]);
   // No other page, frame or worker either.
   expect(targets.filter(t => !t.startsWith('page '))).toEqual([]);
   expect(page.frames()).toHaveLength(1);
   expect(pageErrors).toEqual([]);
-  // Promote wrote to the private copy only.
+  // Promote wrote to the private copy, and only to it.
   expect(md5(repoDefaultDb)).toBe(repoDefaultBefore);
+  // (Read back rather than compared by checksum: the promote may still sit in the copy's WAL file, not its main file.)
+  const copy = new Database(defaultDb, { readonly: true });
+  try { expect(copy.query("select id from versions where id = 'e2e-remix'").get()).toEqual({ id: 'e2e-remix' }); } finally { copy.close(); }
 });

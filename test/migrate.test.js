@@ -7,6 +7,7 @@ import { openDb } from '../studio/db.js';
 import { migrateLegacyDb, cleanLegacyOriginal } from '../studio/migrate.js';
 
 const tempRoot = () => mkdtempSync(join(tmpdir(), 'migrate-'));
+const quiet = () => {};   // what it says it did isn't what these check (the "prints what it did" tests collect it)
 
 test('renames studio.db to user.db, drops the Original, and keeps everything else intact', () => {
   const root = tempRoot(), userPath = join(root, 'user.db'), legacyPath = join(root, 'studio.db');
@@ -28,7 +29,7 @@ test('renames studio.db to user.db, drops the Original, and keeps everything els
   // itself before renaming, or all of this would be silently left behind at the old path.
   expect(existsSync(`${legacyPath}-wal`)).toBe(true);
 
-  const result = migrateLegacyDb(root, { userPath });
+  const result = migrateLegacyDb(root, { userPath, log: quiet });
   expect(result).toBe(true);
   expect(existsSync(userPath)).toBe(true);
   expect(existsSync(legacyPath)).toBe(false);
@@ -80,7 +81,7 @@ test('an interruption between cleaning the Original out and the rename is recove
 
   // The next start: migrateLegacyDb sees studio.db still there (now already cleaned) and user.db still missing,
   // and finishes the migration.
-  const result = migrateLegacyDb(root, { userPath });
+  const result = migrateLegacyDb(root, { userPath, log: quiet });
   expect(result).toBe(true);
   expect(existsSync(userPath)).toBe(true);
   expect(existsSync(legacyPath)).toBe(false);
@@ -107,7 +108,7 @@ test('refuses to migrate while a studio server still holds the lock on studio.db
 
   writeFileSync(`${legacyPath}.lock`, JSON.stringify({ pid: process.pid, port: 4321 }));   // this test process: alive
 
-  expect(() => migrateLegacyDb(root, { userPath }))
+  expect(() => migrateLegacyDb(root, { userPath, log: quiet }))
     .toThrow(`stop the running studio first (pid ${process.pid}, http://localhost:4321/) — studio.db is still in use`);
 
   // nothing touched
@@ -127,7 +128,7 @@ test('a stale lock (a dead pid) does not block migration', async () => {
   await p.exited;   // now definitely dead
   writeFileSync(`${legacyPath}.lock`, JSON.stringify({ pid: p.pid, port: 4321 }));
 
-  expect(migrateLegacyDb(root, { userPath })).toBe(true);
+  expect(migrateLegacyDb(root, { userPath, log: quiet })).toBe(true);
   expect(existsSync(userPath)).toBe(true);
 });
 
@@ -146,7 +147,7 @@ test('an incomplete checkpoint (another connection still holding the WAL open) r
   reader.exec('BEGIN');
   reader.query('SELECT 1 FROM versions').all();
   try {
-    expect(() => migrateLegacyDb(root, { userPath })).toThrow(/did not fully checkpoint/);
+    expect(() => migrateLegacyDb(root, { userPath, log: quiet })).toThrow(/did not fully checkpoint/);
 
     // nothing deleted or renamed
     expect(existsSync(legacyPath)).toBe(true);
@@ -157,7 +158,7 @@ test('an incomplete checkpoint (another connection still holding the WAL open) r
   }
 
   // once the blocker is gone, a retry completes cleanly, with nothing lost
-  expect(migrateLegacyDb(root, { userPath })).toBe(true);
+  expect(migrateLegacyDb(root, { userPath, log: quiet })).toBe(true);
   const migrated = openDb(userPath);
   expect(migrated.getVersion('original')).toBeNull();
   migrated.close();
@@ -166,9 +167,8 @@ test('an incomplete checkpoint (another connection still holding the WAL open) r
 test('prints what it did', () => {
   const root = tempRoot(), userPath = join(root, 'user.db');
   openDb(join(root, 'studio.db')).close();
-  const logs = [], orig = console.log;
-  console.log = (...a) => logs.push(a.join(' '));
-  try { migrateLegacyDb(root, { userPath }); } finally { console.log = orig; }
+  const logs = [];
+  migrateLegacyDb(root, { userPath, log: m => logs.push(m) });
   expect(logs).toContain('Moved studio.db to user.db (the Original now comes from studio/default.db).');
 });
 
@@ -184,9 +184,8 @@ test('an Original with edits of the user\'s own is kept, renamed to original-edi
   const jid = legacy.addJob({ kind: 'chapter', versionId: 'original', params: { chapter: 1 } });
   legacy.close();
 
-  const logs = [], orig = console.log;
-  console.log = (...a) => logs.push(a.join(' '));
-  try { expect(migrateLegacyDb(root, { userPath })).toBe(true); } finally { console.log = orig; }
+  const logs = [];
+  expect(migrateLegacyDb(root, { userPath, log: m => logs.push(m) })).toBe(true);
   expect(logs).toEqual(['Moved studio.db to user.db (the Original now comes from studio/default.db).',
     'Your edits to the Original were kept, as the version "original-edited".']);
 
@@ -208,9 +207,7 @@ test('the kept Original takes the next free name when original-edited is already
   legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'edited' }], { source: 'manual' });
   legacy.createVersion({ id: 'original-edited', title: 'Taken' });
   legacy.close();
-  const orig = console.log;
-  console.log = () => {};
-  try { migrateLegacyDb(root, { userPath }); } finally { console.log = orig; }
+  migrateLegacyDb(root, { userPath, log: quiet });
   const migrated = openDb(userPath);
   expect(migrated.getVersion('original-edited').title).toBe('Taken');
   expect(migrated.getFile('original-edited-2', 'STORYBOARD.md').content).toBe('edited');
@@ -225,7 +222,7 @@ test('a user.db-wal or user.db-shm without its user.db is refused, and nothing i
     legacy.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'orig storyboard' }], { source: 'import' });
     legacy.close();
     writeFileSync(userPath + ext, 'left over from some other database');
-    expect(() => migrateLegacyDb(root, { userPath })).toThrow(`${userPath}${ext} exists without ${userPath}`);
+    expect(() => migrateLegacyDb(root, { userPath, log: quiet })).toThrow(`${userPath}${ext} exists without ${userPath}`);
     expect(existsSync(userPath)).toBe(false);
     const untouched = openDb(legacyPath);
     expect(untouched.getVersion('original')).toMatchObject({ id: 'original', title: 'Orig' });
@@ -234,12 +231,12 @@ test('a user.db-wal or user.db-shm without its user.db is refused, and nothing i
   // also when there is nothing to migrate: a new user.db would take the stray file for its own just the same
   const root = tempRoot(), userPath = join(root, 'user.db');
   writeFileSync(userPath + '-wal', 'stray');
-  expect(() => migrateLegacyDb(root, { userPath })).toThrow('exists without');
+  expect(() => migrateLegacyDb(root, { userPath, log: quiet })).toThrow('exists without');
 });
 
 test('does nothing when studio.db does not exist', () => {
   const root = tempRoot(), userPath = join(root, 'user.db');
-  expect(migrateLegacyDb(root, { userPath })).toBe(false);
+  expect(migrateLegacyDb(root, { userPath, log: quiet })).toBe(false);
   expect(existsSync(userPath)).toBe(false);
 });
 
@@ -248,6 +245,6 @@ test('does nothing when user.db already exists, and leaves studio.db untouched',
   openDb(legacyPath).close();
   openDb(userPath).close();
 
-  expect(migrateLegacyDb(root, { userPath })).toBe(false);
+  expect(migrateLegacyDb(root, { userPath, log: quiet })).toBe(false);
   expect(existsSync(legacyPath)).toBe(true);
 });

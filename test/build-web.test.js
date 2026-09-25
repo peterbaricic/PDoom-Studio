@@ -52,3 +52,12 @@ test('a failed build leaves no stamp behind, so the next start tries again', () 
   expect(() => buildWebIfStale(r.root, { build: () => { throw new Error('vite failed'); } })).toThrow('vite failed');
   expect(buildWebIfStale(r.root, { build: r.build })).toBe(true);
 });
+
+test('progress and the build\'s own report go to log, and nowhere without one', () => {
+  const r = fakeRepo(), logs = [];
+  const build = (root, webDir, log) => { r.build(root, webDir); log('vite: built'); };
+  expect(buildWebIfStale(r.root, { build, log: m => logs.push(m) })).toBe(true);
+  expect(logs).toEqual(['Building studio/web (there is no build yet)…', 'vite: built']);
+  rmSync(join(r.web, 'dist'), { recursive: true });
+  expect(buildWebIfStale(r.root, { build })).toBe(true);   // the default log takes it silently
+});

@@ -61,7 +61,8 @@ export function cleanLegacyOriginal(legacyPath) {
 // half migrated. If the process dies before the rename, studio.db (perhaps already cleaned) is still there for the
 // next call to pick back up; a database killed mid-clean rolls back to before that transaction, and gets cleaned
 // again on retry. Once the rename has happened, userPath exists and every later call is a no-op.
-export function migrateLegacyDb(root, { userPath }) {
+// log: where to say what it did (the studio prints it; tests collect or drop it).
+export function migrateLegacyDb(root, { userPath, log = console.log }) {
   if (existsSync(userPath)) return false;
   const stray = [`${userPath}-wal`, `${userPath}-shm`].find(p => existsSync(p));
   if (stray) throw new Error(`${stray} exists without ${userPath} — move it out of the way first (SQLite would replay it onto the new database)`);
@@ -74,7 +75,7 @@ export function migrateLegacyDb(root, { userPath }) {
   const keptAs = cleanLegacyOriginal(legacyPath);
   renameSync(legacyPath, userPath);
 
-  console.log('Moved studio.db to user.db (the Original now comes from studio/default.db).');
-  if (keptAs) console.log(`Your edits to the Original were kept, as the version "${keptAs}".`);
+  log('Moved studio.db to user.db (the Original now comes from studio/default.db).');
+  if (keptAs) log(`Your edits to the Original were kept, as the version "${keptAs}".`);
   return true;
 }

@@ -32,23 +32,28 @@ export function staleReason(webDir) {
   return null;
 }
 
-function viteBuild(root, webDir) {
+// Vite's report goes to log (the studio prints it; a test's in-process build keeps quiet), and into the error if the
+// build fails, whoever asked for it.
+function viteBuild(root, webDir, log) {
   const vite = join(root, 'node_modules/.bin/vite');
   const res = Bun.spawnSync([vite, 'build', '--config', join(webDir, 'vite.config.ts')], {
-    cwd: root, stdout: 'inherit', stderr: 'inherit',
+    cwd: root, stdout: 'pipe', stderr: 'pipe',
     env: { ...process.env, NODE_ENV: 'production', VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' },
   });
-  if (!res.success) throw new Error(`building studio/web failed (vite exited with code ${res.exitCode})`);
+  const output = `${res.stdout.toString()}${res.stderr.toString()}`.trimEnd();
+  if (!res.success) throw new Error(`building studio/web failed (vite exited with code ${res.exitCode}):\n${output}`);
+  if (output) log(output);
 }
 
 // root: the repo root. Returns true if it rebuilt, false if the build was already fresh. Throws if the build fails.
-// build: what does the building (tests stub it); it has to leave dist/index.html behind.
+// log: where progress and Vite's report go (default: nowhere). build: what does the building (tests stub it); it has
+// to leave dist/index.html behind.
 export function buildWebIfStale(root, { log = () => {}, build = viteBuild } = {}) {
   const webDir = join(root, 'studio/web');
   const reason = staleReason(webDir);
   if (!reason) return false;
   log(`Building studio/web (${reason})…`);
-  build(root, webDir);
+  build(root, webDir, log);
   writeFileSync(join(webDir, 'dist/.build-stamp'), STAMP);
   return true;
 }
