@@ -135,7 +135,8 @@ async function openPage(tag = '', errors = null, { strict = false } = {}) {
     window.open = () => null;
     // A same-tab navigation away (location.href = …, a link, a form) starts with beforeunload; cancelling it here
     // keeps the current document live, instead of racing to abort the network request after the browser already
-    // committed to unloading (which reliably wedges the renderer — the page never becomes ready). It needs
+    // committed to unloading (which reliably wedges the renderer — the page never becomes ready). src/loader.js
+    // cancels such navigations even earlier, through the Navigation API; this stays as the next line. It needs
     // studio.html's sandbox to allow modals: without allow-modals, Chrome skips the prompt and lets the page go.
     addEventListener('beforeunload', e => { e.preventDefault(); e.returnValue = ''; });
   });

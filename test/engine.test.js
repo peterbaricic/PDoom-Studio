@@ -150,6 +150,63 @@ test('the player renders the requested version in its workers', async () => {
   await page.close();
 }, T);
 
+test("in the user's own browser (no proxy, no request interception), a player worker's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
+  // watch.html's workers run chapter code in whatever browser the user previews with, where none of launchBrowser's
+  // flags or render.mjs's interception apply: only what the server sends (the CSP and its sandbox) and what
+  // src/loader.js does before the version's scripts run. So this runs the real player in a browser launched with the
+  // GPU flags alone; puppeteer's own defaults even turn Chrome's popup blocker off, so only the sandbox stops popups.
+  // Not tried here, because nothing there stops them: <link rel=prerender> (a full GET of any URL), preconnect and
+  // dns-prefetch (a DNS lookup, and for preconnect a bare TCP connection), a frame's navigation that frame-src refuses
+  // (a bare TCP connection all the same), and RTCPeerConnection taken from a fresh about:blank iframe.
+  const names = ['open', 'docopen', 'blank', 'popup-fetch', 'nav', 'nav-realm', 'nav-meta', 'rtc', 'fetch', 'img', 'inline'];
+  const cap = await captureHosts(names), E = Object.fromEntries(names.map(n => [n, cap.url(n)]));
+  db.createVersion({ id: 'b-escapee' });
+  db.writeFiles('b-escapee', [{ path: 'ch/c01.js', content: `
+const E = ${JSON.stringify(E)}, attempt = f => { try { f(); } catch {} };
+window.CHAPTER_RAN = true;
+attempt(() => window.open(E.open + '/open'));
+attempt(() => document.open(E.docopen + '/docopen', 'x', ''));
+attempt(() => { const a = document.createElement('a'); a.href = E.blank + '/blank'; a.target = '_blank'; document.body.append(a); a.click(); });
+attempt(() => { const w = document.open('/watch.html', 'same', ''); setTimeout(() => attempt(() => w.fetch(E['popup-fetch'] + '/w-fetch')), 300); });
+attempt(() => fetch(E.fetch + '/fetch').catch(() => {}));
+attempt(() => { new Image().src = E.img + '/img'; });
+attempt(() => { const s = document.createElement('script'); s.textContent = 'window.INLINE_RAN = true; fetch(' + JSON.stringify(E.inline + '/inline') + ')'; document.head.append(s); });
+attempt(() => { window.RTC_TYPE = typeof RTCPeerConnection + '/' + typeof webkitRTCPeerConnection;
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'turn:127.0.0.1:${cap.port('rtc')}?transport=tcp', username: 'u', credential: 'p' }] });
+  pc.createDataChannel('x'); pc.createOffer().then(o => pc.setLocalDescription(o)); });
+// Navigation last, with the guard that stops it disarmed as far as this code can (put back afterwards, since the
+// engine itself still needs addEventListener to take the player's frame requests).
+const { preventDefault } = Event.prototype, { addEventListener } = EventTarget.prototype;
+Event.prototype.preventDefault = () => {};
+EventTarget.prototype.addEventListener = () => {};
+attempt(() => { location.href = E.nav + '/nav'; });
+attempt(() => { document.body.appendChild(document.createElement('iframe')).contentWindow.parent.location.href = E['nav-realm'] + '/nav-realm'; });
+Object.assign(Event.prototype, { preventDefault });
+Object.assign(EventTarget.prototype, { addEventListener });
+attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh'; m.content = '0;url=' + E['nav-meta'] + '/nav-meta'; document.head.append(m); });
+` }], { source: 'manual' });
+  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
+  let rendering, state;
+  const popups = [];
+  try {
+    const page = await plain.newPage();
+    plain.on('targetcreated', t => { if (t.type() === 'page') popups.push(t.url()); });
+    await page.goto(`${srv.url}/watch.html?v=b-escapee&workers=1`);
+    // The worker comes up and goes on rendering frames, its chapter's attempts notwithstanding.
+    rendering = await page.waitForFunction('workers.length === 1 && workers[0].ready && done >= 2', { timeout: 60000 }).then(() => true, () => false);
+    await Bun.sleep(1500);
+    const frame = page.frames().find(f => f.url().startsWith(`http://w0.localhost:${srv.port}/studio.html`));
+    state = await frame?.evaluate(() => [window.CHAPTER_RAN === true, window.INLINE_RAN === true, window.RTC_TYPE, location.pathname]).catch(e => e.message);
+  } finally {
+    await plain.close();
+    cap.stop();
+  }
+  expect(cap.hits).toEqual({});
+  expect(rendering).toBe(true);
+  expect(state).toEqual([true, false, 'undefined/undefined', '/studio.html']);
+  expect(popups).toEqual([]);
+}, T);
+
 test('on a renderer host, every page but studio.html is inert: an opaque origin that runs no script and loads nothing', async () => {
   // What a popup or frame of watch.html, an engine script or a version file would be, were chapter code to get one
   // open on its own origin: nothing to reach into and no fetch, Image or Worker of its own to use.
