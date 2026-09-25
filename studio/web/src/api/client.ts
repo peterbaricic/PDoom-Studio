@@ -56,7 +56,7 @@ async function readError(res: Response): Promise<string> {
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   // Sent on every request, GET included: studio/http.js's guard only checks it on mutations, but always attaching it
-  // (as studio/ui/app.js does today) keeps this simple and needs no per-method special case.
+  // keeps this simple and needs no per-method special case.
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-studio-token': getToken() };
   const hasBody = body !== undefined;
   const res = await fetch(path, { method, headers, body: hasBody ? JSON.stringify(body) : undefined });

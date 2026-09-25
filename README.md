@@ -39,10 +39,10 @@ The video took two generations, both in Claude Code:
 |---|---|
 | [`src/`](src/) | Shared code: Clawd, the guest characters, props, lyrics and the timeline |
 | [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush (also a scrubber) |
-| [`watch.html`](watch.html) | Player that renders in the background and plays once it can't stutter |
 | [`render.mjs`](render.mjs) | Renders frames in headless Chromium and encodes the MP4 with ffmpeg |
-| [`studio/`](studio/) | The studio: server, database, jobs and the web UI |
+| [`studio/`](studio/) | The studio: server, database, jobs and the frame cache; its web UI is in [`studio/web/`](studio/web/) |
 | [`studio/default.db`](studio/default.db) | Example versions, starting with the original video (its storyboard and chapters) |
+| [`assets/`](assets/) | The song, and the two fonts the video uses, bundled with their licenses |
 | [`ANIMATION_GUIDE.md`](ANIMATION_GUIDE.md) | Opus's style and code guide for its subagents |
 
 ## The studio
@@ -56,36 +56,65 @@ bun install
 bun run studio          # then open http://localhost:8080/
 ```
 
-**Create**: describe a concept and Claude drafts a storyboard (the plan for the nine chapters). Review it, edit it or
-ask for changes, then approve it and Claude builds the chapters, three at a time, checking each one with real renders.
-Preview any chapter, give feedback to revise it, or restore an earlier revision. When you're happy, press
-**Final render** to paint the 1080p MP4 (about 20 minutes).
+`bun run studio` builds the web UI (React, in `studio/web/`) whenever it has changed, then serves it. To work on the UI
+itself, `bun run dev` runs the studio server with `--dev` on port 8080 beside Vite's dev server: open
+http://localhost:5173/ for hot reloading. Only use it with test data, since `--dev` also accepts changes from that
+second origin.
 
-**Play**: every finished render, with the video beside a walkthrough that follows playback, and how it was made.
+**Versions**: the sidebar lists the examples (read-only, marked ★) and your own versions. **New version** takes a
+title and a concept, and Claude drafts a storyboard (the plan for the nine chapters). Review it in the inspector, edit
+it or ask for changes, then approve it and Claude builds the chapters, three at a time, checking each one with real
+renders.
 
-Everything you make lives in `user.db` (git-ignored: your versions, every revision, jobs) and `library/` (the
-videos). Example versions — starting with the original video, its storyboard and chapters — live separately in
-[`studio/default.db`](studio/default.db), tracked in git and read-only to the studio. On first start, an existing
-`studio.db` from before this split is moved to `user.db` automatically.
+**The timeline workspace**: the song runs left to right as nine chapter blocks, each as wide as its chapter. A block
+shows when Claude is working on it, when it isn't written yet, and when its code is broken (with the error). Click a
+block to open that chapter in the inspector, where you can read its part of the storyboard, ask Claude to revise it,
+or restore an earlier revision. Drag along the track under the blocks to move the playhead.
 
-**Remix** copies an example (or any version) into your own version in `user.db`, which you can then edit freely.
-**Promote** moves one of your own versions the other way, into `studio/default.db`, where it becomes a read-only
-example for everyone once you commit that file. Both are reachable through the API for now — a dedicated UI is
-planned. Like every change the studio accepts, they need the studio's own `Origin` and the token it puts in its page
-(a new one each time the server starts):
+**Previews**: the player above the timeline plays the version with the song. Chapter code never runs in your
+browser: the server paints every frame in its own sealed headless Chrome and sends it as a JPEG. **Play** waits until
+the rest can play without stopping; **Play now** starts with what is ready and pauses at the first gap. The shading on
+the timeline's track shows which frames are ready.
 
-```bash
-TOKEN=$(curl -s localhost:8080/ | sed -n 's/.*name="studio-token" content="\([0-9a-f]*\)".*/\1/p')
-curl -X POST localhost:8080/api/versions/<id>/remix -H 'Origin: http://localhost:8080' -H "X-Studio-Token: $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"id":"my-version","title":"My Version"}'
-curl -X POST localhost:8080/api/versions/<id>/promote -H 'Origin: http://localhost:8080' -H "X-Studio-Token: $TOKEN"
-```
+**The frame cache**: painted frames are kept in `.studio/cache/frames/`, keyed by their content: the engine, the
+version's options, `shared.js` and the chapter's code. A frame is painted once and reused by previews, thumbnails and
+final renders; changing a chapter repaints only that chapter. The cache holds at most 5 GB (set `STUDIO_CACHE_GB` to
+change it) and drops the least recently used frames past that. The settings menu shows how full it is and can clear
+it. `STUDIO_PAINTERS` sets how many pages paint at once (default 3, at most 8).
 
-The studio listens only on your machine, and Claude jobs can only write inside their own temporary work folder.
+**Final render** paints whatever frames aren't cached yet and encodes the 1080p MP4 into `library/` (about 20 minutes
+from an empty cache).
 
-`http://w0.localhost:8080/studio.html?v=<version>` is a scrubber for one version (version code only runs on the
-`w<n>.localhost` origins, so `localhost:8080/studio.html` redirects there), and `http://localhost:8080/watch.html?v=<version>`
-plays it while rendering in the background. Both need a browser that resolves `*.localhost`, such as Chrome or Firefox.
+**Library and watch**: the library shows every finished render. Watching one plays the video beside a walkthrough
+that follows playback, and how the version was made.
+
+The **⋯ menu** in the header acts on the version on screen:
+
+- **Remix** copies it (an example, or one of your own) into a new version of your own, which you can then edit freely.
+- **Promote** moves one of your own versions into `studio/default.db`, where it becomes a read-only example for
+  everyone once you commit that file.
+- **Delete** removes one of your own versions: its files, revisions, jobs and thumbnails. Its finished videos stay in
+  the library under the version's last title unless you tick **Also delete its finished videos**. A kept video is
+  detached from the version, so a new version that later takes the same id doesn't pick it up.
+
+Everything you make lives in `user.db` (git-ignored: your versions, every revision, jobs), `library/` (the videos)
+and `.studio/` (work folders, thumbnails and the frame cache). Example versions, starting with the original video,
+its storyboard and chapters, live separately in [`studio/default.db`](studio/default.db), tracked in git and
+read-only to the studio. On first start, an existing `studio.db` from before this split is moved to `user.db`
+automatically. `STUDIO_DATA` moves all of these to another folder, and `USER_DB` and `DEFAULT_DB` pick other
+databases.
+
+The studio listens only on your machine, and Claude jobs can only write inside their own temporary work folder. Every
+change the studio accepts needs its own `Origin` and the token it puts in its page (a new one each time the server
+starts), so after a restart an open page asks you to reload it.
+
+`http://w0.localhost:8080/studio.html?v=<version>` is a scrubber for one version, for working on the engine. Version
+code only runs on the `w<n>.localhost` origins, so `localhost:8080/studio.html` redirects there; it needs a browser
+that resolves `*.localhost`, such as Chrome or Firefox.
+
+**Fonts**: the lettering uses [Permanent Marker](https://fonts.google.com/specimen/Permanent+Marker) (Apache License
+2.0) and [Shantell Sans](https://fonts.google.com/specimen/Shantell+Sans) at weight 800 (SIL Open Font License 1.1).
+Both are bundled in [`assets/fonts/`](assets/fonts/) with their license texts, so painting needs no network access.
 
 ## Rendering from the command line
 
@@ -93,7 +122,13 @@ plays it while rendering in the background. Both need a browser that resolves `*
 bun render.mjs --frames=0:156.6 --workers=4          # paint the original's frames into out/frames (resumable)
 bun render.mjs --encode --out=out/pdoom.mp4          # join the frames and the song into an MP4
 bun render.mjs --v=<version> --sheet=23,40,80        # contact sheet of any version
+bun render.mjs --v=<version> --clip=0:6 --out=out/test.mp4   # short clip with the song
+bun render.mjs --v=<version> --check=1,12,22         # load and paint a few times; exit 1 on any error
 ```
+
+`--v=<id>` picks a version from the studio's databases (default: the original). Without `--base=<url>` (a running
+studio), `render.mjs` starts its own server over the same databases, so `STUDIO_DATA`, `USER_DB` and `DEFAULT_DB`
+work here too.
 
 `render.mjs` finds Chrome, Chromium, Edge or Brave on macOS, Windows and Linux, or a headless Chromium from
 `bun run get-browser`. Pass `--chrome=<path>` or set `CHROME_PATH` to choose one, and `--angle=<backend>` to override
@@ -102,7 +137,10 @@ the GPU backend (Metal on macOS, D3D11 on Windows).
 ## Tests
 
 ```bash
-bun test
+bun test               # the server, engine, renderer and end-to-end tests (a few minutes: they drive Chrome)
+bun run test:web       # the web UI's component tests (Vitest)
+bun run typecheck      # the web UI's TypeScript
 ```
 
-The tests never call the real Claude: they use `test/fake-claude.js`. The render and browser tests take a few minutes.
+The tests never call the real Claude: every `bun test` process uses `test/fake-claude.js` (see `test/preload.js`).
+They run on throwaway data folders and copies of the databases, never on your own.

@@ -304,7 +304,7 @@ else {
   for (const rel of ['', 'noopener']) attempt(() => {
     const l = document.createElement('a'); l.href = E.b + '/b-' + rel; l.target = '_blank'; l.rel = rel; document.body.append(l); l.click();
   });
-  for (const [i, path] of ['/watch.html', '/src/lyrics.js'].entries()) attempt(() => {
+  for (const [i, path] of ['/api/versions/escape-routes', '/src/lyrics.js'].entries()) attempt(() => {
     const w = document.open(path, 'c' + i, '');
     const reach = () => {
       attempt(() => w.fetch(E.c + '/c-fetch').catch(() => {}));

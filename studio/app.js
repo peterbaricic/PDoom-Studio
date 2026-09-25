@@ -9,17 +9,17 @@ import { isValidPath } from './db.js';
 import { getSnapshot, blobBySha } from './snapshot.js';
 import { N, FPS, DURATION } from './frames/keys.js';
 
-// Repo files anyone may load: the player, the shared engine, the libraries, the song and the bundled fonts. Nothing else.
-const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
+// Repo files anyone may load: the shared engine, the libraries, the song and the bundled fonts. Nothing else.
+const PUBLIC = [/^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
   /^assets\/fonts\/[\w.-]+\.(?:css|woff2)$/];
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
 const CLAUDE_KINDS = ['storyboard', 'shared', 'chapter'];   // the kinds that write the version's files
 const NO_STORE = { 'cache-control': 'no-store' };
 const IMMUTABLE = { 'cache-control': 'public, max-age=31536000, immutable' };
-// The React app (studio/web/, built by Vite into studio/web/dist — see studio/build-web.js): the studio's UI. It
-// carries the token exactly as the old studio/ui/ page did, under a CSP strict enough that the Vite build must not
-// emit an inline script (constraints.md): no unsafe-inline anywhere, and nothing may load from another origin.
+// The React app (studio/web/, built by Vite into studio/web/dist — see studio/build-web.js): the studio's UI. Its
+// page carries the token, under a CSP strict enough that the Vite build must not emit an inline script
+// (constraints.md): no unsafe-inline anywhere, and nothing may load from another origin.
 const SPA_CSP = ["default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' blob: data:", "media-src 'self'",
   "font-src 'self'", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'"].join('; ');
 // The SPA's own routes (docs/superpowers/specs/2026-09-25-react-studio-design.md, section 2): the server answers all
@@ -30,27 +30,25 @@ const SPA_ROUTES = [/^\/$/, new RegExp(`^/versions/${VERSION_ID}$`), new RegExp(
 // Two kinds of origin. The studio's own (localhost, 127.0.0.1, [::1]) serves the page that carries the token and the
 // UI; version code never runs there. studio.html, which runs version code, is served only on renderer origins
 // (w0.localhost, w1.localhost, …), which have neither the token page nor the UI, and under a policy that keeps the
-// code to this server (no requests elsewhere) and lets only studio pages frame it. Chrome rejects IPv6 literals in
-// CSP source lists (and logs an error that would fail every render check), so [::1] can't be listed as a framer.
+// code to this server (no requests elsewhere) and lets no page frame it (painting pages and the scrubber are opened as
+// pages of their own; nothing embeds studio.html).
 // No workers, frames or plugins either (p5 and p5.brush use none): a worker is a separate browser target, so its
 // requests would bypass render.mjs's page-level interception, and a frame or object could hold a same-origin document
 // from which a worker could be started out of this policy's reach.
 // No inline script: studio.html has none, and allowing it would let chapter code add its own, speculation rules
 // included (a prefetch or prerender of any URL). Inline style stays allowed (studio.html's <style>, and p5 sets style
 // attributes); what CSS can load is still limited by img-src, font-src and style-src.
-// Sandboxed, which matters in the user's own browser, where the player's workers run chapter code with none of the
-// render browser's network isolation (studio/browser.js): no popups (not even after a user gesture), top-level
-// navigation, downloads or form submissions. It keeps scripts, its own origin (the loader's same-origin fetches, the
-// player's postMessage origin checks) and modal dialogs, without which Chrome silently skips render.mjs's
-// beforeunload guard.
+// Sandboxed, which matters in the user's own browser, where the studio.html scrubber runs chapter code with none of
+// the render browser's network isolation (studio/browser.js): no popups (not even after a user gesture), top-level
+// navigation, downloads or form submissions. It keeps scripts, its own origin (the loader's same-origin fetches) and
+// modal dialogs, without which Chrome silently skips render.mjs's beforeunload guard.
 const onRenderer = req => /^w\d+\.localhost:\d+$/.test(req.headers.get('host') || '');
-const studioCsp = port => ["default-src 'self'", "script-src 'self'",
+const STUDIO_CSP = ["default-src 'self'", "script-src 'self'",
   "style-src 'self' 'unsafe-inline'", "font-src 'self'",
   "img-src 'self' data: blob:", "connect-src 'self'", "media-src 'self'", "worker-src 'none'", "frame-src 'none'", "object-src 'none'",
-  "form-action 'none'", "base-uri 'none'",
-  `frame-ancestors http://localhost:${port} http://127.0.0.1:${port} http://*.localhost:${port}`,
+  "form-action 'none'", "base-uri 'none'", "frame-ancestors 'none'",
   'sandbox allow-scripts allow-same-origin allow-modals'].join('; ');
-// Everything else a renderer host answers (watch.html, the engine scripts and libraries, version files, JSON, errors)
+// Everything else a renderer host answers (the engine scripts and libraries, version files, JSON, errors)
 // is only ever meant as a subresource of studio.html, but chapter code could open or frame any of it as a page of its
 // own origin, whose window would have an unrestricted fetch, Image and Worker. So each carries a policy that makes it,
 // as a page, a sandboxed opaque origin that can load nothing, and nosniff keeps a script from being taken for a page.
@@ -67,7 +65,6 @@ const WORKER_DESTS = ['serviceworker', 'sharedworker'];
 // The /api endpoints chapter code needs (src/loader.js): everything else under /api/ is answered 404 on renderer
 // hosts, so code running there can't read (or, were the guard ever to slip, write) anything through it.
 const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/, /^\/api\/snapshot\/[0-9a-f]{64}$/, /^\/api\/blob\/[0-9a-f]{64}$/];
-const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
 // frames: the frame service (studio/frames/service.js); without one, the frame and cache routes 404. frameHoldMs: how
 // long a frame request waits for its frame to be painted before answering 202 (ask again). dev: accept the Vite dev
@@ -76,7 +73,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   frames = null, frameHoldMs = 30000, dev = false }) {
   const app = { port };
   const guard = makeGuard({ port: () => app.port, token, extraOrigins: dev ? ['http://localhost:5173'] : [] });
-  const dirs = { ui: join(root, 'studio/ui'), web: join(root, 'studio/web/dist'), work: join(data, '.studio/work'),
+  const dirs = { web: join(root, 'studio/web/dist'), work: join(data, '.studio/work'),
     library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
   // GET /api/song: the engine's fixed timing (studio/frames/keys.js) plus every lyric line, for the timeline and
   // lyrics track. src/lyrics.js is a plain script (no export — it's loaded as a <script> by studio.html/src/timeline.js
@@ -110,7 +107,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   };
 
   // The SPA shell (studio/web/dist/index.html, built by Vite — studio/build-web.js): "/" and every SPA route
-  // (SPA_ROUTES) get it, carrying the token exactly as the token page always has, under the strict SPA_CSP. UI hosts
+  // (SPA_ROUTES) get it, carrying the token (the page's <meta name="studio-token">), under the strict SPA_CSP. UI hosts
   // only — chapter code has no business loading the studio's own UI, any more than the reverse.
   const spaShell = req => onRenderer(req) ? error(404, 'not found') : new Response(
     readFileSync(join(dirs.web, 'index.html'), 'utf8').replace('%%TOKEN%%', token),
@@ -121,14 +118,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     // Vite's hashed build output (studio/web/dist/app-assets/…): safe to cache forever, since a changed file gets a
     // new name. Named app-assets, not assets, so it can never collide with the repo's own /assets/ (PUBLIC, below).
     ['GET', /^\/app-assets\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, join(dirs.web, 'app-assets'), p, IMMUTABLE)],
-    // The old plain-JS UI (studio/ui/): kept reachable at /ui/ until it's removed (see the design doc's build order,
-    // step 10) — it used to be served at "/", which the SPA now owns.
-    ['GET', /^\/ui\/?$/, req => onRenderer(req) ? error(404, 'not found')
-      : new Response(readFileSync(join(dirs.ui, 'index.html'), 'utf8').replace('%%TOKEN%%', token), { headers: TOKEN_PAGE })],
-    ['GET', /^\/ui\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, dirs.ui, p, NO_STORE)],
     ['GET', /^\/api\/song$/, () => json(song)],
     ['GET', /^\/studio\.html$/, req => onRenderer(req)
-      ? file(req, root, 'studio.html', { 'content-security-policy': studioCsp(app.port) })
+      ? file(req, root, 'studio.html', { 'content-security-policy': STUDIO_CSP })
       : Response.redirect(`http://w0.localhost:${app.port}/studio.html${new URL(req.url).search}`, 302)],
     ['GET', /^\/v\/([a-z0-9-]+)\/(.+)$/, (req, [, id, p]) => {
       const f = isValidPath(p) && db.getFile(id, p);

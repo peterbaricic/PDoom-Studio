@@ -196,10 +196,9 @@ async function setup() {
   // p5's global-mode init runs right before setup() and reassigns its own `VERSION` global, clobbering ours.
   try { window.VERSION = await window.versionLoaded; } catch (e) { window.loadError = e.message; console.error(e); }
   window.ready = true;
-  // p5 ignores redraw() until setup() has returned, so the page modes start on the next task.
-  const q = new URLSearchParams(location.search);
-  if (q.has('worker')) setTimeout(() => workerMode(q.get('parent')));
-  else if (!q.has('render')) setTimeout(devUI);
+  // p5 ignores redraw() until setup() has returned, so the scrubber starts on the next task. A painting page
+  // (?render) has none: it's driven through window.paintAt and friends.
+  if (!new URLSearchParams(location.search).has('render')) setTimeout(devUI);
 }
 function draw() {
   if (!window.ready) return;
@@ -239,24 +238,6 @@ window.renderSheet = async (times, cols = 3, w = 640) => {
   return { url: sc.toDataURL('image/jpeg', .88), ms };
 };
 window.gpuInfo = () => { const gl = drawingContext, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };
-
-// Background renderer for watch.html: the player (at origin `parent`) posts { i, t, w, h, q } and gets back the frame as
-// a JPEG Blob plus how long painting it took.
-function workerMode(parent) {
-  const small = document.createElement('canvas'), sx = small.getContext('2d');
-  addEventListener('message', async e => {
-    if (e.source !== window.parent || e.origin !== parent) return;
-    const { i, t, w, h, q } = e.data, t0 = performance.now();
-    await window.paintAt(t);
-    if (small.width !== w) { small.width = w; small.height = h; }
-    sx.drawImage(outC, 0, 0, w, h);
-    // Encode synchronously: the async encoders (toBlob, convertToBlob) wait for the hidden frame's throttled refresh.
-    const url = small.toDataURL('image/jpeg', q), bin = atob(url.slice(url.indexOf(',') + 1)), bytes = new Uint8Array(bin.length);
-    for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
-    window.parent.postMessage({ type: 'frame', i, blob: new Blob([bytes], { type: 'image/jpeg' }), ms: performance.now() - t0 }, parent);
-  });
-  window.parent.postMessage({ type: 'ready' }, parent);
-}
 
 // Scrubber plus live playback: while the song plays, each frame paints whatever time the audio has reached, so
 // picture and music stay in sync and frames are skipped when painting is slower than 24 fps.

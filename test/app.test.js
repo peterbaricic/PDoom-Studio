@@ -70,16 +70,10 @@ test('hashed SPA assets are served with an immutable, long-lived cache-control',
   expect((await app.fetch(new Request(`http://w0.localhost:8080/app-assets/${asset}`, { headers: { host: 'w0.localhost:8080' } }))).status).toBe(404);
 });
 
-test('the old plain-JS UI still works at /ui/, kept until it is removed', async () => {
-  const res = await get('/ui/');
-  expect(res.status).toBe(200);
-  expect(await res.text()).toContain('content="tok"');
-  expect(res.headers.get('x-frame-options')).toBe('DENY');
-  expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
-  expect((await get('/ui')).status).toBe(200);
-  expect((await get('/ui/app.js')).status).toBe(200);
-  const onRenderer = await app.fetch(new Request('http://w0.localhost:8080/ui/', { headers: { host: 'w0.localhost:8080' } }));
-  expect(onRenderer.status).toBe(404);
+test('the old plain-JS UI and the old player are gone, on every host', async () => {
+  for (const host of ['localhost:8080', 'w0.localhost:8080']) {
+    for (const p of ['/ui/', '/ui', '/ui/app.js', '/watch.html', '/src/watch.js']) expect([host, p, (await getOn(host, p)).status]).toEqual([host, p, 404]);
+  }
 });
 
 test('/api/song reports the engine timing and every lyric line, matching src/lyrics.js', async () => {
@@ -138,13 +132,13 @@ test('--dev writes the per-start token to <data>/.studio/dev-token, mode 600', a
 test('the token page and the UI are served on the studio hosts only, never where version code runs', async () => {
   for (const host of ['localhost:8080', '127.0.0.1:8080', '[::1]:8080']) {
     expect((await getOn(host, '/')).status).toBe(200);
-    expect((await getOn(host, '/ui/app.js')).status).toBe(200);
+    expect((await getOn(host, '/library')).status).toBe(200);
   }
   for (const host of ['w0.localhost:8080', 'w2.localhost:8080']) {
     const page = await getOn(host, '/');
     expect(page.status).toBe(404);
     expect(await page.text()).not.toContain('tok');
-    expect((await getOn(host, '/ui/app.js')).status).toBe(404);
+    expect((await getOn(host, '/library')).status).toBe(404);
   }
 });
 
@@ -176,10 +170,11 @@ test('studio.html runs only on w<n>.localhost, under a content security policy',
   expect(csp['object-src']).toEqual(["'none'"]);
   expect(csp['form-action']).toEqual(["'none'"]);
   expect(csp['base-uri']).toEqual(["'none'"]);
-  expect(csp['frame-ancestors']).toEqual(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://*.localhost:8080']);
+  // Nothing embeds studio.html (painting pages and the scrubber open it as a page), so no page may frame it.
+  expect(csp['frame-ancestors']).toEqual(["'none'"]);
   // Sandboxed: no popups, top-level navigation, downloads or forms, whatever user activation it gets. Scripts and its
-  // own origin stay (the loader's fetches, the player's postMessage origin checks), and so do modal dialogs, without
-  // which Chrome silently skips render.mjs's beforeunload guard.
+  // own origin stay (the loader's fetches), and so do modal dialogs, without which Chrome silently skips render.mjs's
+  // beforeunload guard.
   expect(csp.sandbox).toEqual(['allow-scripts', 'allow-same-origin', 'allow-modals']);
 });
 
@@ -193,7 +188,7 @@ test('everything else a renderer host serves is locked down, should it ever be o
   const locked = "default-src 'none'; sandbox; frame-ancestors 'none'";
   for (const host of ['w0.localhost:8080', 'w4.localhost:8080']) {
     const at = (p, headers = {}) => app2.fetch(new Request(`http://${host}${p}`, { headers: { host, ...headers } }));
-    for (const [p, status, type] of [['/watch.html', 200, 'text/html'], ['/src/core.js', 200, 'text/javascript'], ['/src/loader.js', 200, 'text/javascript'],
+    for (const [p, status, type] of [['/src/core.js', 200, 'text/javascript'], ['/src/loader.js', 200, 'text/javascript'],
       ['/node_modules/p5/lib/p5.min.js', 200, 'text/javascript'], ['/assets/pdoom.mp3', 200, 'audio/mpeg'], ['/v/a/ch/c01.js', 200, 'text/javascript'],
       ['/v/a/STORYBOARD.md', 200, 'text/markdown'], ['/api/versions/a', 200, 'application/json'], ['/api/jobs', 404, 'application/json'], ['/nope.html', 404, 'application/json']]) {
       const res = await at(p);
@@ -205,7 +200,7 @@ test('everything else a renderer host serves is locked down, should it ever be o
     expect((await range.arrayBuffer()).byteLength).toBe(100);
   }
   // The studio's own hosts, where no version code runs, are left as they were.
-  const own = await app2.fetch(new Request('http://localhost:8080/watch.html', { headers: H }));
+  const own = await app2.fetch(new Request('http://localhost:8080/src/core.js', { headers: H }));
   expect([own.status, own.headers.get('content-security-policy')]).toEqual([200, null]);
 });
 
@@ -243,7 +238,6 @@ test('worker hosts answer only the API endpoints the loader needs; the rest of /
 
 test('serves engine files but nothing private', async () => {
   expect((await getOn('w0.localhost:8080', '/studio.html')).status).toBe(200);
-  expect((await get('/watch.html')).status).toBe(200);
   expect((await get('/src/core.js')).status).toBe(200);
   expect((await get('/node_modules/p5/lib/p5.min.js')).status).toBe(200);
   for (const p of ['/studio.db', '/.git/config', '/package.json', '/studio/db.js', '/src/../package.json']) expect((await get(p)).status).toBe(404);

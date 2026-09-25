@@ -35,8 +35,8 @@ const CAST = new URLSearchParams(location.search).has('record-cast') ? (() => {
 window.ENGINE = { wipes: true, cornerMeter: true };
 
 // Before any version code runs, take away the ways out that studio.html's policy can't block. This matters most in the
-// user's own browser, where the player's workers run chapter code with none of the render browser's network isolation
-// (studio/browser.js); there, it's what stands between chapter code and:
+// user's own browser, where the studio.html scrubber runs chapter code with none of the render browser's network
+// isolation (studio/browser.js); there, it's what stands between chapter code and:
 // - navigating its own frame to another host (location, links, <meta http-equiv=refresh>, even from a fresh
 //   about:blank realm): every navigation the page itself starts is cancelled. The Navigation API fires its navigate
 //   event before any request goes out, for those as well; a reload or address-bar navigation by the user can't be

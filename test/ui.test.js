@@ -1,97 +1,250 @@
+// ui.test.js: the React studio end to end, as a user drives it. A real server (--port=0, a throwaway data root, a
+// private copy of the examples database for Promote to write to, the fake Claude from test/preload.js), the built app,
+// and a headless Chrome: a new version from a concept through its storyboard to nine chapters; the preview player
+// painting; a short final render in the library and the watch view; Remix, Promote and Delete; and a server restart
+// under the open page. Throughout, the browser only ever loads the app's own Vite chunks as scripts: chapter code
+// never runs in the user's browser.
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { openDb } from '../studio/db.js';
+import { rmSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { launchBrowser } from '../studio/browser.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { goodStoryboard, tempDir, isolatedEnv } from './helpers.js';
+import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv } from './helpers.js';
 
-const root = process.cwd(), data = tempDir(), dbPath = join(data, 'user.db');
+const root = process.cwd(), data = tempDir(), defaultDb = tempDefaultDb();
+const repoDefaultDb = join(root, 'studio/default.db');
+const md5 = p => createHash('md5').update(readFileSync(p)).digest('hex');
+const repoDefaultBefore = md5(repoDefaultDb);
+
+// Every Claude job (the storyboard, shared.js, each chapter) gets this one run: it writes the whole version, and the
+// job imports just its own target file from it.
 const files = { 'STORYBOARD.md': goodStoryboard(), 'shared.js': 'const SET = {};' };
 CHAPTER_WINDOWS.forEach(([a, b], i) => {
   files[`ch/c0${i + 1}.js`] = `chapter('c${i + 1}', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`;
 });
-let server, url, browser, page;
+// CLAUDE_BIN comes from test/preload.js (the fake), through process.env.
+const env = isolatedEnv(data, { DEFAULT_DB: defaultDb, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }), STUDIO_PAINTERS: '2' });
+
+let server, url, port, browser, page, serverLog = '';
+const requests = [], scripts = [], targets = [], frameResponses = [], pageErrors = [];
+
+// Starts the studio (on `at`, or a free port) and resolves once it's listening. Its output is kept (and printed if a
+// step fails) and drained, so a full pipe can never stall it.
+async function startServer(at = 0) {
+  const p = Bun.spawn(['bun', 'studio/server.js', `--port=${at}`], { cwd: root, env, stdout: 'pipe', stderr: 'pipe' });
+  const drain = async (stream, onText) => {
+    const dec = new TextDecoder();
+    for await (const chunk of stream) { const t = dec.decode(chunk); serverLog += t; onText?.(t); }
+  };
+  void drain(p.stderr);
+  const listening = new Promise((resolve, reject) => {
+    let out = '';
+    void drain(p.stdout, t => { out += t; const m = /Studio: (http:\/\/localhost:(\d+))\//.exec(out); if (m) resolve(m); })
+      .then(() => reject(new Error(`the studio exited before it was listening:\n${serverLog}`)));
+  });
+  const [, u, pt] = await listening;
+  return { proc: p, url: u, port: +pt };
+}
+
+// Runs a step; on failure, shows what the server said.
+const step = fn => async () => {
+  try { await fn(); } catch (e) { console.error(`--- studio output (last 6000 chars) ---\n${serverLog.slice(-6000)}`); throw e; }
+};
+
+const api = path => fetch(`${url}${path}`).then(r => r.json());
+const clickButton = (scope, label) => page.evaluate((s, l) => {
+  const b = [...document.querySelectorAll(`${s} button`)].find(x => x.textContent.trim() === l && !x.disabled);
+  if (!b) throw new Error(`no enabled button "${l}" in ${s}`);
+  b.click();
+}, scope, label);
+const enabledButton = (scope, label, timeout = 10000) => page.waitForFunction((s, l) =>
+  [...document.querySelectorAll(`${s} button`)].some(x => x.textContent.trim() === l && !x.disabled), { timeout }, scope, label);
+// Focuses the dialog's field with this label, its text selected, so typing replaces it.
+const typeField = async (label, text) => {
+  await page.evaluate(l => {
+    const lab = [...document.querySelectorAll('[role="dialog"] label')].find(x => x.textContent.trim() === l);
+    const el = document.getElementById(lab.htmlFor);
+    el.focus(); el.select();
+  }, label);
+  await page.keyboard.type(text);
+};
+const versionMenu = async item => {
+  await page.click('button[aria-label="Version actions"]');
+  await page.waitForSelector('[role="menuitem"]', { timeout: 10000 });
+  await page.evaluate(i => [...document.querySelectorAll('[role="menuitem"]')].find(m => m.textContent.trim() === i).click(), item);
+  await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+};
+const noDialog = () => page.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 10000 });
+// How many frames the timeline's coverage shading covers.
+const shaded = () => page.$$eval('[aria-label="Playhead"] [data-range]', els =>
+  els.reduce((n, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return n + b - a + 1; }, 0));
 
 beforeAll(async () => {
-  server = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { stdout: 'pipe', env: isolatedEnv(data, {
-    CLAUDE_BIN: `bun ${join(root, 'test/fake-claude.js')}`, FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files, cost: .05 }] }) }) });
-  const reader = server.stdout.getReader(), dec = new TextDecoder();
-  let out = '';
-  while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
-  url = /Studio: (http:\/\/localhost:\d+)\//.exec(out)[1];
-  browser = await launchBrowser({ port: new URL(url).port });
+  ({ proc: server, url, port } = await startServer());
+  browser = await launchBrowser({ port });
+  browser.on('targetcreated', t => targets.push(`${t.type()} ${t.url()}`));
   page = await browser.newPage();
   await page.setViewport({ width: 1400, height: 1000 });
-});
-afterAll(async () => { await browser?.close(); server?.kill(); });
-
-test('create a version from a concept to nine chapters', async () => {
-  await page.goto(`${url}/ui/#/create/new`);
-  await page.waitForSelector('#concept-title');
-  await page.type('#concept-title', 'E2E Test Show');
-  await page.type('#concept-text', 'A test concept.');
-  await page.click('#draft-storyboard');
-  await page.waitForFunction(() => location.hash === '#/create/e2e-test-show');
-  await page.waitForFunction(() => document.querySelector('.storyboard')?.textContent.includes('Walkthrough: What happens in chapter 9.'), { timeout: 60000 });
-  await page.waitForFunction(() => !document.querySelector('#approve').disabled);
-  const dialogs = [];
-  page.on('dialog', d => { dialogs.push(d.message()); d.dismiss(); });
-  await page.$eval('#approve', b => { b.click(); b.click(); });   // a double click approves once
-  await page.waitForFunction(() => document.querySelectorAll('.tile.done').length === 9, { timeout: 360000, polling: 1000 });
-  expect(await page.$eval('.versions .version.active small', e => e.textContent)).toBe('ready to render');
-  const jobs = await (await fetch(`${url}/api/jobs?version=e2e-test-show`)).json();
-  expect(jobs.map(j => j.kind).filter(k => k !== 'chapter')).toEqual(['shared', 'storyboard']);
-  expect(jobs.filter(j => j.kind === 'chapter')).toHaveLength(9);
-  expect(dialogs).toEqual([]);
-  expect(await page.$eval('#approve', b => b.disabled)).toBe(true);
-
-  // Job history: storyboard + shared + nine chapter jobs, newest first.
-  await page.waitForFunction(() => document.querySelectorAll('.job-history .job-row').length >= 11);
-  await page.click('.job-history .job-row button');
-  await page.waitForFunction(() => document.getElementById('log').open);
-  expect(await page.$eval('#log pre', e => e.textContent.length)).toBeGreaterThan(0);
-  await page.click('#log form button');
-
-  // Expandable job strip: toggling changes the footer's computed max-height.
-  const collapsedHeight = await page.$eval('footer#jobs', e => getComputedStyle(e).maxHeight);
-  await page.click('#jobs-toggle');
-  const expandedHeight = await page.$eval('footer#jobs', e => getComputedStyle(e).maxHeight);
-  expect(expandedHeight).not.toBe(collapsedHeight);
-}, { timeout: 420000 });
-
-test('play a finished render with a synced walkthrough', async () => {
-  mkdirSync(join(data, 'library'), { recursive: true });
-  const ff = Bun.spawn(['ffmpeg', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:d=40', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-    '-t', '40', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', join(data, 'library/zz-e2e.mp4')]);
-  await ff.exited;
-  Bun.spawnSync(['ffmpeg', '-y', '-loglevel', 'error', '-i', join(data, 'library/zz-e2e.mp4'), '-frames:v', '1', join(data, 'library/zz-e2e.jpg')]);
-  const db = openDb(dbPath);
-  const rid = db.addRender({ versionId: 'e2e-test-show', file: 'zz-e2e.mp4', revisionIds: [], durationS: 40, renderS: 60, sizeBytes: 1, poster: 'zz-e2e.jpg' });
-  db.close();
-
-  await page.goto(`${url}/ui/#/play`);
-  await page.waitForSelector('.gallery .card');
-  expect(await page.$eval('.gallery .card', e => e.textContent)).toContain('The P(doom) Bake-Off');
-  await page.click('.gallery .card');
-  await page.waitForFunction(r => location.hash === `#/play/${r}`, {}, rid);
-  await page.waitForSelector('#player video');
-  expect(await page.$$eval('.walkthrough li', l => l.length)).toBe(9);
-  await page.$eval('#player video', v => new Promise(r => { v.addEventListener('seeked', r, { once: true }); v.currentTime = 30; }));
-  await page.waitForFunction(() => document.querySelector('.walkthrough li.current')?.textContent.includes('Chapter 2'));
-  expect(await page.$eval('.made', e => e.textContent)).toContain('A test concept.');
-}, { timeout: 60000 });
-
-test('after a server restart, a page with a stale token asks for a reload', async () => {
-  const stale = await browser.newPage();
-  await stale.setRequestInterception(true);
-  stale.on('request', async r => {
-    if (new URL(r.url()).pathname !== '/ui/') return r.continue();
-    const html = await (await fetch(r.url())).text();
-    r.respond({ status: 200, contentType: 'text/html', body: html.replace(/name="studio-token" content="[0-9a-f]+"/, 'name="studio-token" content="stale"') });
+  page.on('request', r => {
+    requests.push(r.url());
+    if (r.resourceType() === 'script') scripts.push(r.url());
   });
-  await stale.goto(`${url}/ui/#/create`);
-  const message = await stale.evaluate(() => import('/ui/app.js').then(m => m.api('POST', '/api/versions', { id: 'stale-token' })).then(() => 'created', e => e.message));
-  expect(message).toBe('The studio server restarted — reload this page.');
-  await stale.close();
-}, { timeout: 60000 });
+  page.on('response', r => { if (/\/api\/frames\/[^/]+\/\d+\.jpg/.test(r.url())) frameResponses.push(`${r.status()} ${new URL(r.url()).pathname}`); });
+  page.on('pageerror', e => pageErrors.push(e.message));
+}, 60000);
+
+afterAll(async () => {
+  await Promise.race([browser?.close(), Bun.sleep(20000)]).catch(() => {});
+  browser?.process()?.kill('SIGKILL');
+  server?.kill();
+  await server?.exited;
+  rmSync(data, { recursive: true, force: true });
+  rmSync(dirname(defaultDb), { recursive: true, force: true });
+}, 40000);
+
+test('a new version: its storyboard, approved, becomes nine ready chapter blocks', step(async () => {
+  await page.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => location.pathname === '/versions/original', { timeout: 15000 });   // no version of the user's yet
+  await clickButton('nav[aria-label="Versions"]', 'New version');
+  await page.waitForSelector('[role="dialog"] textarea', { timeout: 10000 });
+  await typeField('Title', 'E2E Test Show');
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"] input')].some(i => i.value === 'e2e-test-show'), { timeout: 10000 });
+  await typeField('Concept', 'A test concept.');
+  await enabledButton('[role="dialog"]', 'Draft storyboard');
+  await clickButton('[role="dialog"]', 'Draft storyboard');
+  await page.waitForFunction(() => location.pathname === '/versions/e2e-test-show', { timeout: 10000 });
+
+  // Claude (the fake) drafts the storyboard; the inspector shows it, and Approve comes on.
+  const inspector = '[aria-label="Inspector"]';
+  await page.waitForFunction(s => document.querySelector(`${s} [data-testid="storyboard-markdown"]`)?.textContent.includes('What happens in chapter 9.'),
+    { timeout: 120000, polling: 500 }, inspector);
+  await enabledButton(inspector, 'Approve and build chapters', 30000);
+  await clickButton(inspector, 'Approve and build chapters');
+
+  // Nine chapter jobs, each checked with real renders: every block ends up written, with no status (not broken,
+  // queued or being worked on).
+  await page.waitForFunction(() => {
+    const blocks = [...document.querySelectorAll('button[aria-pressed][aria-label^="Chapter "]')];
+    return blocks.length === 9 && blocks.every(b => /, \d+:\d\d–\d+:\d\d$/.test(b.getAttribute('aria-label')));
+  }, { timeout: 420000, polling: 1000 });
+  const jobs = await api('/api/jobs?version=e2e-test-show');
+  expect(jobs.map(j => `${j.kind} ${j.status}`).sort()).toEqual([...Array(9).fill('chapter done'), 'shared done', 'storyboard done']);
+  const coverage = await api('/api/coverage/e2e-test-show');
+  expect(Object.values(coverage.segments).every(k => typeof k === 'string')).toBe(true);
+  expect(coverage.broken).toEqual([]);
+  await page.waitForFunction(() => document.querySelector('nav[aria-label="Versions"] a[href="/versions/e2e-test-show"]')?.textContent.includes('ready'),
+    { timeout: 10000 });
+}), 600000);
+
+test('the preview plays: server-painted frames arrive and the coverage shading grows', step(async () => {
+  await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
+  const before = await shaded(), framesBefore = frameResponses.filter(r => r.startsWith('200')).length;
+  await clickButton('[data-painting]', 'Play');
+  await page.waitForFunction(n => document.querySelectorAll('[aria-label="Playhead"] [data-range]').length &&
+    [...document.querySelectorAll('[aria-label="Playhead"] [data-range]')].reduce((s, e) => { const [a, b] = e.dataset.range.split('-').map(Number); return s + b - a + 1; }, 0) >= n,
+  { timeout: 120000, polling: 250 }, before + 48);
+  await page.waitForFunction(() => document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') > 0, { timeout: 120000, polling: 250 });
+  expect(frameResponses.filter(r => r.startsWith('200')).length).toBeGreaterThan(framesBefore);
+  expect(await shaded()).toBeGreaterThan(before);
+  // Stop it (Pause while playing; Cancel while it waits for frames).
+  await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
+}), 300000);
+
+test('a final render of a short range shows in the workspace, the library and the watch view', step(async () => {
+  const token = await page.$eval('meta[name="studio-token"]', m => m.content);
+  // Six frames (0.25 s), through the API: the UI's button always renders the whole song.
+  const res = await fetch(`${url}/api/jobs`, { method: 'POST', headers: { origin: url, 'x-studio-token': token, 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'render', versionId: 'e2e-test-show', params: { frames: '0:0.25' } }) });
+  expect(res.status).toBe(201);
+  await page.waitForSelector('a[href^="/versions/e2e-test-show/watch"]', { timeout: 180000 });
+  const [render] = await api('/api/library');
+  expect([render.version_id, render.duration_s]).toEqual(['e2e-test-show', .25]);
+
+  await page.click('header a[href="/library"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('article img')].some(i => i.complete && i.naturalWidth > 0), { timeout: 10000 });
+  expect(await page.$$eval('article h3', hs => hs.map(h => h.textContent))).toEqual(['The P(doom) Bake-Off']);
+  await page.click('article a[href^="/versions/e2e-test-show/watch"]');
+  await page.waitForSelector('video[data-testid="watch-video"]', { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector('video[data-testid="watch-video"]').readyState >= 1, { timeout: 10000 });
+  // The short range, not the whole song (ffmpeg's -shortest lets the audio run on past the video's 0.25 s a little).
+  expect(await page.$eval('video[data-testid="watch-video"]', v => v.duration >= .25 && v.duration < 2)).toBe(true);
+  expect(await page.$$eval('ol[aria-label="Walkthrough"] li', l => l.length)).toBe(9);
+}), 240000);
+
+test('remix the Original, promote the remix, delete a version (its video stays in the library)', step(async () => {
+  // Remix, from the Original's version menu.
+  await page.click('nav[aria-label="Versions"] a[href="/versions/original"]');
+  await page.waitForFunction(() => location.pathname === '/versions/original', { timeout: 10000 });
+  await versionMenu('Remix…');
+  await page.waitForFunction(() => document.querySelector('[role="dialog"] input')?.value.endsWith('(remix)'), { timeout: 10000 });
+  await typeField('Title', 'E2E remix');
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="dialog"] input')].some(i => i.value === 'e2e-remix'), { timeout: 10000 });
+  await clickButton('[role="dialog"]', 'Remix');
+  await page.waitForFunction(() => location.pathname === '/versions/e2e-remix', { timeout: 10000 });
+  await noDialog();
+
+  // Promote the remix: the dialog is accepted, and it's an example from then on (read-only: Remix is all its menu has).
+  await versionMenu('Promote to an example…');
+  await enabledButton('[role="dialog"]', 'Promote');
+  await clickButton('[role="dialog"]', 'Promote');
+  await noDialog();
+  await page.waitForFunction(() => document.querySelector('nav[aria-label="Versions"] a[href="/versions/e2e-remix"]')?.textContent.includes('★'), { timeout: 10000 });
+  expect((await api('/api/versions')).find(v => v.id === 'e2e-remix').example).toBe(true);
+  await page.click('button[aria-label="Version actions"]');
+  await page.waitForSelector('[role="menuitem"]', { timeout: 10000 });
+  expect(await page.$$eval('[role="menuitem"]', ms => ms.map(m => m.textContent.trim()))).toEqual(['Remix…']);
+  await page.keyboard.press('Escape');
+
+  // Delete the version made above, keeping its video.
+  await page.click('nav[aria-label="Versions"] a[href="/versions/e2e-test-show"]');
+  await page.waitForFunction(() => location.pathname === '/versions/e2e-test-show', { timeout: 10000 });
+  await versionMenu('Delete…');
+  expect(await page.$eval('[role="dialog"] button[role="checkbox"]', b => b.getAttribute('data-state'))).toBe('unchecked');
+  await page.type('[role="dialog"] input[data-slot="input"]', 'The P(doom) Bake-Off');
+  await enabledButton('[role="dialog"]', 'Delete version');
+  await clickButton('[role="dialog"]', 'Delete version');
+  await page.waitForFunction(() => location.pathname === '/versions/original', { timeout: 10000 });   // the newest of the user's is gone
+  await noDialog();
+  expect(await page.$('nav[aria-label="Versions"] a[href="/versions/e2e-test-show"]')).toBeNull();
+  expect((await api('/api/versions')).map(v => v.id)).not.toContain('e2e-test-show');
+  await page.click('header a[href="/library"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('article h3')].map(h => h.textContent).join() === 'The P(doom) Bake-Off', { timeout: 10000 });
+  expect((await api('/api/library')).map(r => [r.detached, r.title])).toEqual([[true, 'The P(doom) Bake-Off']]);
+}), 120000);
+
+test('after a server restart, the next change shows the reload banner; a reload brings frames back', step(async () => {
+  await page.click('nav[aria-label="Versions"] a[href="/versions/original"]');
+  await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
+  server.kill('SIGTERM');
+  await server.exited;
+  ({ proc: server } = await startServer(port));   // same port and data: the page's address still works, its token doesn't
+
+  // A change (clearing the frame cache) is refused for the old token: the banner asks for a reload.
+  await page.click('button[aria-label="Settings"]');
+  await enabledButton('body', 'Clear cache');
+  await clickButton('body', 'Clear cache');
+  const banner = '[role="alert"]';
+  await page.waitForFunction(s => [...document.querySelectorAll(s)].some(a => a.textContent.includes('The studio server restarted — reload this page.')),
+    { timeout: 10000 }, banner);
+  const framesBefore = frameResponses.length;
+  await clickButton(banner, 'Reload');
+  await page.waitForFunction(() => location.pathname === '/versions/original' && document.querySelector('[aria-label="Playhead"]'), { timeout: 15000 });
+  expect(await page.$$eval(banner, as => as.some(a => a.textContent.includes('restarted')))).toBe(false);
+  await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
+  // Answered by the restarted server: painted, or (already in the browser's cache from before) revalidated.
+  expect(frameResponses.slice(framesBefore).some(r => /^(200|304) \/api\/frames\/original\/\d+\.jpg$/.test(r))).toBe(true);
+}), 180000);
+
+test("chapter code never ran in the browser: it loaded only the app's own Vite chunks as scripts", () => {
+  expect(scripts.length).toBeGreaterThan(0);
+  expect(scripts.filter(u => !new RegExp(`^${url}/app-assets/[\\w.-]+\\.js$`).test(u))).toEqual([]);
+  // No version code, snapshot, blob, work folder or engine page was ever requested, as a script or otherwise.
+  expect(requests.filter(u => /\/v\/[^/]+\/.*\.js(\?|$)|\/api\/blob\/|\/api\/snapshot\/|\/work\/|\/studio\.html|\/src\/[\w.-]+\.js/.test(new URL(u).pathname))).toEqual([]);
+  // No other page, frame or worker either.
+  expect(targets.filter(t => !t.startsWith('page '))).toEqual([]);
+  expect(page.frames()).toHaveLength(1);
+  expect(pageErrors).toEqual([]);
+  // Promote wrote to the private copy only.
+  expect(md5(repoDefaultDb)).toBe(repoDefaultBefore);
+});

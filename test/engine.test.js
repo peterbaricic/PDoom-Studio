@@ -160,18 +160,21 @@ test('an unknown version sets loadError', async () => {
   await page.close();
 }, T);
 
-test('the player renders the requested version in its workers', async () => {
-  const page = await browser.newPage();
-  await page.goto(`${srv.url}/watch.html?v=mini&workers=1`);
-  await page.waitForFunction('workers.length === 1 && workers[0].ready', { timeout: 60000 });
-  expect(await page.evaluate(() => workers[0].el.src)).toContain('v=mini');
+test('without ?render, studio.html is a scrubber that paints the requested version', async () => {
+  const page = await browser.newPage(), errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(`${srv.url}/studio.html?v=mini&t=5`);
+  expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?v=mini`);
+  await page.waitForFunction(() => document.getElementById('tt').textContent.includes('ms/frame'), { timeout: 60000 });
+  expect(await page.evaluate(() => [VERSION.id, document.getElementById('tt').textContent.split(' ')[0]])).toEqual(['mini', '5.00s']);
+  expect(errors).toEqual([]);
   await page.close();
 }, T);
 
-test("in the user's own browser (no proxy, no request interception), a player worker's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
-  // watch.html's workers run chapter code in whatever browser the user previews with, where none of launchBrowser's
+test("in the user's own browser (no proxy, no request interception), the scrubber's chapter still cannot open a popup, navigate, run inline script or use RTCPeerConnection", async () => {
+  // The studio.html scrubber runs chapter code in whatever browser the user opens it in, where none of launchBrowser's
   // flags or render.mjs's interception apply: only what the server sends (the CSP and its sandbox) and what
-  // src/loader.js does before the version's scripts run. So this runs the real player in a browser launched with the
+  // src/loader.js does before the version's scripts run. So this opens the scrubber in a browser launched with the
   // GPU flags alone; puppeteer's own defaults even turn Chrome's popup blocker off, so only the sandbox stops popups.
   // Not tried here, because nothing there stops them: <link rel=prerender> (a full GET of any URL), preconnect and
   // dns-prefetch (a DNS lookup, and for preconnect a bare TCP connection), a frame's navigation that frame-src refuses
@@ -185,7 +188,7 @@ window.CHAPTER_RAN = true;
 attempt(() => window.open(E.open + '/open'));
 attempt(() => document.open(E.docopen + '/docopen', 'x', ''));
 attempt(() => { const a = document.createElement('a'); a.href = E.blank + '/blank'; a.target = '_blank'; document.body.append(a); a.click(); });
-attempt(() => { const w = document.open('/watch.html', 'same', ''); setTimeout(() => attempt(() => w.fetch(E['popup-fetch'] + '/w-fetch')), 300); });
+attempt(() => { const w = document.open('/src/lyrics.js', 'same', ''); setTimeout(() => attempt(() => w.fetch(E['popup-fetch'] + '/w-fetch')), 300); });
 attempt(() => fetch(E.fetch + '/fetch').catch(() => {}));
 attempt(() => { new Image().src = E.img + '/img'; });
 attempt(() => { const s = document.createElement('script'); s.textContent = 'window.INLINE_RAN = true; fetch(' + JSON.stringify(E.inline + '/inline') + ')'; document.head.append(s); });
@@ -193,7 +196,7 @@ attempt(() => { window.RTC_TYPE = typeof RTCPeerConnection + '/' + typeof webkit
   const pc = new RTCPeerConnection({ iceServers: [{ urls: 'turn:127.0.0.1:${cap.port('rtc')}?transport=tcp', username: 'u', credential: 'p' }] });
   pc.createDataChannel('x'); pc.createOffer().then(o => pc.setLocalDescription(o)); });
 // Navigation last, with the guard that stops it disarmed as far as this code can (put back afterwards, since the
-// engine itself still needs addEventListener to take the player's frame requests).
+// scrubber itself still needs addEventListener for its controls).
 const { preventDefault } = Event.prototype, { addEventListener } = EventTarget.prototype;
 Event.prototype.preventDefault = () => {};
 EventTarget.prototype.addEventListener = () => {};
@@ -209,12 +212,12 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
   try {
     const page = await plain.newPage();
     plain.on('targetcreated', t => { if (t.type() === 'page') popups.push(t.url()); });
-    await page.goto(`${srv.url}/watch.html?v=b-escapee&workers=1`);
-    // The worker comes up and goes on rendering frames, its chapter's attempts notwithstanding.
-    rendering = await page.waitForFunction('workers.length === 1 && workers[0].ready && done >= 2', { timeout: 60000 }).then(() => true, () => false);
+    await page.goto(`${srv.url}/studio.html?v=b-escapee`);
+    // The scrubber comes up and goes on painting frames, its chapter's attempts notwithstanding.
+    rendering = await page.waitForFunction(() => document.getElementById('tt')?.textContent.includes('ms/frame'), { timeout: 60000 })
+      .then(() => page.evaluate(() => window.renderAt(1, 'image/jpeg', .5).then(u => u.length > 10000)), () => false);
     await Bun.sleep(1500);
-    const frame = page.frames().find(f => f.url().startsWith(`http://w0.localhost:${srv.port}/studio.html`));
-    state = await frame?.evaluate(() => [window.CHAPTER_RAN === true, window.INLINE_RAN === true, window.RTC_TYPE, location.pathname]).catch(e => e.message);
+    state = await page.evaluate(() => [window.CHAPTER_RAN === true, window.INLINE_RAN === true, window.RTC_TYPE, location.pathname]).catch(e => e.message);
   } finally {
     await plain.close();
     cap.stop();
@@ -226,13 +229,13 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
 }, T);
 
 test('on a renderer host, every page but studio.html is inert: an opaque origin that runs no script and loads nothing', async () => {
-  // What a popup or frame of watch.html, an engine script or a version file would be, were chapter code to get one
+  // What a popup or frame of an engine script, a version file or an API answer would be, were chapter code to get one
   // open on its own origin: nothing to reach into and no fetch, Image or Worker of its own to use.
   const cap = await captureHosts(['from-page']);
   const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
   try {
     const page = await plain.newPage();
-    for (const path of ['/watch.html', '/src/lyrics.js', '/v/original/ch/c01_lab.js', '/api/versions/original', '/nope']) {
+    for (const path of ['/src/lyrics.js', '/v/original/ch/c01_lab.js', '/api/versions/original', '/nope']) {
       await page.goto(`http://w0.localhost:${srv.port}${path}`);
       expect([path, await page.evaluate(() => [window.origin, document.querySelectorAll('iframe').length])]).toEqual([path, ['null', 0]]);
       expect([path, await page.evaluate(u => fetch(u).then(() => 'fetched', () => 'blocked'), cap.url('from-page'))]).toEqual([path, 'blocked']);
