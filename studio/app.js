@@ -256,6 +256,15 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const blocked = guardExample(id); if (blocked) return blocked;
       const b = await body(req);
       if (typeof b.content !== 'string') return error(400, 'content is required');
+      // Optimistic concurrency: baseRevision names the revision the edit started from (null: there was no storyboard
+      // yet). If Claude (or another tab) wrote the file since, the edit would silently undo that, so it's refused.
+      // Everything from here to the write runs synchronously, so nothing can slip in between the check and the write.
+      // Without baseRevision the write is unconditional, as it always was.
+      if ('baseRevision' in b) {
+        if (b.baseRevision !== null && !Number.isInteger(b.baseRevision)) return error(400, 'baseRevision must be a revision id or null');
+        const current = db.getFile(id, 'STORYBOARD.md')?.revision_id ?? null;
+        if (current !== b.baseRevision) return error(409, 'the storyboard changed since you started editing it — reload it to see the new text');
+      }
       const [rid] = db.writeFiles(id, [{ path: 'STORYBOARD.md', content: b.content }], { source: 'manual', note: b.note || 'edited by hand' });
       const sb = parseStoryboard(b.content), v = db.getVersion(id), patch = {};
       if (sb.title) patch.title = sb.title;

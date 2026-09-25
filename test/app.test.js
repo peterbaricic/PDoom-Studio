@@ -292,6 +292,29 @@ test('manual storyboard edit updates title, logline and status, with history and
   expect(db.getFile('a', 'STORYBOARD.md').content).toBe('draft');
 });
 
+test('a storyboard edit with a baseRevision is written only if the storyboard is still at that revision', async () => {
+  db.createVersion({ id: 'a' });
+  // no storyboard yet: null is the base to start from
+  expect((await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'one', baseRevision: null })).status).toBe(200);
+  const first = db.getFile('a', 'STORYBOARD.md').revision_id;
+  // a match writes
+  const ok = await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'two', baseRevision: first });
+  expect(ok.status).toBe(200);
+  const second = (await ok.json()).revision;
+  expect(db.getFile('a', 'STORYBOARD.md')).toMatchObject({ content: 'two', revision_id: second });
+  // a stale base (someone wrote since) is refused, and nothing is written
+  const stale = await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'three', baseRevision: first });
+  expect(stale.status).toBe(409);
+  expect((await stale.json()).error).toContain('the storyboard changed since you started editing it');
+  expect((await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'three', baseRevision: null })).status).toBe(409);
+  expect(db.getFile('a', 'STORYBOARD.md')).toMatchObject({ content: 'two', revision_id: second });
+  expect(db.history('a', 'STORYBOARD.md')).toHaveLength(2);
+  expect((await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'x', baseRevision: 'latest' })).status).toBe(400);
+  // without one, the write is unconditional, as before
+  expect((await send('PUT', '/api/versions/a/files/STORYBOARD.md', { content: 'four' })).status).toBe(200);
+  expect(db.getFile('a', 'STORYBOARD.md').content).toBe('four');
+});
+
 test('version files are served from the database', async () => {
   const { get: get2 } = withExamples();
   const res = await get2('/v/original/ch/c01_lab.js');
