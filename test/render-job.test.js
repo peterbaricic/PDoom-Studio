@@ -99,10 +99,18 @@ test('the MP4 duration matches the range, and the render row carries the revisio
   expect(existsSync(join(data, 'library', r.file))).toBe(true);
   expect(existsSync(join(data, 'library', r.poster))).toBe(true);
 
-  const proc = Bun.spawn(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', join(data, 'library', r.file)], { stdout: 'pipe', stderr: 'pipe' });
-  const { format } = JSON.parse(await new Response(proc.stdout).text());
+  // Exactly the range's frames, and the song cut to the same length: no frame repeated at the end, and no audio
+  // running on past the picture.
+  const n = last - first + 1;
+  const proc = Bun.spawn(['ffprobe', '-v', 'quiet', '-count_frames', '-print_format', 'json', '-show_format', '-show_streams', join(data, 'library', r.file)],
+    { stdout: 'pipe', stderr: 'pipe' });
+  const { format, streams } = JSON.parse(await new Response(proc.stdout).text());
   await proc.exited;
-  expect(Math.abs(+format.duration - (last - first + 1) / FPS)).toBeLessThan(.15);
+  const video = streams.find(st => st.codec_type === 'video'), audio = streams.find(st => st.codec_type === 'audio');
+  expect(+video.nb_read_frames).toBe(n);
+  expect(Math.abs(+video.duration - n / FPS)).toBeLessThan(.01);
+  expect(Math.abs(+audio.duration - n / FPS)).toBeLessThan(.03);
+  expect(Math.abs(+format.duration - n / FPS)).toBeLessThan(.03);
 }, T);
 
 test('a render under a tiny cache cap keeps its own segments pinned until it releases them (Review Focus 5)', async () => {

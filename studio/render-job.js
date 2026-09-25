@@ -22,13 +22,13 @@ async function runFfmpeg(argv, { root, ctx }) {
 // '\'' as an escaped quote, the usual shell-style trick.
 const quoteForConcat = p => `'${p.replace(/'/g, "'\\''")}'`;
 
-// A concat demuxer list of files in frame order, each shown for exactly one frame's worth of time; the concat
-// demuxer ignores the last entry's duration, so that entry is repeated once more without one to make it stick.
+// A concat demuxer list of files in frame order, each shown for exactly one frame's worth of time. (Older ffmpeg
+// ignored the last entry's duration, and repeating that entry was the usual fix; ffmpeg 9 honours it, so a repeat
+// adds a frame. The encode below caps the output at exactly the range's frame count either way.)
 function writeConcatList(path, files) {
   const dur = (1 / FPS).toFixed(9);
   const lines = ['ffconcat version 1.0'];
   for (const f of files) lines.push(`file ${quoteForConcat(f)}`, `duration ${dur}`);
-  lines.push(`file ${quoteForConcat(files[files.length - 1])}`);
   writeFileSync(path, lines.join('\n') + '\n');
 }
 
@@ -83,7 +83,9 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
           '-ss', String(first / FPS), '-i', join(root, 'assets/pdoom.mp3'),
           '-map', '0:v', '-map', '1:a', '-r', String(FPS),
           '-c:v', 'libx264', '-preset', 'slow', '-crf', '17', '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', out,
+          // Exactly the range: its n frames, and the song cut to their length (-shortest lets the audio run on).
+          '-frames:v', String(last - first + 1), '-t', ((last - first + 1) / FPS).toFixed(6),
+          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out,
         ], { root, ctx });
         ctx.progress(.95);
 
