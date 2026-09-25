@@ -71,11 +71,14 @@ videos). Example versions — starting with the original video, its storyboard a
 **Remix** copies an example (or any version) into your own version in `user.db`, which you can then edit freely.
 **Promote** moves one of your own versions the other way, into `studio/default.db`, where it becomes a read-only
 example for everyone once you commit that file. Both are reachable through the API for now — a dedicated UI is
-planned:
+planned. Like every change the studio accepts, they need the studio's own `Origin` and the token it puts in its page
+(a new one each time the server starts):
 
 ```bash
-curl -X POST localhost:8080/api/versions/<id>/remix -H 'Content-Type: application/json' -d '{"id":"my-version","title":"My Version"}'
-curl -X POST localhost:8080/api/versions/<id>/promote
+TOKEN=$(curl -s localhost:8080/ | sed -n 's/.*name="studio-token" content="\([0-9a-f]*\)".*/\1/p')
+curl -X POST localhost:8080/api/versions/<id>/remix -H 'Origin: http://localhost:8080' -H "X-Studio-Token: $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"id":"my-version","title":"My Version"}'
+curl -X POST localhost:8080/api/versions/<id>/promote -H 'Origin: http://localhost:8080' -H "X-Studio-Token: $TOKEN"
 ```
 
 The studio listens only on your machine, and Claude jobs can only write inside their own temporary work folder.
