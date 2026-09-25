@@ -16,7 +16,7 @@ import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv } from './helpers.j
 const root = process.cwd(), data = tempDir(), defaultDb = tempDefaultDb();
 const repoDefaultDb = join(root, 'studio/default.db');
 const md5 = p => createHash('md5').update(readFileSync(p)).digest('hex');
-const repoDefaultBefore = md5(repoDefaultDb);
+const repoDefaultBefore = md5(repoDefaultDb), defaultCopyBefore = md5(defaultDb);
 
 // Every Claude job (the storyboard, shared.js, each chapter) gets this one run: it writes the whole version, and the
 // job imports just its own target file from it.
@@ -141,17 +141,20 @@ test('a new version: its storyboard, approved, becomes nine ready chapter blocks
 test('the preview plays: server-painted frames arrive and the coverage shading grows where it plays', step(async () => {
   // From chapter 8's start, the far end of the song from where the player has been painting ahead so far (from 0).
   // The shading is measured over the ten seconds played from there: the preview's own frames and its look-ahead fill
-  // it, while the thumbnails job (the only other painter here) paints at most one frame of it (0.3 s into the chapter).
+  // it, while the thumbnails job (the only other painter here) paints just two frames of it: 2971 (0.3 s into the
+  // chapter) and 3168 (its middle).
   const start = CHAPTER_WINDOWS[7][0], first = Math.ceil(start * 24 - 1e-6), last = first + 239;
   await page.click('button[aria-pressed][aria-label^="Chapter 8"]');
   await page.waitForFunction(t => Math.abs(document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') - t) < .1, { timeout: 10000 }, start);
   await page.waitForSelector('[data-painting="false"] canvas', { timeout: 60000 });
   const before = await page.evaluate(shadedIn, first, last), framesBefore = frameResponses.filter(r => r.startsWith('200')).length;
+  // Room for the growth below: a window already (nearly) painted before Play would prove nothing.
+  expect(before).toBeLessThanOrEqual(240 - 48);
   await clickButton('[data-painting]', 'Play');
-  await page.waitForFunction(`(${shadedIn})(${first}, ${last}) >= ${Math.min(before + 48, 240)}`, { timeout: 120000, polling: 250 });
+  await page.waitForFunction(`(${shadedIn})(${first}, ${last}) >= ${before + 48}`, { timeout: 120000, polling: 250 });
   await page.waitForFunction(t => +document.querySelector('[aria-label="Playhead"]').getAttribute('aria-valuenow') > t, { timeout: 120000, polling: 250 }, start);
   expect(frameResponses.slice(framesBefore).some(r => /^200 \/api\/frames\/e2e-test-show\/\d+\.jpg$/.test(r))).toBe(true);
-  expect(await page.evaluate(shadedIn, first, last)).toBeGreaterThan(Math.min(before, 239));
+  expect(await page.evaluate(shadedIn, first, last)).toBeGreaterThanOrEqual(before + 48);
   // Stop it (Pause while playing; Cancel while it waits for frames).
   await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
 }), 300000);
@@ -252,9 +255,10 @@ test("chapter code never ran in the browser: it loaded only the app's own Vite c
   expect(targets.filter(t => !t.startsWith('page '))).toEqual([]);
   expect(page.frames()).toHaveLength(1);
   expect(pageErrors).toEqual([]);
-  // Promote wrote to the private copy, and only to it.
+  // Promote wrote to the private copy, and only to it: the copy changed (it's a rollback-journal database, so the write
+  // is in the file itself) and holds the promoted version.
   expect(md5(repoDefaultDb)).toBe(repoDefaultBefore);
-  // (Read back rather than compared by checksum: the promote may still sit in the copy's WAL file, not its main file.)
+  expect(md5(defaultDb)).not.toBe(defaultCopyBefore);
   const copy = new Database(defaultDb, { readonly: true });
   try { expect(copy.query("select id from versions where id = 'e2e-remix'").get()).toEqual({ id: 'e2e-remix' }); } finally { copy.close(); }
 });
