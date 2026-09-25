@@ -1,0 +1,5 @@
+# bunfig.toml: `bun test`'s default file discovery otherwise walks the whole repo for *.test.{js,ts,tsx}, which
+# would also pick up studio/web/src/**/*.test.ts — those are Vitest tests (jsdom, `vi.stubGlobal`/`unstubAllGlobals`,
+# a real `document`), run with `bun run test:web` instead. Scoping `bun test` to test/ keeps the two suites separate.
+[test]
+root = "test"

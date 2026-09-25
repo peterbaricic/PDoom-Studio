@@ -50,6 +50,14 @@ test('guard needs token and same origin for changes', () => {
   expect(guard(req('OPTIONS', { origin: 'http://evil.com' })).status).toBe(403);
 });
 
+test('extraOrigins (--dev) accepts the Vite dev server\'s origin too, only when given', () => {
+  const devGuard = makeGuard({ port: () => 8080, token: 'tok', extraOrigins: ['http://localhost:5173'] });
+  expect(devGuard(req('POST', { origin: 'http://localhost:5173', 'x-studio-token': 'tok' }))).toBeNull();
+  expect(devGuard(req('POST', { origin: 'http://evil.com', 'x-studio-token': 'tok' })).status).toBe(403);
+  // without it (the default, plain `guard` above), that same origin is refused like any other outside origin
+  expect(guard(req('POST', { origin: 'http://localhost:5173', 'x-studio-token': 'tok' })).status).toBe(403);
+});
+
 test('events reach subscribers and the SSE stream', async () => {
   const ev = createEvents(), seen = [];
   const off = ev.subscribe(e => seen.push(e));

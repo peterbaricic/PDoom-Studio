@@ -4,10 +4,10 @@ import { readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
 import { versionManifest, workManifest } from './versions.js';
-import { parseStoryboard } from './storyboard.js';
+import { parseStoryboard, CHAPTER_WINDOWS } from './storyboard.js';
 import { isValidPath } from './db.js';
 import { getSnapshot, blobBySha } from './snapshot.js';
-import { N } from './frames/keys.js';
+import { N, FPS, DURATION } from './frames/keys.js';
 
 // Repo files anyone may load: the player, the shared engine, the libraries, the song and the bundled fonts. Nothing else.
 const PUBLIC = [/^watch\.html$/, /^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
@@ -16,6 +16,16 @@ const TYPES = { '.js': 'text/javascript; charset=utf-8', '.md': 'text/markdown; 
 const JOB_KINDS = ['storyboard', 'shared', 'chapter', 'render', 'thumbs'];
 const CLAUDE_KINDS = ['storyboard', 'shared', 'chapter'];   // the kinds that write the version's files
 const NO_STORE = { 'cache-control': 'no-store' };
+const IMMUTABLE = { 'cache-control': 'public, max-age=31536000, immutable' };
+// The React app (studio/web/, built by Vite into studio/web/dist — see studio/build-web.js): the studio's UI. It
+// carries the token exactly as the old studio/ui/ page did, under a CSP strict enough that the Vite build must not
+// emit an inline script (constraints.md): no unsafe-inline anywhere, and nothing may load from another origin.
+const SPA_CSP = ["default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' blob: data:", "media-src 'self'",
+  "font-src 'self'", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'"].join('; ');
+// The SPA's own routes (docs/superpowers/specs/2026-09-25-react-studio-design.md, section 2): the server answers all
+// of these with the built index.html, same as "/". studio/web/router.tsx handles "/" itself (client-side redirect).
+const VERSION_ID = '[a-z0-9][a-z0-9-]{0,40}';
+const SPA_ROUTES = [/^\/$/, new RegExp(`^/versions/${VERSION_ID}$`), new RegExp(`^/versions/${VERSION_ID}/watch$`), /^\/library$/];
 
 // Two kinds of origin. The studio's own (localhost, 127.0.0.1, [::1]) serves the page that carries the token and the
 // UI; version code never runs there. studio.html, which runs version code, is served only on renderer origins
@@ -60,12 +70,20 @@ const RENDERER_API_OK = [/^\/api\/versions\/[a-z0-9-]+$/, /^\/api\/work\/\d+$/, 
 const TOKEN_PAGE = { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" };
 
 // frames: the frame service (studio/frames/service.js); without one, the frame and cache routes 404. frameHoldMs: how
-// long a frame request waits for its frame to be painted before answering 202 (ask again).
+// long a frame request waits for its frame to be painted before answering 202 (ask again). dev: accept the Vite dev
+// server's origin too (studio/server.js's --dev; never set by `bun run studio`).
 export function createApp({ db, root, data = root, token, queue, events, port = 8080, claudeBin = process.env.CLAUDE_BIN || 'claude', authTimeoutMs = 5000,
-  frames = null, frameHoldMs = 30000 }) {
+  frames = null, frameHoldMs = 30000, dev = false }) {
   const app = { port };
-  const guard = makeGuard({ port: () => app.port, token });
-  const dirs = { ui: join(root, 'studio/ui'), work: join(data, '.studio/work'), library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
+  const guard = makeGuard({ port: () => app.port, token, extraOrigins: dev ? ['http://localhost:5173'] : [] });
+  const dirs = { ui: join(root, 'studio/ui'), web: join(root, 'studio/web/dist'), work: join(data, '.studio/work'),
+    library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
+  // GET /api/song: the engine's fixed timing (studio/frames/keys.js) plus every lyric line, for the timeline and
+  // lyrics track. src/lyrics.js is a plain script (no export — it's loaded as a <script> by studio.html/src/timeline.js
+  // in the browser), so it's evaluated once here in its own Function scope to pull LY out of it; it's a trusted repo
+  // file, not version code, so this is unlike the sandboxing chapter code gets.
+  const LY = new Function(`${readFileSync(join(root, 'src/lyrics.js'), 'utf8')}\nreturn LY;`)();
+  const song = { fps: FPS, frames: N, duration: DURATION, chapters: CHAPTER_WINDOWS, lyrics: LY };
   const body = async req => { try { return await req.json(); } catch { return {}; } };
   const file = (req, dir, rel, headers) => {
     let p; try { p = safeJoin(dir, decodeURIComponent(rel)); } catch { p = null; }
@@ -91,10 +109,24 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     return signedIn.pending;
   };
 
+  // The SPA shell (studio/web/dist/index.html, built by Vite — studio/build-web.js): "/" and every SPA route
+  // (SPA_ROUTES) get it, carrying the token exactly as the token page always has, under the strict SPA_CSP. UI hosts
+  // only — chapter code has no business loading the studio's own UI, any more than the reverse.
+  const spaShell = req => onRenderer(req) ? error(404, 'not found') : new Response(
+    readFileSync(join(dirs.web, 'index.html'), 'utf8').replace('%%TOKEN%%', token),
+    { headers: { 'content-type': 'text/html; charset=utf-8', ...NO_STORE, 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff', 'content-security-policy': SPA_CSP } });
+
   const routes = [
-    ['GET', /^\/$/, req => onRenderer(req) ? error(404, 'not found')
+    ...SPA_ROUTES.map(re => ['GET', re, req => spaShell(req)]),
+    // Vite's hashed build output (studio/web/dist/app-assets/…): safe to cache forever, since a changed file gets a
+    // new name. Named app-assets, not assets, so it can never collide with the repo's own /assets/ (PUBLIC, below).
+    ['GET', /^\/app-assets\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, join(dirs.web, 'app-assets'), p, IMMUTABLE)],
+    // The old plain-JS UI (studio/ui/): kept reachable at /ui/ until it's removed (see the design doc's build order,
+    // step 10) — it used to be served at "/", which the SPA now owns.
+    ['GET', /^\/ui\/?$/, req => onRenderer(req) ? error(404, 'not found')
       : new Response(readFileSync(join(dirs.ui, 'index.html'), 'utf8').replace('%%TOKEN%%', token), { headers: TOKEN_PAGE })],
     ['GET', /^\/ui\/(.+)$/, (req, [, p]) => onRenderer(req) ? error(404, 'not found') : file(req, dirs.ui, p, NO_STORE)],
+    ['GET', /^\/api\/song$/, () => json(song)],
     ['GET', /^\/studio\.html$/, req => onRenderer(req)
       ? file(req, root, 'studio.html', { 'content-security-policy': studioCsp(app.port) })
       : Response.redirect(`http://w0.localhost:${app.port}/studio.html${new URL(req.url).search}`, 302)],

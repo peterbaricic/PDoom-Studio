@@ -8,3 +8,4 @@ user.db*
 studio/default.db-*
 library/
 .studio/
+studio/web/dist/

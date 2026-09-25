@@ -1,13 +1,16 @@
-import { test, expect, beforeEach } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { test, expect, beforeEach, beforeAll, afterAll } from 'bun:test';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
 import { createQueue } from '../studio/queue.js';
-import { goodStoryboard, tempDir, tempDefaultDb } from './helpers.js';
+import { buildWebIfStale } from '../studio/build-web.js';
+import { launchBrowser } from '../studio/browser.js';
+import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv } from './helpers.js';
 
 const root = process.cwd();
+buildWebIfStale(root);   // studio/web/dist must exist before any test below can serve it
 const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
 let db, app, calls, data;
 const H = { host: 'localhost:8080' }, W = { ...H, origin: 'http://localhost:8080', 'x-studio-token': 'tok', 'content-type': 'application/json' };
@@ -18,10 +21,10 @@ const send = (method, p, body, headers = W) => app.fetch(new Request('http://loc
 // A second app, backed by a fresh in-memory user.db with default.db attached, so 'original' is present as an
 // example. Tests that need the Original use this instead of `app`. Shares the module-level default.db copy unless
 // given its own (promoteVersion writes to default.db, so a test that promotes needs a copy of its own).
-function withExamples(defaultPath = defaultDbPath) {
+function withExamples(defaultPath = defaultDbPath, extra = {}) {
   const db2 = openDb(':memory:', { defaultPath });
   const queue2 = { enqueue: () => 7, approve: () => [8, 9], cancel: () => true, retry: () => 10 };
-  const app2 = createApp({ db: db2, root, data, token: 'tok', queue: queue2, events: createEvents(), port: 8080 });
+  const app2 = createApp({ db: db2, root, data, token: 'tok', queue: queue2, events: createEvents(), port: 8080, ...extra });
   const get2 = p => app2.fetch(new Request('http://localhost:8080' + p, { headers: H }));
   const send2 = (method, p, body, headers = W) => app2.fetch(new Request('http://localhost:8080' + p, { method, headers, body: body && JSON.stringify(body) }));
   return { db: db2, app: app2, get: get2, send: send2 };
@@ -36,12 +39,101 @@ beforeEach(() => {
   app = createApp({ db, root, data, token: 'tok', queue, events: createEvents(), port: 8080 });
 });
 
-test('the shell page carries the token and may not be framed', async () => {
-  const res = await get('/');
+const SPA_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self'; font-src 'self'; " +
+  "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+test('the SPA shell carries the token and the exact SPA CSP, on the studio hosts only', async () => {
+  const { get: get2 } = withExamples();   // /versions/original needs 'original' to exist
+  for (const path of ['/', '/versions/original', '/versions/original/watch', '/library']) {
+    const res = await get2(path);
+    expect([path, res.status]).toEqual([path, 200]);
+    expect(await res.text()).toContain('content="tok"');
+    expect(res.headers.get('content-security-policy')).toBe(SPA_CSP);
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  }
+  // Never on a renderer host: chapter code has no more business loading the studio's UI than the UI has loading it.
+  for (const path of ['/', '/versions/original', '/library']) {
+    const onRenderer = await app.fetch(new Request(`http://w0.localhost:8080${path}`, { headers: { host: 'w0.localhost:8080' } }));
+    expect([path, onRenderer.status]).toEqual([path, 404]);
+    expect(await onRenderer.text()).not.toContain('tok');
+  }
+});
+
+test('hashed SPA assets are served with an immutable, long-lived cache-control', async () => {
+  const assetDir = join(root, 'studio/web/dist/app-assets');
+  const [asset] = readdirSync(assetDir).filter(f => f.endsWith('.js'));
+  const res = await get(`/app-assets/${asset}`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+  expect((await res.text()).length).toBeGreaterThan(0);
+  expect((await app.fetch(new Request(`http://w0.localhost:8080/app-assets/${asset}`, { headers: { host: 'w0.localhost:8080' } }))).status).toBe(404);
+});
+
+test('the old plain-JS UI still works at /ui/, kept until it is removed', async () => {
+  const res = await get('/ui/');
+  expect(res.status).toBe(200);
   expect(await res.text()).toContain('content="tok"');
   expect(res.headers.get('x-frame-options')).toBe('DENY');
   expect(res.headers.get('content-security-policy')).toBe("frame-ancestors 'none'");
+  expect((await get('/ui')).status).toBe(200);
+  expect((await get('/ui/app.js')).status).toBe(200);
+  const onRenderer = await app.fetch(new Request('http://w0.localhost:8080/ui/', { headers: { host: 'w0.localhost:8080' } }));
+  expect(onRenderer.status).toBe(404);
 });
+
+test('/api/song reports the engine timing and every lyric line, matching src/lyrics.js', async () => {
+  const lyricsSrc = readFileSync(join(root, 'src/lyrics.js'), 'utf8');
+  const expectedCount = new Function(`${lyricsSrc}\nreturn LY.length;`)();
+  const song = await (await get('/api/song')).json();
+  expect(song.fps).toBe(24);
+  expect(song.frames).toBe(Math.ceil(156.6 * 24));
+  expect(song.duration).toBe(156.6);
+  expect(song.chapters).toHaveLength(9);
+  expect(song.lyrics).toHaveLength(expectedCount);
+  expect(expectedCount).toBeGreaterThan(0);
+  for (const [start, end, text] of song.lyrics) {
+    expect(typeof start).toBe('number');
+    expect(typeof end).toBe('number');
+    expect(typeof text).toBe('string');
+    expect(end).toBeGreaterThan(start);
+  }
+  // renderer hosts get nothing from /api/ that isn't on the loader's allow-list
+  expect((await app.fetch(new Request('http://w0.localhost:8080/api/song', { headers: { host: 'w0.localhost:8080' } }))).status).toBe(404);
+});
+
+test('--dev accepts Origin http://localhost:5173; without it, that origin is refused', async () => {
+  const devApp = createApp({ db, root, data, token: 'tok', queue: { enqueue: () => 1 }, events: createEvents(), port: 8080, dev: true });
+  const fromVite = { host: 'localhost:8080', origin: 'http://localhost:5173', 'x-studio-token': 'tok', 'content-type': 'application/json' };
+  const dbVersion = 'dev-mode-test';
+  const devReq = () => devApp.fetch(new Request('http://localhost:8080/api/versions', { method: 'POST', headers: fromVite, body: JSON.stringify({ id: dbVersion }) }));
+  expect((await devReq()).status).toBe(201);
+  // The studio's own origins keep working in --dev too.
+  expect((await devApp.fetch(new Request('http://localhost:8080/api/versions', { method: 'POST', headers: { ...W, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'dev-mode-test-2' }) }))).status).toBe(201);
+  // Without --dev, the Vite origin is refused exactly like any other outside origin.
+  const res = await send('POST', '/api/versions', { id: 'nope' }, fromVite);
+  expect(res.status).toBe(403);
+});
+
+test('--dev writes the per-start token to <data>/.studio/dev-token, mode 600', async () => {
+  const dir = tempDir('dev-token-');
+  const userPath = join(dir, 'user.db');
+  const env = isolatedEnv(dir, { DEFAULT_DB: defaultDbPath, USER_DB: userPath });
+  const p = Bun.spawn(['bun', 'studio/server.js', '--port=0', '--dev'], { cwd: root, env, stdout: 'pipe', stderr: 'pipe' });
+  const reader = p.stdout.getReader(), dec = new TextDecoder();
+  let out = '';
+  try {
+    while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`the dev server exited: ${out}${await new Response(p.stderr).text()}`);
+      out += dec.decode(value);
+    }
+    const tokenPath = join(dir, '.studio/dev-token');
+    expect(existsSync(tokenPath)).toBe(true);
+    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(tokenPath, 'utf8')).toMatch(/^[0-9a-f]{48}$/);
+  } finally { p.kill(); await p.exited; }
+}, { timeout: 30000 });
 
 test('the token page and the UI are served on the studio hosts only, never where version code runs', async () => {
   for (const host of ['localhost:8080', '127.0.0.1:8080', '[::1]:8080']) {
@@ -422,3 +514,40 @@ test('work folders are served while a job runs', async () => {
   expect(await (await get(`/work/${jid}/ch/c01.js`)).text()).toBe('// c1');
   expect((await get(`/work/${jid}/TASK.md`)).status).toBe(404);
 });
+
+// The Vite build must emit no inline scripts — the SPA CSP's script-src 'self' allows none. Proven end to end: a real
+// server, a real (sealed, but not network-isolated the way the render browser is — this is the studio's own UI)
+// headless Chrome, and the browser's own CSP enforcement, not a static read of the HTML.
+let cspServer, cspBrowser;
+beforeAll(async () => {
+  const dir = tempDir('csp-');
+  cspServer = Bun.spawn(['bun', 'studio/server.js', '--port=0'], { cwd: root, env: isolatedEnv(dir, { DEFAULT_DB: defaultDbPath }), stdout: 'pipe', stderr: 'pipe' });
+  const reader = cspServer.stdout.getReader(), dec = new TextDecoder();
+  let out = '';
+  while (!/Studio: (http:\/\/localhost:\d+)\//.test(out)) out += dec.decode((await reader.read()).value);
+  cspServer.url = /Studio: (http:\/\/localhost:\d+)\//.exec(out)[1];
+  cspBrowser = await launchBrowser({ port: new URL(cspServer.url).port });
+}, 30000);
+afterAll(async () => { await cspBrowser?.close(); cspServer?.kill(); await cspServer?.exited; });
+
+test('the built SPA loads under the SPA CSP with no violations (so, no inline scripts)', async () => {
+  const page = await cspBrowser.newPage();
+  const violations = [];
+  await page.evaluateOnNewDocument(() => {
+    document.addEventListener('securitypolicyviolation', e => {
+      (window.__cspViolations ??= []).push(`${e.violatedDirective}: ${e.blockedURI}`);
+    });
+  });
+  const pageErrors = [];
+  page.on('pageerror', e => pageErrors.push(e.message));
+  // Not networkidle0: the app opens an EventSource('/api/events') that's meant to stay open, so the network is
+  // never idle.
+  await page.goto(`${cspServer.url}/`, { waitUntil: 'domcontentloaded' });
+  // The "/" -> "/versions/<id>" client-side redirect (router.tsx) has to have actually run for this to prove
+  // anything: it depends on a same-origin fetch succeeding under connect-src 'self'.
+  await page.waitForFunction(() => location.pathname.startsWith('/versions/'), { timeout: 10000 });
+  violations.push(...(await page.evaluate(() => window.__cspViolations || [])));
+  expect(violations).toEqual([]);
+  expect(pageErrors).toEqual([]);
+  await page.close();
+}, 30000);

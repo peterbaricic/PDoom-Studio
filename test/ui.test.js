@@ -27,7 +27,7 @@ beforeAll(async () => {
 afterAll(async () => { await browser?.close(); server?.kill(); });
 
 test('create a version from a concept to nine chapters', async () => {
-  await page.goto(`${url}/#/create/new`);
+  await page.goto(`${url}/ui/#/create/new`);
   await page.waitForSelector('#concept-title');
   await page.type('#concept-title', 'E2E Test Show');
   await page.type('#concept-text', 'A test concept.');
@@ -70,7 +70,7 @@ test('play a finished render with a synced walkthrough', async () => {
   const rid = db.addRender({ versionId: 'e2e-test-show', file: 'zz-e2e.mp4', revisionIds: [], durationS: 40, renderS: 60, sizeBytes: 1, poster: 'zz-e2e.jpg' });
   db.close();
 
-  await page.goto(`${url}/#/play`);
+  await page.goto(`${url}/ui/#/play`);
   await page.waitForSelector('.gallery .card');
   expect(await page.$eval('.gallery .card', e => e.textContent)).toContain('The P(doom) Bake-Off');
   await page.click('.gallery .card');
@@ -86,11 +86,11 @@ test('after a server restart, a page with a stale token asks for a reload', asyn
   const stale = await browser.newPage();
   await stale.setRequestInterception(true);
   stale.on('request', async r => {
-    if (new URL(r.url()).pathname !== '/') return r.continue();
+    if (new URL(r.url()).pathname !== '/ui/') return r.continue();
     const html = await (await fetch(r.url())).text();
     r.respond({ status: 200, contentType: 'text/html', body: html.replace(/name="studio-token" content="[0-9a-f]+"/, 'name="studio-token" content="stale"') });
   });
-  await stale.goto(`${url}/#/create`);
+  await stale.goto(`${url}/ui/#/create`);
   const message = await stale.evaluate(() => import('/ui/app.js').then(m => m.api('POST', '/api/versions', { id: 'stale-token' })).then(() => 'created', e => e.message));
   expect(message).toBe('The studio server restarted — reload this page.');
   await stale.close();

@@ -26,10 +26,12 @@ export const json = (data, status = 200) => Response.json(data, { status });
 export const error = (status, message) => Response.json({ error: message }, { status });
 
 // Every request must name one of our hosts (blocks DNS rebinding). Changes must also come from the studio's own
-// origin and carry the per-start token, which only the studio page knows.
-export function makeGuard({ port, token }) {
+// origin and carry the per-start token, which only the studio page knows. extraOrigins: additional Origins to accept
+// besides the studio's own — used only in --dev mode (studio/server.js), to accept the Vite dev server's own origin
+// (http://localhost:5173) while it proxies its requests through to this server (see studio/web/vite.config.ts).
+export function makeGuard({ port, token, extraOrigins = [] }) {
   const hostOk = h => { const p = port(); return [`localhost:${p}`, `127.0.0.1:${p}`, `[::1]:${p}`].includes(h) || new RegExp(`^w\\d+\\.localhost:${p}$`).test(h); };
-  const originOk = o => { const p = port(); return [`http://localhost:${p}`, `http://127.0.0.1:${p}`, `http://[::1]:${p}`].includes(o); };
+  const originOk = o => { const p = port(); return [`http://localhost:${p}`, `http://127.0.0.1:${p}`, `http://[::1]:${p}`, ...extraOrigins].includes(o); };
   return req => {
     if (!hostOk(req.headers.get('host') || '')) return error(403, 'unknown host');
     if (req.method === 'OPTIONS') return error(403, 'cross-origin requests are not allowed');
