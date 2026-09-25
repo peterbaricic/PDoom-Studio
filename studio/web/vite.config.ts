@@ -59,8 +59,7 @@ export default defineConfig({
   // assetsDir is 'app-assets', not the default 'assets': studio/app.js serves the repo's own /assets/ (the song,
   // the bundled fonts — PUBLIC) at that path already, and hashed build output needs a namespace that can't collide
   // with it.
-  // One bundle, served from localhost: there's no network to split it for, so the 500 kB warning is only noise.
-  build: { outDir: 'dist', assetsDir: 'app-assets', emptyOutDir: true, chunkSizeWarningLimit: 2000 },
+  build: { outDir: 'dist', assetsDir: 'app-assets', emptyOutDir: true },
   server: {
     port: 5173,
     strictPort: true,
