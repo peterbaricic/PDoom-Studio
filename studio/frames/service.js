@@ -83,10 +83,11 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     });
   };
 
-  // { file, key, depsHash } when cached; { pending: Promise (as paint's), key } while it's painted (or, with no painting
-  // browser, until that's known: at once); { broken, key } for
-  // a broken segment; { missing } for a version or chapter that doesn't exist. A preview request supersedes the
-  // version's older queued ones: only the newest playhead position matters. signal: aborting it withdraws the request.
+  // { file, key, depsHash } when cached; { pending: Promise (as paint's), key } while it's painted (with no painting
+  // browser, it resolves at once, as unavailable); { broken, key } for a broken segment; { missing } for a version or
+  // chapter that doesn't exist. A preview or prefetch request renews the version's paint-ahead lease (paintAhead). A
+  // preview request supersedes the version's older queued ones: only the newest playhead position matters. signal:
+  // aborting it withdraws the request.
   function frame(versionId, i, prio = 'preview', { signal } = {}) {
     const cur = current(versionId);
     if (!cur) return { missing: 'no such version' };
