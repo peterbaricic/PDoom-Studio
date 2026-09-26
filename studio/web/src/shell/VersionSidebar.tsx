@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useOpenVersionDialog } from '@/dialogs/VersionDialogs';
 import { cn } from '@/lib/utils';
-import { useSelectedVersion } from './useSelectedVersion';
+import { useVersionOnScreen } from './useSelectedVersion';
 
 // The stage a version is at, as the sidebar names it. `rendered`: whether the library has a finished video of it.
 export function stageLabel(v: Version, rendered: boolean): string {
@@ -28,7 +28,10 @@ export function stageLabel(v: Version, rendered: boolean): string {
 }
 
 export function VersionSidebar() {
-  const selected = useSelectedVersion();
+  // The version on screen: not the one whose id a detached render (kept from a deleted version) came from, nor while
+  // it isn't known yet whether the render watched is one.
+  const onScreen = useVersionOnScreen();
+  const selected = onScreen.pending || onScreen.detached ? undefined : onScreen.selected;
   const openDialog = useOpenVersionDialog();
   const { data: versions = [] } = useQuery({ queryKey: ['versions'], queryFn: () => api.get<Version[]>('/api/versions') });
   const { data: renders = [] } = useQuery({ queryKey: ['renders'], queryFn: () => api.get<Render[]>('/api/library') });
@@ -41,6 +44,9 @@ export function VersionSidebar() {
       <Link
         to="/versions/$id"
         params={{ id: v.id }}
+        // Not the router's own idea of an active link, which takes /versions/<id>/watch for <id>'s too: a detached
+        // render watched there isn't that version's.
+        activeOptions={{ exact: true, includeSearch: false }}
         aria-current={v.id === selected ? 'page' : undefined}
         className={cn(
           'hover:bg-accent flex flex-col gap-0.5 rounded-md px-3 py-2 text-sm',

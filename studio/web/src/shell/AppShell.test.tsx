@@ -180,4 +180,40 @@ describe('the version dialogs', () => {
     expect(within(breadcrumb).queryByText('gone')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Version actions' })).toBeNull();
   });
+
+  test('while it isn\'t known yet whether the render watched is a detached one, neither the header nor the sidebar claims the same-id version', async () => {
+    let release!: () => void;
+    const loaded = new Promise<void>(r => (release = r));
+    const detached = { id: 8, version_id: 'mine', file: 'old.mp4', revision_ids: [], snapshot_id: null, title: 'The First Take', logline: '',
+      duration_s: 1, render_s: 1, size_bytes: 1, poster: null, created_at: 1, detached: true };
+    mockShellApi({ 'GET /api/library': () => loaded.then(() => [detached]) });
+    renderRouteTree(routeTree, { path: '/versions/mine/watch?render=8' });
+    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+    const sidebar = screen.getByRole('navigation', { name: 'Versions' });
+    await within(sidebar).findByRole('link', { name: /My take/ }); // the versions are in
+    await new Promise(r => setTimeout(r, 50));
+    expect(within(breadcrumb).getByLabelText('Loading')).toBeInTheDocument();
+    expect(within(breadcrumb).queryByText('My take')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Version actions' })).toBeNull();
+    expect(within(sidebar).queryByRole('link', { current: 'page' })).toBeNull();
+
+    release();
+    expect(await within(breadcrumb).findByText('The First Take')).toBeInTheDocument();
+    expect(within(breadcrumb).queryByLabelText('Loading')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Version actions' })).toBeNull();
+    expect(within(sidebar).queryByRole('link', { current: 'page' })).toBeNull();
+  });
+
+  test('watching one of the version\'s own renders, the header links to it with its menu, and the sidebar marks it', async () => {
+    mockShellApi({
+      'GET /api/library': [{ id: 9, version_id: 'mine', file: 'new.mp4', revision_ids: [], snapshot_id: null, title: 'My take', logline: '',
+        duration_s: 1, render_s: 1, size_bytes: 1, poster: null, created_at: 1, detached: false }],
+    });
+    renderRouteTree(routeTree, { path: '/versions/mine/watch?render=9' });
+    const breadcrumb = await screen.findByRole('navigation', { name: 'Breadcrumb' });
+    expect(await within(breadcrumb).findByRole('link', { name: 'My take' })).toHaveAttribute('href', '/versions/mine');
+    expect(await screen.findByRole('button', { name: 'Version actions' })).toBeInTheDocument();
+    const sidebar = screen.getByRole('navigation', { name: 'Versions' });
+    expect(await within(sidebar).findByRole('link', { current: 'page' })).toHaveAttribute('href', '/versions/mine');
+  });
 });
