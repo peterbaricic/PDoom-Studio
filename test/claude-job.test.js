@@ -212,6 +212,17 @@ test('a job on an example is refused before any work folder or Claude run', asyn
   expect(costs).toEqual([]);
 });
 
+// (Real seconds: skipped by test:fast with the Chrome tests.)
+slowTest('a cancelled job\'s process gets more than render.mjs\'s own 5 s to wind down before it is killed', async () => {
+  const marker = join(mkdtempSync(join(tmpdir(), 'term-')), 'wound-down');
+  const ctrl = new AbortController();
+  const p = runner([{ sleep: 60000, termGraceMs: 6000, termMarker: marker }])(job('storyboard'), ctx(ctrl.signal));
+  await Bun.sleep(500);
+  ctrl.abort();
+  await expect(p).rejects.toThrow('cancelled');
+  expect(existsSync(marker)).toBe(true);   // it finished its 6 s of cleanup: no SIGKILL at 5 s
+}, 30000);
+
 test('an already-cancelled signal fails fast without running the CLI', async () => {
   const ctrl = new AbortController();
   ctrl.abort();

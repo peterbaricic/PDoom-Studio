@@ -29,6 +29,11 @@ export function permissionSettings({ root, jobId, dir }) {
   } };
 }
 
+// How long a cancelled job's process gets to stop by itself after SIGTERM before it's killed: longer than render.mjs's
+// own up to 5 s wait for its browser to close (and Claude's for its own children), so neither is cut off mid-cleanup
+// and leaves a browser behind.
+export const KILL_AFTER_MS = 8000;
+
 export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kind, versionId, chapter, signal }) {
   let times = 'load', thumb = null;
   if (kind === 'chapter') {
@@ -43,7 +48,7 @@ export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kin
   let escalateTimer = null;
   const kill = () => {
     p.kill();
-    escalateTimer = setTimeout(() => { if (p.exitCode === null) p.kill(9); }, 5000);
+    escalateTimer = setTimeout(() => { if (p.exitCode === null) p.kill(9); }, KILL_AFTER_MS);
   };
   signal?.addEventListener('abort', kill);
   const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
@@ -67,7 +72,7 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
   let timedOut = false, escalateTimer = null;
   const kill = () => {
     proc.kill();
-    escalateTimer = setTimeout(() => { if (proc.exitCode === null) proc.kill(9); }, 5000);
+    escalateTimer = setTimeout(() => { if (proc.exitCode === null) proc.kill(9); }, KILL_AFTER_MS);
   };
   ctx.signal.addEventListener('abort', kill);
   const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);

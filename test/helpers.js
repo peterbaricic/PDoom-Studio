@@ -6,8 +6,8 @@ import { inflateSync } from 'node:zlib';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 
 // `bun run test:fast` sets STUDIO_FAST_TESTS=1 (any other value, "0" included, runs everything): every test that
-// launches Chrome (directly, through render.mjs, or through a painting pool) or encodes with ffmpeg is written as
-// slowTest, and skipped then; bun's summary counts them under "skip" (test/preload.js says so up front too). A plain
+// launches Chrome (directly, through render.mjs, or through a painting pool), encodes with ffmpeg or waits out several
+// real seconds is written as slowTest, and skipped then; bun's summary counts them under "skip" (test/preload.js says so up front too). A plain
 // `bun test` runs them all. A beforeAll that launches Chrome for such tests returns early under FAST_TESTS.
 export const FAST_TESTS = process.env.STUDIO_FAST_TESTS === '1';
 export const slowTest = test.skipIf(FAST_TESTS);
