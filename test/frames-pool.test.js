@@ -22,7 +22,7 @@ test('with no browser to be found, findBrowser throws (the studio paints in-proc
 
 test('a painting browser that will not start fails every request at once with the reason, and is tried again only after launchRetryMs', async () => {
   let launches = 0;
-  const pool = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launchRetryMs: 300,
+  const pool = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launchRetryMs: 300, find: () => process.execPath,
     launch: async () => { launches++; throw new Error('No Chromium-based browser found.\nmore detail'); } });
   const ask = frame => pool.request({ versionId: 'v', snapshotId: 's', key: 'k', frame, prio: 'prefetch' });
   const reason = 'the painting browser did not start: No Chromium-based browser found. more detail';
@@ -41,4 +41,20 @@ test('a painting browser that will not start fails every request at once with th
     expect(launches).toBe(2);
     expect(pool.health().ok).toBe(false);
   } finally { await pool.close(); }
+});
+
+test('with plainly no browser to launch, health says so from the start, and the first paint still tries', async () => {
+  let launches = 0;
+  const launch = async () => { launches++; throw new Error('nope'); };
+  const none = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launch, find: () => findBrowser(undefined, { fromEnv: false, installed: [], caches: [] }) });
+  const badPath = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launch, find: () => '/nope/chrome' });
+  const found = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launch, find: () => process.execPath });
+  try {
+    expect(none.health()).toEqual({ ok: false, reason: expect.stringMatching(/^the painting browser did not start: No Chromium-based browser found/) });
+    expect(badPath.health()).toEqual({ ok: false, reason: 'the painting browser did not start: there is no browser at /nope/chrome' });
+    expect(found.health()).toEqual({ ok: true, reason: null });
+    expect(launches).toBe(0);   // looked for, not launched
+    expect(await none.request({ versionId: 'v', snapshotId: 's', key: 'k', frame: 0 })).toMatchObject({ unavailable: true, error: 'the painting browser did not start: nope' });
+    expect(launches).toBe(1);
+  } finally { await Promise.all([none.close(), badPath.close(), found.close()]); }
 });

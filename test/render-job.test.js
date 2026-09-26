@@ -1,4 +1,4 @@
-import { expect, beforeAll, afterAll } from 'bun:test';
+import { test, expect, beforeAll, afterAll } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
@@ -236,3 +236,13 @@ slowTest('thumbs skips a broken or missing chapter, logs why, and still succeeds
   expect(log).toContain('chapter 3: skipped');
   expect(log).toMatch(/chapter 3 isn't written yet/);
 }, T);
+
+test('with no painting browser, the thumbnails job fails with the reason instead of skipping every chapter', async () => {
+  const reason = 'the painting browser did not start: No Chromium-based browser found.';
+  const frames = { frame: () => ({ pending: Promise.resolve({ unavailable: reason, key: 'k' }) }) };
+  const { thumbs } = createRenderRunner({ db, root, data: tempDir(), events, frames });
+  const lines = [];
+  const job = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'short' }));
+  await expect(thumbs(job, { ...ctx(), log: t => lines.push(t) })).rejects.toThrow(reason);
+  expect(lines).toEqual([]);
+});

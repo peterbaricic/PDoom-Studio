@@ -33,11 +33,14 @@ function writeConcatList(path, files) {
 }
 
 // One frame through the frame service, waiting out a pending paint: the file path once painted (or already
-// cached), or thrown if the version/chapter is missing, the segment is broken, or nothing could be painted.
+// cached), or thrown if the version/chapter is missing, the segment is broken, or nothing could be painted. With no
+// painting browser at all, the error says why and is marked unavailable: that's no chapter's fault, nor worth
+// skipping past.
 async function frameFile(frames, versionId, i, prio, ctx) {
   const r = frames.frame(versionId, i, prio, { signal: ctx.signal });
   if (r.missing) throw new Error(r.missing);
   const settled = r.pending ? await r.pending : r;
+  if (settled.unavailable) throw Object.assign(new Error(settled.unavailable), { unavailable: true });
   if (settled.broken) throw new Error(settled.broken);
   if (!settled.file) throw new Error(settled.retry || `frame ${i} was not painted`);
   return settled.file;
@@ -113,7 +116,8 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
   // already covered by a preview or a render costs nothing extra here, and a second run of this job paints nothing.
   // All nine chapter slots are attempted regardless of how many the version actually has written: a chapter that
   // isn't written yet or whose segment is broken is logged and skipped rather than failing the whole job, so the
-  // healthy chapters still get their thumbnail. Only cancellation stops the job outright.
+  // healthy chapters still get their thumbnail. Only cancellation stops the job outright, and a painting browser that
+  // didn't start: the job fails with its reason instead of skipping nine chapters and calling that success.
   const thumbs = async (job, ctx) => {
     const vid = job.version_id;
     for (let n = 1; n <= 9; n++) {
@@ -130,6 +134,7 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
         ], { root, ctx });
       } catch (e) {
         if (ctx.signal.aborted) throw new Error('cancelled');
+        if (e.unavailable) throw new Error(e.message);
         ctx.log(`chapter ${n}: skipped (${e.message})\n`);
       }
       ctx.progress(n / 9);
