@@ -355,6 +355,10 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
         const [busy] = db.findJobs({ versionId: b.versionId, kinds: ['render'], statuses: ['queued', 'running'] });
         if (busy) return error(409, `a render of this version is already ${busy.status}`);
       }
+      if (b.kind === 'thumbs') {   // one would paint and write the same nine strips as the other
+        const [busy] = db.findJobs({ versionId: b.versionId, kinds: ['thumbs'], statuses: ['queued', 'running'] });
+        if (busy) return error(409, `the thumbnails of this version are already being painted (a thumbs job is ${busy.status})`);
+      }
       return json({ id: queue.enqueue({ kind: b.kind, versionId: b.versionId, params: b.params || {}, model: b.model || null }) }, 201);
     }],
     ['POST', /^\/api\/jobs\/(\d+)\/cancel$/, (req, [, jid]) => json({ ok: queue.cancel(+jid) })],

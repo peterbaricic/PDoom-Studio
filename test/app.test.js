@@ -439,6 +439,23 @@ test('a final render needs all nine chapters, and one render of a version at a t
   expect((await render()).status).toBe(201);
 });
 
+test('a second thumbs job for a version is refused while one is queued or running', async () => {
+  db.createVersion({ id: 'a' });
+  const thumbs = () => send('POST', '/api/jobs', { kind: 'thumbs', versionId: 'a' });
+  expect((await thumbs()).status).toBe(201);
+  const jid = db.addJob({ kind: 'thumbs', versionId: 'a' });
+  for (const status of ['queued', 'running']) {
+    db.updateJob(jid, { status });
+    const res = await thumbs();
+    expect([res.status, (await res.json()).error]).toEqual([409, `the thumbnails of this version are already being painted (a thumbs job is ${status})`]);
+  }
+  db.updateJob(jid, { status: 'failed' });
+  expect((await thumbs()).status).toBe(201);
+  db.createVersion({ id: 'b' });   // another version's is its own business
+  db.updateJob(jid, { status: 'running' });
+  expect((await send('POST', '/api/jobs', { kind: 'thumbs', versionId: 'b' })).status).toBe(201);
+});
+
 test('health reports the tools, and whether the Claude CLI is signed in', async () => {
   const dir = tempDir('cli-'), calls = join(dir, 'calls');
   const cli = (name, body) => { writeFileSync(join(dir, name), body); return `bun ${join(dir, name)}`; };
