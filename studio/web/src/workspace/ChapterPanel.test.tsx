@@ -164,4 +164,50 @@ describe('ChapterPanel', () => {
     fireEvent.focus((await revise()).parentElement!);
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Code CLI not found');
   });
+
+  describe('thumbnails', () => {
+    const strip = () => screen.queryByRole('img', { name: 'Chapter 2 thumbnails' });
+
+    test('shows the chapter\'s strip, its URL naming the chapter\'s revision and when the strip was written', async () => {
+      renderChapter({ manifest: { ...WRITTEN, thumbs: { 1: 50, 2: 1_700_000_000_250 } } });
+      await screen.findByRole('heading', { name: 'Chapter 2 · The Tent' });
+      expect(strip()).toHaveAttribute('src', '/thumbs/mine/c02.jpg?r=12.1700000000250');
+    });
+
+    test('without a strip, a placeholder (nothing is asked for that isn\'t there)', async () => {
+      const { fetchMock } = renderChapter({ manifest: { ...WRITTEN, thumbs: { 1: 50 } } });
+      expect(await screen.findByText('No thumbnails yet')).toBeInTheDocument();
+      expect(strip()).toBeNull();
+      expect(calls(fetchMock).some(c => c.includes('/thumbs/'))).toBe(false);
+    });
+
+    test('a strip that fails to load shows the placeholder instead', async () => {
+      renderChapter({ manifest: { ...WRITTEN, thumbs: { 2: 99 } } });
+      await screen.findByRole('heading', { name: 'Chapter 2 · The Tent' });
+      fireEvent.error(strip()!);
+      expect(await screen.findByText('No thumbnails yet')).toBeInTheDocument();
+    });
+
+    test('a chapter not written yet has no strip, whatever is on disk from before', async () => {
+      renderChapter({ manifest: { ...WRITTEN, thumbs: { 3: 99 } }, path: '/versions/mine?ch=3&t=38.5' });
+      expect(await screen.findByText('Not written yet', { selector: '[data-thumbs] *' })).toBeInTheDocument();
+      expect(screen.queryByRole('img', { name: 'Chapter 3 thumbnails' })).toBeNull();
+    });
+
+    test('Refresh thumbnails queues a thumbs job for the version', async () => {
+      const { fetchMock } = renderChapter({ answers: { 'POST /api/jobs': { id: 40 } } });
+      fireEvent.click(await screen.findByRole('button', { name: 'Refresh thumbnails' }));
+      await waitFor(() => expect(bodies(fetchMock, 'POST /api/jobs')).toEqual([{ kind: 'thumbs', versionId: 'mine' }]));
+    });
+
+    test.each(['queued', 'running'] as const)('Refresh thumbnails is off while a thumbs job is %s', async status => {
+      renderChapter({ jobs: [job({ id: 30, kind: 'thumbs', status })] });
+      expect(await screen.findByRole('button', { name: 'Refresh thumbnails' })).toBeDisabled();
+    });
+
+    test('an example can refresh its thumbnails too (it changes none of its code)', async () => {
+      renderChapter({ manifest: { ...WRITTEN, example: true } });
+      expect(await screen.findByRole('button', { name: 'Refresh thumbnails' })).toBeEnabled();
+    });
+  });
 });

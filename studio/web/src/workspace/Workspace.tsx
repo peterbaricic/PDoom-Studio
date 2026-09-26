@@ -16,6 +16,7 @@ import { LyricsTrack } from './LyricsTrack';
 import { PreviewPlayer } from './PreviewPlayer';
 import { RenderBar } from './RenderBar';
 import { Timeline } from './Timeline';
+import { chapterThumbs } from './thumbs';
 import { songEnd } from './timelineGeometry';
 import { usePreviewPlayer } from './usePreviewPlayer';
 
@@ -179,6 +180,7 @@ function WorkspaceBody({ versionId, song, manifest, coverage, coverageError, job
             coverage={coverage}
             jobs={jobs}
             walkthrough={manifest?.walkthrough}
+            thumbs={chapterThumbs(manifest)}
             selected={search.ch}
             time={player.time}
             onSeek={seekHere}

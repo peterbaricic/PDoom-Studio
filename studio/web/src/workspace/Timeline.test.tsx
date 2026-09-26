@@ -134,4 +134,16 @@ describe('Timeline', () => {
     fireEvent.keyDown(track, { key: 'ArrowLeft' });
     expect(onSeek).toHaveBeenLastCalledWith(9);
   });
+
+  test('a block with a thumbnail strip shows it, faintly, behind its label; one without, or broken, shows none', async () => {
+    renderTimeline({
+      thumbs: { 1: '/thumbs/mine/c01.jpg?r=5.1', 3: '/thumbs/mine/c03.jpg?r=6.1' },
+      coverage: { total: 3759, ranges: [], broken: [{ chapter: 3, error: 'boom' }], segments: segments() },
+    });
+    const img = (await block(1)).querySelector('img');
+    expect(img).toHaveAttribute('src', '/thumbs/mine/c01.jpg?r=5.1');
+    expect(img).toHaveAttribute('alt', '');
+    expect((await block(2)).querySelector('img')).toBeNull();
+    expect((await block(3)).querySelector('img')).toBeNull();
+  });
 });

@@ -1,8 +1,10 @@
-// ChapterPanel.tsx: the inspector with chapter n selected: its section of the storyboard, a feedback box and
+// ChapterPanel.tsx: the inspector with chapter n selected: its thumbnail strip (with "Refresh thumbnails", which
+// queues the version's thumbs job), its section of the storyboard, a feedback box and
 // "Revise chapter" (a chapter job; off while one for this chapter is queued or running), the chapter's code history
 // with Restore on every revision but the current one (off under the same condition), and this chapter's jobs.
-// Examples show the section, history and jobs only.
+// Examples show the strip, section, history and jobs only (a thumbs job changes none of their code).
 import { useState } from 'react';
+import { ImageIcon, RefreshCwIcon } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
@@ -11,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ACTIVE, ClaudeButton, JobList, ModelSelect, StoryboardMarkdown, useClaudeUnavailable } from './inspectorControls';
 import { storyboardSection } from './storyboardSections';
+import { chapterThumbs } from './thumbs';
 
 export interface ChapterPanelProps {
   versionId: string;
@@ -64,6 +67,14 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['version', versionId] }),
   });
 
+  const refreshThumbs = useMutation({
+    mutationFn: () => api.post<{ id: number }>('/api/jobs', { kind: 'thumbs', versionId }),
+    onSuccess: () => toast.success('Painting new thumbnails'),
+    onError: e => toast.error(`Couldn't refresh the thumbnails: ${e.message}`),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
+  });
+  const thumbsBusy = jobs.some(j => j.kind === 'thumbs' && ACTIVE.includes(j.status));
+
   const section = storyboard === undefined ? undefined : storyboardSection(storyboard, chapter);
   const reviseBlocked = active
     ? active.status === 'running'
@@ -73,6 +84,21 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
 
   return (
     <div className="flex flex-col gap-4 p-3">
+      <section aria-label="Thumbnails" data-thumbs className="flex flex-col gap-1.5">
+        <ThumbStrip chapter={chapter} src={chapterThumbs(manifest)[chapter]} written={!!path} />
+        <Button
+          size="sm"
+          variant="ghost"
+          className="text-muted-foreground -ml-2 w-fit"
+          disabled={thumbsBusy || refreshThumbs.isPending}
+          title={thumbsBusy ? 'The thumbnails are being painted' : 'Paint every chapter\'s thumbnails again'}
+          onClick={() => refreshThumbs.mutate()}
+        >
+          <RefreshCwIcon aria-hidden className={thumbsBusy ? 'animate-spin' : undefined} />
+          Refresh thumbnails
+        </Button>
+      </section>
+
       <section aria-label="Storyboard section" className="flex flex-col gap-2">
         {storyboardError ? (
           <p className="text-destructive text-sm">Couldn't load the storyboard: {storyboardError}</p>
@@ -160,6 +186,28 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
         <h3 className="text-sm font-semibold">Jobs</h3>
         <JobList jobs={chapterJobs} label={`Jobs for chapter ${chapter}`} empty="No jobs for this chapter yet." />
       </section>
+    </div>
+  );
+}
+
+// The strip, or a placeholder of its size where there's none (or it didn't load). A failure counts for its URL only:
+// a new strip gets a fresh chance to load.
+function ThumbStrip({ chapter, src, written }: { chapter: number; src: string | undefined; written: boolean }) {
+  const [failed, setFailed] = useState<string | null>(null);
+  if (src && failed !== src) {
+    return (
+      <img
+        src={src}
+        alt={`Chapter ${chapter} thumbnails`}
+        onError={() => setFailed(src)}
+        className="bg-muted aspect-[16/3] w-full rounded-md border object-cover"
+      />
+    );
+  }
+  return (
+    <div className="bg-muted/40 text-muted-foreground flex aspect-[16/3] w-full items-center justify-center gap-1.5 rounded-md border border-dashed text-xs">
+      <ImageIcon aria-hidden className="size-3.5" />
+      <span>{written ? 'No thumbnails yet' : 'Not written yet'}</span>
     </div>
   );
 }

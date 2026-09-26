@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync, cpSync, chmodSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { createApp } from '../studio/app.js';
@@ -512,6 +512,21 @@ test('version responses carry storyboard errors, and the whole history', async (
   expect(hist[0].content).toBeUndefined();
 });
 
+test("a version's detail says which chapters have a thumbnail strip, and when each was written (UI hosts only)", async () => {
+  db.createVersion({ id: 'a' });
+  const dir = join(data, '.studio/thumbs/a');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'c02.jpg'), 'jpg'); writeFileSync(join(dir, 'c07.jpg'), 'jpg'); writeFileSync(join(dir, 'notes.txt'), '');
+  utimesSync(join(dir, 'c02.jpg'), 1_700_000_000, 1_700_000_000.25);
+  const { thumbs } = await (await get('/api/versions/a')).json();
+  expect(thumbs).toEqual({ 2: 1_700_000_000_250, 7: Math.floor(statSync(join(dir, 'c07.jpg')).mtimeMs) });
+  db.createVersion({ id: 'b' });
+  expect((await (await get('/api/versions/b')).json()).thumbs).toEqual({});
+  // a painting page has no use for them
+  const onRenderer = await app.fetch(new Request('http://w0.localhost:8080/api/versions/a', { headers: { host: 'w0.localhost:8080' } }));
+  expect((await onRenderer.json()).thumbs).toBeUndefined();
+});
+
 test('the legacy-format Original never shows storyboard errors', async () => {
   const { get: get2 } = withExamples();
   expect((await (await get2('/api/versions/original')).json()).storyboardErrors).toEqual([]);
@@ -752,6 +767,9 @@ beforeAll(async () => {
     '-t', '30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', mp4);
   ffmpeg('-i', mp4, '-frames:v', '1', join(dir, 'library/csp-original.jpg'));
   cpSync(mp4, join(dir, 'library/csp-gone.mp4')); cpSync(join(dir, 'library/csp-original.jpg'), join(dir, 'library/csp-gone.jpg'));
+  // a thumbnail strip for the Original's chapter 2, which its timeline block shows
+  mkdirSync(join(dir, '.studio/thumbs/original'), { recursive: true });
+  cpSync(join(dir, 'library/csp-original.jpg'), join(dir, '.studio/thumbs/original/c02.jpg'));
   const userDb = openDb(join(dir, 'user.db'), { defaultPath: defaultDbPath });
   userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
   userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
@@ -801,6 +819,11 @@ slowTest('the built SPA loads under the SPA CSP with no violations (so, no inlin
   await page.evaluate(() => [...document.querySelectorAll('[data-painting] button')].find(b => ['Pause', 'Cancel'].includes(b.textContent.trim()))?.click());
   await page.hover('button[aria-label^="Chapter 2"]');
   await page.waitForSelector('[role="tooltip"]', { timeout: 10000 });
+  // its thumbnail strip, from /thumbs/ under img-src 'self'
+  await page.waitForFunction(() => {
+    const img = document.querySelector('button[aria-label^="Chapter 2"] img');
+    return img?.complete && img.naturalWidth > 0 && img.getAttribute('src').startsWith('/thumbs/original/c02.jpg?r=');
+  }, { timeout: 10000 });
 
   // The inspector (its own lazily loaded chunk), with the storyboard rendered from Markdown (tables included). On the
   // Original it's read-only, so for its editing controls (the native model select among them) this remixes the

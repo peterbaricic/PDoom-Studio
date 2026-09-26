@@ -1,7 +1,8 @@
 // Timeline.tsx: the song as nine chapter blocks, each as wide as its window, over a track that shows which frames the
 // server has cached (coverage shading) and where the playhead is. Clicking a block selects that chapter and seeks to
 // its start (in the URL: ?ch=n&t=start); dragging on the track scrubs. A block shows when Claude is working on its
-// chapter (or has it queued), when it isn't written yet, and when it's broken, with the error in its tooltip.
+// chapter (or has it queued), when it isn't written yet, and when it's broken, with the error in its tooltip. A
+// block whose chapter has a thumbnail strip shows it faintly behind its label.
 import { useNavigate } from '@tanstack/react-router';
 import { ClockIcon, LoaderCircleIcon, TriangleAlertIcon } from 'lucide-react';
 import type { PointerEvent as ReactPointerEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
@@ -17,6 +18,8 @@ export interface TimelineProps {
   jobs: Job[];
   // Chapter names, from the storyboard's walkthrough (when there is one).
   walkthrough?: WalkthroughChapter[];
+  // Each chapter's thumbnail strip URL, where it has one (thumbs.ts).
+  thumbs?: Record<number, string>;
   selected?: number;
   time: number;
   onSeek: (t: number) => void;
@@ -31,7 +34,7 @@ function coveredShare(ranges: Coverage['ranges'], first: number, last: number) {
   return last >= first ? n / (last - first + 1) : 0;
 }
 
-export function Timeline({ versionId, song, coverage, jobs, walkthrough, selected, time, onSeek }: TimelineProps) {
+export function Timeline({ versionId, song, coverage, jobs, walkthrough, thumbs, selected, time, onSeek }: TimelineProps) {
   const navigate = useNavigate();
   const duration = songEnd(song.chapters);
   const blocks = timelineGeometry(song.chapters, 100);
@@ -73,6 +76,7 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, selecte
           const share = coverage ? coveredShare(coverage.ranges, first, Math.min(last, total - 1)) : 0;
           const span = `${formatClock(b.start)}–${formatClock(b.end)}`;
           const status = error ? 'broken' : !written ? 'not written yet' : working ? 'Claude is working on it' : queued ? 'queued' : null;
+          const thumb = written && !error ? thumbs?.[b.n] : undefined;
           return (
             <Tooltip key={b.n}>
               <TooltipTrigger asChild>
@@ -95,13 +99,23 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, selecte
                   )}
                   style={{ left: pct(b.x), width: pct(b.width) }}
                 >
-                  <span className="flex w-full items-center gap-1 font-medium">
+                  {thumb && (
+                    // the strip's middle frame fills the block, faintly; decorative, the label says what it is
+                    <img
+                      src={thumb}
+                      alt=""
+                      aria-hidden
+                      loading="lazy"
+                      className="pointer-events-none absolute inset-0 size-full object-cover opacity-30"
+                    />
+                  )}
+                  <span className="relative flex w-full items-center gap-1 font-medium">
                     <span>{b.n}</span>
                     {error && <TriangleAlertIcon aria-hidden className="text-destructive size-3.5 shrink-0" />}
                     {working && <LoaderCircleIcon aria-label="Claude is working on this chapter" className="size-3.5 shrink-0 animate-spin" />}
                     {queued && <ClockIcon aria-label="queued for Claude" className="text-muted-foreground size-3.5 shrink-0 opacity-60" />}
                   </span>
-                  {name && <span className="text-muted-foreground w-full truncate">{name}</span>}
+                  {name && <span className="text-muted-foreground relative w-full truncate">{name}</span>}
                 </button>
               </TooltipTrigger>
               <TooltipContent className="max-w-sm">
