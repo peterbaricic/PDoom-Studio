@@ -338,6 +338,21 @@ slowTest('a frame drawn by another chapter\'s registration (one reaching past it
   expect((await frameOf('overrun', 1000, 'prefetch')).file).toBeDefined();
 }, T);
 
+slowTest('a chapter that never finishes painting holds one painter only: the other chapters\' frames are answered first', async () => {
+  // (options of its own, so none of these frames is cached by the tests above)
+  db.createVersion({ id: 'wedge', options: { wipes: false } });
+  db.writeFiles('wedge', [{ path: 'ch/c01.js', content: fastChapter(1) }, { path: 'ch/c03.js', content: "chapter('c3', 38.5, 59, [[38.5, t => { for (;;) {} }]]);" },
+    { path: 'ch/c05.js', content: fastChapter(5) }], { source: 'manual' });
+  expect((await frameOf('wedge', 24, 'prefetch')).file).toBeDefined();   // the snapshot's first load, done alone
+  const order = [];
+  const ask = (i, label) => frameOf('wedge', i, 'prefetch').then(r => { order.push(label); return r; });
+  // the looping frame asked for first, then four that paint in milliseconds
+  const [loops, ...fine] = await Promise.all([ask(1200, 'loops'), ask(25, 'fine'), ask(26, 'fine'), ask(1780, 'fine'), ask(1781, 'fine')]);
+  expect(loops.broken).toBe('painting frame 1200 took over 2 s');
+  for (const r of fine) expect(r.file).toBeDefined();
+  expect(order).toEqual(['fine', 'fine', 'fine', 'fine', 'loops']);
+}, T);
+
 slowTest('a paint that times out stays broken for brokenTtlMs from when its answer arrives, not from the timeout', async () => {
   // Closing the stuck page comes first (Chrome takes about half a second to end a looping renderer here, up to the 5 s
   // closePage allows); that time used to come off the break, so a slow close could hand over a break already over.

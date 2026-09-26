@@ -270,3 +270,23 @@ slowTest('checkWithRenderer checks a chapter job at three times in its window an
     await expect(cancelled).rejects.toThrow('cancelled');
   } finally { srv.stop(); }
 }, 120000);
+
+// The runner as the studio makes it, with its own check (checkWithRenderer, no validate given): Claude's first chapter
+// throws when painted, the check says so, Claude is asked for a fix once, and the fixed chapter is what's imported.
+slowTest('with the real check, a chapter that fails it goes back to Claude once, and the fix is imported', async () => {
+  const srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
+  const log = join(mkdtempSync(join(tmpdir(), 'fc-')), 'argv.jsonl');
+  const [a, b] = CHAPTER_WINDOWS[1];
+  const broken = `chapter('c2', ${a}, ${b}, [[${a}, t => { throw new Error('the first draft paints nothing'); }]]);`;
+  const fixed = `chapter('c2', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`;
+  try {
+    const run = createClaudeRunner({ db, root, data, baseUrl: srv.url, claudeCmd: ['bun', join(root, 'test/fake-claude.js')],
+      env: { FAKE_CLAUDE_PLAN: JSON.stringify({ runs: [{ files: { 'ch/c02.js': broken } }, { files: { 'ch/c02.js': fixed } }] }), FAKE_CLAUDE_LOG: log } });
+    await run(job('chapter', { chapter: 2 }), ctx());
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(logs.join('')).toContain('The check failed, asking Claude for a fix');
+    expect(logs.join('')).toContain('the first draft paints nothing');
+    expect(db.getFile('v', 'ch/c02.js').content).toBe(fixed);
+    expect(readFileSync(join(data, '.studio/thumbs/v/c02.jpg')).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
+  } finally { srv.stop(); }
+}, 120000);
