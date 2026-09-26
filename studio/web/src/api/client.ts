@@ -29,7 +29,8 @@ export const restartedState = {
   },
 };
 
-function markRestarted() {
+// Also called for a frame request's 403 (the player fetches frames itself) and a new server run on the event stream.
+export function markRestarted() {
   if (restarted) return;
   restarted = true;
   for (const fn of listeners) fn();

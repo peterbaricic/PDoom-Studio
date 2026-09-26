@@ -1,6 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
-import { describe, expect, test } from 'vitest';
-import { applyFramesEvent, handleStudioEvent } from './events';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { _resetRestartedForTests, restartedState } from './client';
+import { applyFramesEvent, handleStudioEvent, watchStudioEvents } from './events';
 import type { Coverage, JobWithLog } from './types';
 
 describe('applyFramesEvent', () => {
@@ -12,40 +13,18 @@ describe('applyFramesEvent', () => {
     segments: keys('a'),
   });
 
-  test('merges a new range that overlaps an existing one', () => {
-    const prev = coverage([[0, 10]]);
-    expect(applyFramesEvent(prev, { ranges: [[5, 20]], broken: [] }).ranges).toEqual([[0, 20]]);
+  // Every `frames` event carries the version's whole current coverage (studio/frames/service.js), not what's new.
+  test('the event\'s ranges replace the old ones, even when they cover less (frames evicted, the cache cleared)', () => {
+    const prev = coverage([[0, 600], [900, 1000]]);
+    expect(applyFramesEvent(prev, { ranges: [[0, 100]], broken: [], segments: keys('a') }).ranges).toEqual([[0, 100]]);
+    expect(applyFramesEvent(prev, { ranges: [], broken: [] }).ranges).toEqual([]);
   });
 
-  test('merges adjacent ranges (no gap between them) into one', () => {
+  test('the event\'s ranges replace the old ones when they cover more, too', () => {
     const prev = coverage([[0, 10]]);
-    expect(applyFramesEvent(prev, { ranges: [[11, 20]], broken: [] }).ranges).toEqual([[0, 20]]);
-  });
-
-  test('keeps disjoint ranges separate, sorted', () => {
-    const prev = coverage([[50, 60]]);
-    expect(applyFramesEvent(prev, { ranges: [[0, 10]], broken: [] }).ranges).toEqual([
-      [0, 10],
+    expect(applyFramesEvent(prev, { ranges: [[0, 20], [50, 60]], broken: [] }).ranges).toEqual([
+      [0, 20],
       [50, 60],
-    ]);
-  });
-
-  test('merges several overlapping and adjacent ranges from both sides at once', () => {
-    const prev = coverage([
-      [0, 5],
-      [20, 30],
-    ]);
-    const next = applyFramesEvent(prev, {
-      ranges: [
-        [6, 12],
-        [13, 19],
-        [100, 110],
-      ],
-      broken: [],
-    });
-    expect(next.ranges).toEqual([
-      [0, 30],
-      [100, 110],
     ]);
   });
 
@@ -53,11 +32,6 @@ describe('applyFramesEvent', () => {
     const prev = coverage([[0, 10]], [{ chapter: 3, error: 'old error' }]);
     const next = applyFramesEvent(prev, { ranges: [], broken: [{ chapter: 5, error: 'new error' }] });
     expect(next.broken).toEqual([{ chapter: 5, error: 'new error' }]);
-  });
-
-  test('merges as before while the segment keys stay the same', () => {
-    const prev = coverage([[0, 10]]);
-    expect(applyFramesEvent(prev, { ranges: [[11, 20]], broken: [], segments: keys('a') }).ranges).toEqual([[0, 20]]);
   });
 
   test('a chapter whose segment key changed: the event\'s ranges replace the old ones (they were for older code)', () => {
@@ -143,10 +117,10 @@ describe('handleStudioEvent', () => {
     expect(seen).toEqual([[['renders']]]);
   });
 
-  test('frames merges ranges into the cached coverage for that version, and does nothing when it is not cached', () => {
+  test('frames replaces the cached coverage\'s ranges for that version, and does nothing when it is not cached', () => {
     const qc = client();
-    qc.setQueryData<Coverage>(['coverage', 'a'], { total: 3759, ranges: [[0, 10]], broken: [], segments: {} });
-    handleStudioEvent(qc, 'frames', { versionId: 'a', ranges: [[11, 20]], broken: [] });
+    qc.setQueryData<Coverage>(['coverage', 'a'], { total: 3759, ranges: [[0, 600]], broken: [], segments: {} });
+    handleStudioEvent(qc, 'frames', { versionId: 'a', ranges: [[0, 20]], broken: [] });
     expect(qc.getQueryData<Coverage>(['coverage', 'a'])?.ranges).toEqual([[0, 20]]);
 
     handleStudioEvent(qc, 'frames', { versionId: 'b', ranges: [[0, 1]], broken: [] });
@@ -156,5 +130,72 @@ describe('handleStudioEvent', () => {
   test('an unknown event type is ignored', () => {
     const qc = client();
     expect(() => handleStudioEvent(qc, 'mystery', {})).not.toThrow();
+  });
+});
+
+describe('watchStudioEvents', () => {
+  // An EventSource as the browser runs one: it reconnects by itself after an error, firing `open` again.
+  class FakeSource extends EventTarget {
+    closed = false;
+    close() {
+      this.closed = true;
+    }
+    emit(type: string, data?: unknown) {
+      this.dispatchEvent(data === undefined ? new Event(type) : new MessageEvent(type, { data: JSON.stringify(data) }));
+    }
+  }
+  function watch() {
+    const qc = new QueryClient();
+    const invalidated: unknown[] = [];
+    qc.invalidateQueries = (filters => {
+      invalidated.push(filters?.queryKey ?? 'everything');
+      return Promise.resolve();
+    }) as typeof qc.invalidateQueries;
+    const source = new FakeSource();
+    const stop = watchStudioEvents(qc, source as unknown as EventSource);
+    return { source, invalidated, stop };
+  }
+  afterEach(() => _resetRestartedForTests());
+
+  test('the first connection refetches nothing; a reconnection after an error refetches everything (events may have been missed)', () => {
+    const { source, invalidated } = watch();
+    source.emit('open');
+    source.emit('hello', { boot: 'b1' });
+    expect(invalidated).toEqual([]);
+    source.emit('error');
+    expect(invalidated).toEqual([]);
+    source.emit('open');
+    expect(invalidated).toEqual(['everything']);
+    // an open with no error before it (there is none, but just so) is not a reconnection
+    source.emit('open');
+    expect(invalidated).toEqual(['everything']);
+  });
+
+  test('a reconnection to the same server run is not a restart; to a new one it is, at once', () => {
+    const { source } = watch();
+    source.emit('open');
+    source.emit('hello', { boot: 'b1' });
+    source.emit('error');
+    source.emit('open');
+    source.emit('hello', { boot: 'b1' });
+    expect(restartedState.value).toBe(false);
+    source.emit('error');
+    source.emit('open');
+    source.emit('hello', { boot: 'b2' });
+    expect(restartedState.value).toBe(true);
+  });
+
+  test('events still reach the query cache, and stopping closes the stream', () => {
+    const { source, invalidated, stop } = watch();
+    source.emit('job', { id: 3, version_id: 'a' });
+    expect(invalidated).toEqual([['jobs'], ['job', 3]]);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    source.dispatchEvent(new MessageEvent('job', { data: 'not json' }));
+    expect(errors).toHaveBeenCalledOnce();
+    errors.mockRestore();
+    stop();
+    expect(source.closed).toBe(true);
+    source.emit('job', { id: 4, version_id: 'a' });
+    expect(invalidated).toHaveLength(2);
   });
 });

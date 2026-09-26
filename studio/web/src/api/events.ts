@@ -4,9 +4,12 @@
 //   job     -> invalidate ['jobs'] and ['job', id]
 //   log     -> append to ['job', id]'s log via setQueryData (at the event's offset; else refetch it)
 //   library -> invalidate ['renders']
-//   frames  -> merge ranges into ['coverage', id] via setQueryData
+//   frames  -> replace ['coverage', id]'s ranges and broken chapters via setQueryData
+// And when the stream comes back after dropping, everything is refetched (events may have been missed meanwhile); if
+// it came back from a different server run (its `hello` names another boot id), the page is stale at once.
 import { useEffect } from 'react';
 import type { QueryClient } from '@tanstack/react-query';
+import { markRestarted } from './client';
 import type { Coverage, JobWithLog } from './types';
 
 interface VersionEvent {
@@ -29,31 +32,15 @@ interface FramesEvent {
   segments?: Coverage['segments'];
 }
 
-// Two ranges (each [first, last], inclusive, frame indices) merge when they overlap or touch (adjacent integer
-// ranges, e.g. [0,10] and [11,20], cover every frame between them with nothing left out).
-function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
-  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
-  const merged: Array<[number, number]> = [];
-  for (const [start, end] of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
-    else merged.push([start, end]);
-  }
-  return merged;
-}
-
 const sameSegments = (a: Coverage['segments'] | undefined, b: Coverage['segments']) =>
   !!a && [1, 2, 3, 4, 5, 6, 7, 8, 9].every(n => (a[n] ?? null) === (b[n] ?? null));
 
-// Pure, unit-tested (events.test.ts): prev's ranges plus the event's, coalesced; broken is replaced with the event's
-// (the frame service always reports the full current broken-chapter set, not a delta). When the event's segment keys
-// differ from prev's, a chapter's code changed: prev's ranges were counted under the old keys, so the event's (always
-// the full current coverage) replace them.
+// Pure, unit-tested (events.test.ts): the frame service's every `frames` event is the version's whole current
+// coverage, not what's new, so its ranges and broken chapters replace prev's. That's how coverage shrinks, too (frames
+// evicted to stay under the cap, or the cache cleared). The segment keys go along when the event has them.
 export function applyFramesEvent(prev: Coverage, e: Pick<FramesEvent, 'ranges' | 'broken' | 'segments'>): Coverage {
-  if (e.segments && !sameSegments(prev.segments, e.segments)) {
-    return { ...prev, ranges: mergeRanges(e.ranges), broken: e.broken, segments: e.segments };
-  }
-  return { ...prev, ranges: mergeRanges([...prev.ranges, ...e.ranges]), broken: e.broken };
+  const next = { ...prev, ranges: e.ranges, broken: e.broken };
+  return e.segments && !sameSegments(prev.segments, e.segments) ? { ...next, segments: e.segments } : next;
 }
 
 // The event handling itself, factored out of the hook below so it can be unit-tested without mounting a component or
@@ -101,26 +88,50 @@ export function handleStudioEvent(queryClient: QueryClient, type: string, data: 
 
 const EVENT_TYPES = ['version', 'job', 'log', 'library', 'frames'] as const;
 
-// One EventSource per mounted app (main.tsx's App calls this once). Reconnection is the browser's own: a plain
-// EventSource retries with backoff on its own, so a studio restart's dropped connection comes back without any code
-// here — the client 403 handling in client.ts is what tells the user to reload for a stale token.
+// Feeds one event stream into the query cache; returns what stops it. Reconnection is the browser's own (an
+// EventSource retries by itself after an error); what's done here is catching up once it's back: every query is
+// refetched, since events published while it was down never arrive. The server opens each stream with a `hello`
+// naming its run (studio/events.js): a different one than before means the studio restarted, and this page's token is
+// stale — said at once, rather than at the next mutation's 403 (client.ts).
+export function watchStudioEvents(queryClient: QueryClient, source: EventSource): () => void {
+  let dropped = false;
+  let boot: string | undefined;
+  // A message event's JSON, handled; one that can't be is logged, not thrown out of the stream's dispatch.
+  const onMessage = (type: string, handle: (data: unknown) => void) => (ev: Event) => {
+    try {
+      handle(JSON.parse((ev as MessageEvent<string>).data));
+    } catch (e) {
+      console.error(`studio event ${type}: could not handle`, e);
+    }
+  };
+  const listeners: Array<[string, (ev: Event) => void]> = [
+    ['error', () => (dropped = true)],
+    [
+      'open',
+      () => {
+        if (!dropped) return;
+        dropped = false;
+        void queryClient.invalidateQueries();
+      },
+    ],
+    [
+      'hello',
+      onMessage('hello', data => {
+        const next = (data as { boot?: string }).boot;
+        if (boot && next && next !== boot) markRestarted();
+        boot ??= next;
+      }),
+    ],
+    ...EVENT_TYPES.map((type): [string, (ev: Event) => void] => [type, onMessage(type, data => handleStudioEvent(queryClient, type, data))]),
+  ];
+  for (const [type, fn] of listeners) source.addEventListener(type, fn);
+  return () => {
+    for (const [type, fn] of listeners) source.removeEventListener(type, fn);
+    source.close();
+  };
+}
+
+// One EventSource per mounted app (main.tsx's App calls this once).
 export function useStudioEvents(queryClient: QueryClient): void {
-  useEffect(() => {
-    const source = new EventSource('/api/events');
-    const handlers = EVENT_TYPES.map(type => {
-      const handler = (ev: MessageEvent<string>) => {
-        try {
-          handleStudioEvent(queryClient, type, JSON.parse(ev.data));
-        } catch (e) {
-          console.error(`studio event ${type}: could not handle`, e);
-        }
-      };
-      source.addEventListener(type, handler);
-      return { type, handler };
-    });
-    return () => {
-      for (const { type, handler } of handlers) source.removeEventListener(type, handler);
-      source.close();
-    };
-  }, [queryClient]);
+  useEffect(() => watchStudioEvents(queryClient, new EventSource('/api/events')), [queryClient]);
 }

@@ -89,6 +89,24 @@ test('guard needs the token for the frame and coverage GETs on UI hosts', () => 
   expect(guard(at('/api/versions'))).toBeNull();
 });
 
+// A stream opens with a hello naming this server run, so a page whose stream came back from a restart can tell.
+test('every SSE stream opens with a hello naming the server run: the same for every stream of one run, another for the next', async () => {
+  const hello = async ev => {
+    const ctrl = new AbortController();
+    const reader = ev.stream(new Request('http://x/api/events', { signal: ctrl.signal })).body.getReader();
+    let text = '';
+    while (!text.includes('event: hello\n')) text += new TextDecoder().decode((await reader.read()).value);
+    while (!text.endsWith('\n\n')) text += new TextDecoder().decode((await reader.read()).value);
+    ctrl.abort();
+    return JSON.parse(/event: hello\ndata: (.*)\n\n/.exec(text)[1]).boot;
+  };
+  const run = createEvents(), next = createEvents();
+  const first = await hello(run);
+  expect(first).toMatch(/^[\w-]{8,}$/);
+  expect(await hello(run)).toBe(first);
+  expect(await hello(next)).not.toBe(first);
+});
+
 test('events reach subscribers and the SSE stream', async () => {
   const ev = createEvents(), seen = [];
   const off = ev.subscribe(e => seen.push(e));
