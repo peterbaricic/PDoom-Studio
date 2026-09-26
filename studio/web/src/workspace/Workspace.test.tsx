@@ -4,7 +4,7 @@ import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
 import type { Coverage, Manifest, Song } from '@/api/types';
 import { mockApi, newQueryClient, renderRouteTree } from '../test-utils';
 import { LoadBoundary } from '@/components/LoadBoundary';
-import { Workspace, workspaceSearch } from './Workspace';
+import { Workspace, brokenRecheckMs, workspaceSearch } from './Workspace';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -126,6 +126,24 @@ describe('Workspace', () => {
     expect(screen.getByText('0:23 / 2:36')).toBeInTheDocument();
   });
 
+  test('a break that runs out is asked about again once it has, not before', async () => {
+    let asked = 0;
+    const until = Date.now() + 400;
+    stubApi({
+      'GET /api/coverage/mine': () => {
+        asked++;
+        return asked === 1 ? { ...COVERAGE, broken: [{ chapter: 2, error: 'timed out', until }] } : COVERAGE;
+      },
+    });
+    renderWorkspace('/versions/mine');
+    await waitFor(() => expect(asked).toBe(1));
+    await new Promise(r => setTimeout(r, 200));
+    expect(asked).toBe(1);
+    await waitFor(() => expect(asked).toBe(2), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 1500));
+    expect(asked).toBe(2); // nothing broken now: no more asking
+  });
+
   test('shows the lyrics and the render bar', async () => {
     stubApi();
     renderWorkspace('/versions/mine');
@@ -158,5 +176,29 @@ describe('Workspace', () => {
     expect(await screen.findByText('the inspector')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
     vi.mocked(console.error).mockRestore();
+  });
+});
+
+describe('brokenRecheckMs', () => {
+  const at = (broken: Coverage['broken']): Coverage => ({ ...COVERAGE, broken });
+
+  test('nothing broken, or only chapters broken until their code changes: never (a version event says when)', () => {
+    expect(brokenRecheckMs(undefined, 0)).toBe(false);
+    expect(brokenRecheckMs(at([]), 0)).toBe(false);
+    expect(brokenRecheckMs(at([{ chapter: 3, error: 'threw' }]), 0)).toBe(false);
+  });
+
+  test('a break that runs out: just after the earliest one does', () => {
+    const now = 1_000_000;
+    const broken = at([
+      { chapter: 3, error: 'threw' },
+      { chapter: 5, error: 'timed out', until: now + 40_000 },
+      { chapter: 7, error: 'timed out', until: now + 9_000 },
+    ]);
+    expect(brokenRecheckMs(broken, now)).toBe(9_250);
+  });
+
+  test('one that should have run out already (the clock, a slow answer): soon, but not in a tight loop', () => {
+    expect(brokenRecheckMs(at([{ chapter: 5, error: 'timed out', until: 500 }]), 1_000)).toBe(1_000);
   });
 });

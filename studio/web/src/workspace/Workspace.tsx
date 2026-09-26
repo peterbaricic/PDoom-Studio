@@ -42,8 +42,19 @@ export function workspaceSearch(search: Record<string, unknown>): WorkspaceSearc
 }
 
 const URL_WRITE_DELAY_MS = 250;
-const BROKEN_RECHECK_MS = 15_000;
+const RECHECK_AFTER_MS = 250; // after a break runs out, so the server has certainly let it go
+const RECHECK_MIN_MS = 1_000;
 const roundTime = (t: number) => Math.round(t * 1000) / 1000;
+
+// When to ask for the coverage again on the chance a break is over: a break that runs out (a timeout, a version that
+// didn't load) carries its end (`until`), and ends without an event saying so, so the coverage is asked for again just
+// after the earliest one; a chapter's own error lasts until its code changes, which a `version` event announces. False
+// when there's nothing to wait for.
+export function brokenRecheckMs(coverage: Coverage | undefined, now: number): number | false {
+  const ends = (coverage?.broken ?? []).flatMap(b => (b.until == null ? [] : [b.until]));
+  if (!ends.length) return false;
+  return Math.max(RECHECK_MIN_MS, Math.min(...ends) - now + RECHECK_AFTER_MS);
+}
 
 export function Workspace({ versionId }: { versionId: string }) {
   const song = useQuery({ queryKey: ['song'], queryFn: () => api.get<Song>('/api/song'), staleTime: Infinity });
@@ -54,9 +65,8 @@ export function Workspace({ versionId }: { versionId: string }) {
   const coverage = useQuery({
     queryKey: ['coverage', versionId],
     queryFn: () => api.get<Coverage>(`/api/coverage/${encodeURIComponent(versionId)}`),
-    // A break from a timeout expires on the server (after a minute) without an event saying so: while any chapter
-    // is broken, ask again now and then, so the player learns when it can paint it again.
-    refetchInterval: q => (q.state.data?.broken.length ? BROKEN_RECHECK_MS : false),
+    // so the player learns when it can paint a chapter whose break ran out
+    refetchInterval: q => brokenRecheckMs(q.state.data, Date.now()),
   });
   const { data: jobs = [] } = useQuery(jobsQuery(versionId));
 
