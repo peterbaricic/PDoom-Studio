@@ -268,6 +268,27 @@ test('example revision ids are >= EXAMPLE_REVISION_FLOOR and getRevision resolve
   udb.close();
 });
 
+// Linux's bundled SQLite doesn't read URIs, so there default.db is attached by its plain path: both ways must read
+// the examples the same, and neither may write default.db while the user works on their own versions.
+const sqliteReadsUris = new Database(':memory:').query('PRAGMA compile_options').all().some(r => r.compile_options === 'USE_URI');
+test.each(sqliteReadsUris ? [true, false] : [false])('with URIs %p, examples read the same and default.db is never written', uris => {
+  const defaultPath = freshDefaultPath(), bytes = readFileSync(defaultPath);
+  const udb = openDb(tempDbPath('user-'), { defaultPath, uris });
+  expect(udb.getVersion('original')).toMatchObject({ id: 'original', example: true });
+  expect(udb.listVersions().map(v => v.id)).toEqual(['original']);
+  const [rev] = udb.history('original', 'STORYBOARD.md');
+  expect(rev.id).toBeGreaterThanOrEqual(EXAMPLE_REVISION_FLOOR);
+  expect(udb.getRevision(rev.id)).toMatchObject({ version_id: 'original' });
+  udb.remixVersion('original', { id: 'mine', title: 'Mine' });
+  udb.writeFiles('mine', [{ path: 'STORYBOARD.md', content: 'changed' }], { source: 'manual' });
+  udb.updateVersion('mine', { title: 'Mine 2' });
+  expect(() => udb.writeFiles('original', [{ path: 'STORYBOARD.md', content: 'x' }], { source: 'manual' })).toThrow('examples are read-only');
+  udb.deleteVersion('mine');
+  udb.close();
+  expect(readFileSync(defaultPath).equals(bytes)).toBe(true);
+  expect(readdirSync(join(defaultPath, '..')).filter(n => n.startsWith(defaultPath.split('/').pop()))).toEqual([defaultPath.split('/').pop()]);
+});
+
 test('a default.db path with URI-special characters (#, ?, %) is attached as is, read-only', () => {
   const parent = mkdtempSync(join(tmpdir(), 'uri-')), dir = join(parent, 'a#b?c%41d'), defaultPath = join(dir, 'default.db');
   mkdirSync(dir);

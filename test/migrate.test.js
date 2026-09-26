@@ -24,10 +24,10 @@ test('renames studio.db to user.db, drops the Original, and keeps everything els
   legacy.updateJob(jid, { status: 'done', cost_usd: 0.42 });
   const rid = legacy.addRender({ versionId: 'space-opera', file: 'space-opera-1.mp4', revisionIds: [1], durationS: 10, renderS: 20, sizeBytes: 5, poster: 'space-opera-1.jpg' });
   legacy.close();
-  // The WAL beside studio.db still holds every write above (SQLite only checkpoints it into the main file
-  // automatically every ~1000 pages, far more than this fixture writes) — migrateLegacyDb must checkpoint it
-  // itself before renaming, or all of this would be silently left behind at the old path.
-  expect(existsSync(`${legacyPath}-wal`)).toBe(true);
+  // Where SQLite keeps the WAL on close (macOS's system SQLite does; the one Bun bundles on Linux checkpoints and
+  // removes it), it still holds every write above — migrateLegacyDb must checkpoint it itself before renaming, or
+  // all of this would be silently left behind at the old path. Either way, everything must arrive below.
+  if (process.platform === 'darwin') expect(existsSync(`${legacyPath}-wal`)).toBe(true);
 
   const result = migrateLegacyDb(root, { userPath, log: quiet });
   expect(result).toBe(true);

@@ -60,9 +60,17 @@ const parseRender = r => r && { ...r, revision_ids: JSON.parse(r.revision_ids), 
 // some other file instead.
 const readOnlyUri = path => `file:${path.replace(/[%?#]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())}?mode=ro`;
 
+// Whether this SQLite reads ATTACH names as URIs. macOS's system SQLite (which Bun uses there) is built with
+// SQLITE_USE_URI; the SQLite Bun bundles on Linux isn't, and bun:sqlite has no way to turn URIs on for a connection
+// opened with options (strict mode needs those), so there the URI above would be taken as a file name and fail
+// ("unable to open database"). Without URIs, default.db is attached by its plain path: still never written through
+// this connection (every write here is to main; promotions go through their own connection, _writeExample), only
+// without SQLite enforcing it.
+const usesUris = db => db.query('PRAGMA compile_options').all().some(r => r.compile_options === 'USE_URI');
+
 // path = user.db. { defaultPath } = studio/default.db: attached read-only as schema "def" when given and present.
 // Without defaultPath (or when the file doesn't exist yet), behavior is exactly the single-database store this was.
-export function openDb(path = 'studio.db', { defaultPath } = {}) {
+export function openDb(path = 'studio.db', { defaultPath, uris } = {}) {
   const hasDef = !!(defaultPath && existsSync(defaultPath));
   const db = new Database(path, { create: true, strict: true });
   // Before the first write this connection makes (the WAL pragma right below, unconditionally): refuse a path
@@ -82,7 +90,8 @@ export function openDb(path = 'studio.db', { defaultPath } = {}) {
   db.exec(SCHEMA);
   migrateShaColumn(db);
   migrateRenderColumns(db);
-  if (hasDef) db.query('ATTACH DATABASE ? AS def').run(readOnlyUri(defaultPath));
+  // `uris` (tests only) forces either way of attaching, so both are tested on any machine.
+  if (hasDef) db.query('ATTACH DATABASE ? AS def').run((uris ?? usesUris(db)) ? readOnlyUri(defaultPath) : defaultPath);
   return new StudioDb(db, { defaultPath, hasDef });
 }
 

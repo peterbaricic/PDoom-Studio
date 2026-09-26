@@ -711,7 +711,8 @@ test('a kept render stays the deleted version\'s: a new version with the same id
   expect(existsSync(join(lib, 'gone.mp4'))).toBe(false);
 });
 
-test('a file that cannot be removed after the version is deleted is logged, not a failed request', async () => {
+// A read-only folder stops unlink for everyone but root (which is who a Linux container usually runs tests as).
+test.skipIf(process.getuid?.() === 0)('a file that cannot be removed after the version is deleted is logged, not a failed request', async () => {
   const { db: db2, send: send2, published, dropped, lib } = deletable();
   const errors = [], logged = console.error;
   console.error = (...a) => errors.push(a.join(' '));

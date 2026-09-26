@@ -51,6 +51,7 @@ if (!existsSync(defaultPath)) {
 // The legacy studio.db, if any, is looked for beside userPath, not at the fixed project root: with USER_DB and
 // STUDIO_DATA left at their defaults that's the same directory, but when either points elsewhere (as every test does,
 // to stay off the real project's files), migration stays confined there too instead of reaching for the real studio.db.
+mkdirSync(dirname(userPath), { recursive: true });   // a fresh STUDIO_DATA folder: the lock and user.db go in it
 try { migrateLegacyDb(dirname(userPath), { userPath }); }
 catch (err) { console.error(err.message); process.exit(1); }
 
