@@ -1,9 +1,14 @@
-// thumbs.js: the chapters' thumbnail strips (<data>/.studio/thumbs/<version>/c0N.jpg: three frames side by side),
-// written by a chapter job's check (render.mjs --out, from Claude's draft) and by the thumbs job (from the frame
-// cache), and the stamp beside each (c0N.json: { key, mtime }): the segment key the strip shows the chapter under
-// (studio/frames/keys.js: its code, shared.js, the options, the engine) and the strip file's mtime when stamped. A
-// strip is shown only while both still hold, so a chapter whose code changed since (a revision, a restore to older
-// code) or a strip rewritten since (a check whose draft then failed) shows no strip rather than a wrong one.
+// thumbs.js: the chapters' thumbnail strips (<data>/.studio/thumbs/<version>/c0N.jpg: three frames side by side) and
+// the stamp beside each (c0N.json: { key, mtime }): the segment key the strip shows the chapter under
+// (studio/frames/keys.js: its code, shared.js, the options, the engine) and the strip file's mtime when stamped.
+// Two things write strips:
+// - the thumbs job, from the frame cache, stamping each with its frames' key;
+// - a chapter job's check (render.mjs --out), from Claude's draft, into the job's work folder (<work>/strip.jpg). After
+//   the import, the runner (studio/claude-job.js) moves it into place and stamps it, if the chapter is still exactly
+//   what the check painted; otherwise it's dropped. So a draft that's never imported never replaces a strip.
+// A strip is shown only while its stamp still holds (the key is the chapter's current one, the mtime the file's). A
+// chapter whose code changed since (a revision, a restore to older code), or a strip rewritten since, shows no strip
+// rather than a wrong one.
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { sha256, snapshotOf } from './snapshot.js';

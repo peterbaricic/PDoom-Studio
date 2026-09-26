@@ -109,6 +109,13 @@ test('a check\'s strip is dropped when the chapter changed some other way meanwh
   expect(currentThumbs(db, root, data, 'v')).toEqual({});
 });
 
+test('a draft that leaves a strip.jpg folder in the work folder doesn\'t break the check', async () => {
+  const j = job('chapter', { chapter: 3 });
+  await runner([{ files: { 'ch/c03.js': '// three', 'strip.jpg/inside.txt': 'not a strip' } }], writesStrip(j))(j, ctx());
+  expect(db.getFile('v', 'ch/c03.js').content).toBe('// three');
+  expect(readFileSync(join(data, '.studio/thumbs/v/c03.jpg'), 'utf8')).toBe('draft strip');
+});
+
 test('the work folder gets a read-only reference/original/ copy of the Original\'s storyboard and chapters', async () => {
   db.createVersion({ id: 'original', title: 'Original' });
   db.writeFiles('original', [
@@ -309,7 +316,7 @@ setTimeout(() => chapter('late', ${a + 2}, ${a + 3}, []), 0);`;
     'ch/c02.js': lateTwo,
     'ch/c03.js': `chapter('c3', ${c}, ${d}, [[${c}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`,
   });
-  const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, versionId: 'v', chapter: j.params?.chapter, ...extra });
+  const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, chapter: j.params?.chapter, ...extra });
   const thumb = join(data, '.studio/work', String(good.id), 'strip.jpg');   // the runner moves it into place after the import
   try {
     const [passed, threw, notCovered, notLoaded, overran, besideOverrun, sharedRegisters, lateInOwn, lateBeside] = await Promise.all(

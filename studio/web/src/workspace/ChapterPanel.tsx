@@ -97,7 +97,7 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
   return (
     <div className="flex flex-col gap-4 p-3">
       <section aria-label="Thumbnails" data-thumbs className="flex flex-col gap-1.5">
-        <ThumbStrip chapter={chapter} src={chapterThumbs(manifest)[chapter]} written={!!path} />
+        <ThumbStrip chapter={chapter} src={chapterThumbs(manifest)[chapter]} written={!!path} canRefresh={!thumbsBlocked} />
         <ReasonButton
           unavailable={thumbsBlocked}
           size="sm"
@@ -204,8 +204,9 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
 }
 
 // The strip, or a placeholder of its size where there's none (or it didn't load). A failure counts for its URL only:
-// a new strip gets a fresh chance to load.
-function ThumbStrip({ chapter, src, written }: { chapter: number; src: string | undefined; written: boolean }) {
+// a new strip gets a fresh chance to load. The placeholder points to Refresh thumbnails only while it can be used. (A
+// written chapter's strip may well be on disk but of older code or an older engine: it isn't this code's.)
+function ThumbStrip({ chapter, src, written, canRefresh }: { chapter: number; src: string | undefined; written: boolean; canRefresh: boolean }) {
   const [failed, setFailed] = useState<string | null>(null);
   if (src && failed !== src) {
     return (
@@ -220,7 +221,13 @@ function ThumbStrip({ chapter, src, written }: { chapter: number; src: string | 
   return (
     <div className="bg-muted/40 text-muted-foreground flex aspect-[16/3] w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-3 text-center text-xs">
       <ImageIcon aria-hidden className="size-3.5" />
-      <span>{written ? 'No thumbnails of this code yet — Refresh thumbnails paints them' : 'Not written yet'}</span>
+      <span>
+        {!written
+          ? 'Not written yet'
+          : canRefresh
+            ? 'No thumbnails of this code yet — Refresh thumbnails paints them'
+            : 'No thumbnails of this chapter yet'}
+      </span>
     </div>
   );
 }

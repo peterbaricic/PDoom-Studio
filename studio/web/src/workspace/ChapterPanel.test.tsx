@@ -220,6 +220,12 @@ describe('ChapterPanel', () => {
       expect(await screen.findByRole('tooltip')).toHaveTextContent("Previews can't paint: no Chromium-based browser found");
     });
 
+    test('while Refresh thumbnails can\'t be used, the placeholder doesn\'t point to it', async () => {
+      renderChapter({ manifest: { ...WRITTEN, thumbs: {} }, health: { ...HEALTHY, painter: { ok: false, reason: 'no browser' } } });
+      expect(await screen.findByText('No thumbnails of this chapter yet')).toBeInTheDocument();
+      expect(screen.queryByText(/Refresh thumbnails paints them/)).toBeNull();
+    });
+
     test('an example can refresh its thumbnails too (it changes none of its code)', async () => {
       renderChapter({ manifest: { ...WRITTEN, example: true } });
       expect(await screen.findByRole('button', { name: 'Refresh thumbnails' })).toBeEnabled();

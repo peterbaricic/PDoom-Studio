@@ -39,7 +39,7 @@ export function permissionSettings({ root, jobId, dir }) {
 // and leaves a browser behind.
 export const KILL_AFTER_MS = 8000;
 
-export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kind, versionId, chapter, signal }) {
+export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kind, chapter, signal }) {
   let times = 'load', thumb = null;
   if (kind === 'chapter') {
     const [a, b] = CHAPTER_WINDOWS[chapter - 1];
@@ -179,10 +179,11 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       if (kind === 'chapter') {
         // What this check paints the chapter under: the job-start files plus the draft (revertOthers put the rest
         // back), with the version's options. Its strip is painted afresh, never left over from Claude or a check before.
-        rmSync(workStrip(data, job.id), { force: true });
+        // (recursive: a draft may have left a strip.jpg folder there; only that exact path goes)
+        rmSync(workStrip(data, job.id), { recursive: true, force: true });
         checkedKey = filesKey(readWorkFiles(dir), db.getVersion(vid)?.options, root, params.chapter, { dev });
       }
-      return validate({ root, data, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter, signal: ctx.signal });
+      return validate({ root, data, baseUrl, jobId: job.id, kind, chapter: params.chapter, signal: ctx.signal });
     };
 
     await attempt('Read TASK.md in the current folder and do what it says.');
