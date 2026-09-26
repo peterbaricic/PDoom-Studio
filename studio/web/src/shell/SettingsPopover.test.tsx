@@ -20,6 +20,16 @@ describe('SettingsPopover', () => {
     expect(await screen.findByText('1.5 GB of 5.0 GB used')).toBeInTheDocument();
   });
 
+  test('says what old renders\' frames still take, which Clear cache clears too; nothing when there are none', async () => {
+    mockApi({ 'GET /api/cache': { usedBytes: 1.5e9, capBytes: 5e9, legacyBytes: 1.2e9 }, 'POST /api/cache/clear': { usedBytes: 0, capBytes: 5e9, legacyBytes: 0 } });
+    renderInRouter(<SettingsPopover />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    expect(await screen.findByText("Old renders' frames: 1.2 GB — cleared with Clear cache")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear cache' }));
+    await screen.findByText('0 MB of 5.0 GB used');
+    expect(screen.queryByText(/Old renders' frames/)).toBeNull();
+  });
+
   test('Clear cache calls the API and shows the new size', async () => {
     const fetchMock = mockApi({
       'GET /api/cache': { usedBytes: 1.5e9, capBytes: 5e9 },

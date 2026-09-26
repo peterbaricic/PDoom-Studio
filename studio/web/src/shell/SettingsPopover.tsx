@@ -1,5 +1,5 @@
-// SettingsPopover.tsx: the header's settings: how much of the frame cache is used, its cap (STUDIO_CACHE_GB), and
-// "Clear cache".
+// SettingsPopover.tsx: the header's settings: how much of the frame cache is used, its cap (STUDIO_CACHE_GB), what old
+// renders' frame folders still take (unused since the frame cache; deleted by Clear cache too), and "Clear cache".
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { SettingsIcon } from 'lucide-react';
@@ -61,6 +61,9 @@ export function SettingsPopover() {
               {/* A style prop is set through the CSSOM, which the SPA CSP allows (unlike a style attribute in markup). */}
               <div className="bg-primary h-full" style={{ width: `${usedPct}%` }} />
             </div>
+            {cache.legacyBytes > 0 && (
+              <p className="text-muted-foreground text-xs">{`Old renders' frames: ${formatBytes(cache.legacyBytes)} — cleared with Clear cache`}</p>
+            )}
           </>
         ) : (
           <p className="text-muted-foreground text-sm">{error ? `Couldn't read the cache: ${error.message}` : 'Loading…'}</p>

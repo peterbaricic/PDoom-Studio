@@ -1,10 +1,12 @@
 // JobsDrawer.tsx: every job, newest first, for this version or all of them: kind, chapter, status, when it started,
-// how long it ran and what it cost, with its log, and Cancel or Retry where either makes sense.
+// how long it ran and what it cost, with its log, and Cancel or Retry where either makes sense. Retrying one of
+// Claude's jobs is off (saying why) while the Claude CLI is missing or signed out, like every other Claude action.
 import { useState } from 'react';
 import { queryOptions, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
-import type { Job, JobStatus } from '@/api/types';
+import type { Job, JobKind, JobStatus } from '@/api/types';
+import { ClaudeButton, useClaudeUnavailable } from '@/components/ClaudeControls';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -23,6 +25,7 @@ export function jobsQuery(version?: string) {
 
 const CANCELLABLE: JobStatus[] = ['queued', 'running'];
 const RETRYABLE: JobStatus[] = ['failed', 'cancelled', 'interrupted'];
+const CLAUDE_KINDS: JobKind[] = ['storyboard', 'shared', 'chapter']; // the kinds a Claude run does
 const STATUS_BADGE: Record<JobStatus, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   running: 'default',
   queued: 'secondary',
@@ -59,6 +62,7 @@ export function JobsDrawer({ open, onOpenChange }: { open: boolean; onOpenChange
     useMutationState({ filters: { mutationKey: ['job-action'], status: 'pending' }, select: m => m.state.variables as number }),
   );
   const openJobLog = useOpenJobLog();
+  const claudeUnavailable = useClaudeUnavailable();
 
   const scopeButton = (value: 'version' | 'all', label: string, disabled = false) => (
     <Button
@@ -118,9 +122,15 @@ export function JobsDrawer({ open, onOpenChange }: { open: boolean; onOpenChange
                       </Button>
                     )}
                     {RETRYABLE.includes(j.status) && (
-                      <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate(j.id)}>
+                      <ClaudeButton
+                        unavailable={CLAUDE_KINDS.includes(j.kind) ? claudeUnavailable : null}
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => retry.mutate(j.id)}
+                      >
                         Retry
-                      </Button>
+                      </ClaudeButton>
                     )}
                   </div>
                 </li>
