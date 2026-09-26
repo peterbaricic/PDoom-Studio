@@ -176,7 +176,7 @@ describe('ChapterPanel', () => {
 
     test('without a strip, a placeholder (nothing is asked for that isn\'t there)', async () => {
       const { fetchMock } = renderChapter({ manifest: { ...WRITTEN, thumbs: { 1: { mtime: 50, revision: 5 } } } });
-      expect(await screen.findByText('No thumbnails yet')).toBeInTheDocument();
+      expect(await screen.findByText('No thumbnails of this code yet — Refresh thumbnails paints them')).toBeInTheDocument();
       expect(strip()).toBeNull();
       expect(calls(fetchMock).some(c => c.includes('/thumbs/'))).toBe(false);
     });
@@ -185,7 +185,7 @@ describe('ChapterPanel', () => {
       renderChapter({ manifest: { ...WRITTEN, thumbs: { 2: { mtime: 99, revision: 12 } } } });
       await screen.findByRole('heading', { name: 'Chapter 2 · The Tent' });
       fireEvent.error(strip()!);
-      expect(await screen.findByText('No thumbnails yet')).toBeInTheDocument();
+      expect(await screen.findByText('No thumbnails of this code yet — Refresh thumbnails paints them')).toBeInTheDocument();
     });
 
     test('a chapter not written yet has no strip, whatever is on disk from before', async () => {

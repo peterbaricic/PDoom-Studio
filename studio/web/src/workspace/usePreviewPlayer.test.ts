@@ -835,6 +835,19 @@ describe('the server refusing frames', () => {
     expect(open()).toHaveLength(4);
   });
 
+  test('a seek while the server could still paint leaves no probe owing for when it later can\'t', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    act(() => p.result.current.seek(10));
+    await flush();
+    const asked = requests.length;
+    refuse();
+    await flush();
+    expect(p.result.current.cantPaint).toBe('no Chromium-based browser found');
+    await flush(30_000);
+    expect(requests).toHaveLength(asked); // paused: nothing, not even one frame left over from the seek
+  });
+
   test('a frame the server already had doesn\'t say it can paint again: only a painted one does', async () => {
     const p = mount({ initialTime: 0, coverage: coverage([[0, 1]], keys('a')) });
     await flush();

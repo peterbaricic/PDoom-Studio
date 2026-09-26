@@ -218,9 +218,9 @@ function ThumbStrip({ chapter, src, written }: { chapter: number; src: string | 
     );
   }
   return (
-    <div className="bg-muted/40 text-muted-foreground flex aspect-[16/3] w-full items-center justify-center gap-1.5 rounded-md border border-dashed text-xs">
+    <div className="bg-muted/40 text-muted-foreground flex aspect-[16/3] w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-3 text-center text-xs">
       <ImageIcon aria-hidden className="size-3.5" />
-      <span>{written ? 'No thumbnails yet' : 'Not written yet'}</span>
+      <span>{written ? 'No thumbnails of this code yet — Refresh thumbnails paints them' : 'Not written yet'}</span>
     </div>
   );
 }

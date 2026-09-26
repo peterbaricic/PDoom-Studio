@@ -467,6 +467,8 @@ export class PreviewEngine {
       }
       this.request(i);
     }
+    // it could paint: a probe asked for by Play, "Play now" or a seek isn't owed for later, when it may not
+    if (this.cantPaint == null) this.probeNow = false;
   }
 
   // Re-aims the server's paint-ahead sweep at the playhead, once things settle (a scrub sends one, not dozens).
