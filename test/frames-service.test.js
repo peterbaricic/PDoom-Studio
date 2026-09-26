@@ -155,9 +155,9 @@ slowTest('revising a chapter resets only that chapter\'s coverage; the other cha
     await Promise.all([24, 25, 600, 601].map(i => frameOf('rev', i, 'prefetch')));   // (previews would supersede each other)
     // coverage names each chapter's segment key, so the player can tell when a chapter's frames change
     const keysBefore = keysOf('rev');
-    expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
+    expect(service.coverage('rev')).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore, seq: expect.any(Number) });
     const res = await fetchT(`${srv.url}/api/coverage/rev`);
-    expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore });
+    expect(await res.json()).toEqual({ total: N, ranges: [[24, 25], [600, 601]], broken: [], segments: keysBefore, seq: expect.any(Number) });
     expect(Object.keys(keysBefore)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
 
     db.writeFiles('rev', [{ path: 'ch/c02.js', content: fastChapter(2) + '\n// revised' }], { source: 'manual' });
@@ -848,6 +848,71 @@ test('a paint-ahead sweep stops once no studio page has been on the event stream
   expect(fake.background()).toHaveLength(6);
   await Bun.sleep(200);
   expect(fake.background()).toEqual([]);
+});
+
+test('a paint-ahead sweep started during the last stream\'s grace gets a grace of its own, not the rest of that one', async () => {
+  fastVersion('lease-4');
+  const ev = createEvents(), fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 }), fake = fakePool(fakeCache);
+  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root, streamGraceMs: 150 });
+  const c = new AbortController();
+  ev.stream(new Request('http://localhost/api/events', { signal: c.signal }));
+  c.abort();   // no page on the stream: the grace starts
+  await Bun.sleep(50);
+  svc.paintAhead('lease-4', 0);   // a page asks all the same (its stream on its way back, say)
+  await Bun.sleep(130);   // the first grace is over
+  expect(fake.background()).toHaveLength(6);
+  await Bun.sleep(120);   // this sweep's own is too, and no stream came back
+  expect(fake.background()).toEqual([]);
+});
+
+// Each coverage carries a seq that only grows, the GET's and the frames event's alike, so the page keeps whichever
+// is newer when a GET that started before an event answers after it.
+test('every coverage, asked for or sent as an event, carries a seq that only grows', async () => {
+  fastVersion('seq');
+  const ev = createEvents(), sent = [];
+  ev.subscribe(e => { if (e.type === 'frames') sent.push(e.data); });
+  const fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 }), fake = fakePool(fakeCache);
+  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root, publishEveryMs: 0 });
+  const first = svc.coverage('seq');
+  const r = svc.frame('seq', 10, 'prefetch');
+  fakeCache.put(r.key, 10, Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {});
+  fake.answer(10, { ok: true, deps: {}, depsHash: '-' });
+  await r.pending;
+  await Bun.sleep(20);
+  const later = svc.coverage('seq');
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ versionId: 'seq', ranges: [[10, 10]] });
+  expect([typeof first.seq, typeof sent[0].seq, typeof later.seq]).toEqual(['number', 'number', 'number']);
+  expect(first.seq).toBeLessThan(sent[0].seq);
+  expect(sent[0].seq).toBeLessThan(later.seq);
+});
+
+// Nothing else tells an open page that frames it counted as cached are gone: eviction and Clear cache send the
+// coverage of every version the studio has been asked about whose segments went.
+test('evicting segments or clearing the cache sends the affected versions\' coverage as a frames event', async () => {
+  fastVersion('shrink-a'); fastVersion('shrink-b', { cornerMeter: false });
+  const ev = createEvents(), sent = [];
+  ev.subscribe(e => { if (e.type === 'frames') sent.push(e.data); });
+  const jpeg = Buffer.alloc(1000, 1);
+  const fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 2500 }), fake = fakePool(fakeCache);
+  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root, publishEveryMs: 0 });
+  const [a, b] = [keysOf('shrink-a'), keysOf('shrink-b')];
+  fakeCache.put(a[1], 10, jpeg, {});
+  fakeCache.put(b[1], 10, jpeg, {});
+  expect(svc.coverage('shrink-a').ranges).toEqual([[10, 10]]);   // asked about (a page has it open)
+  expect(svc.coverage('shrink-b').ranges).toEqual([[10, 10]]);
+  await Bun.sleep(20);
+  sent.length = 0;
+  // over the cap: shrink-a's segment, the least recently used, goes
+  fakeCache.put(b[2], 600, jpeg, {});
+  await Bun.sleep(20);
+  expect(sent.map(e => [e.versionId, e.ranges])).toEqual([['shrink-a', []]]);
+  expect(typeof sent[0].seq).toBe('number');
+  // Clear cache: every version asked about whose frames went
+  sent.length = 0;
+  fakeCache.clear();
+  await Bun.sleep(20);
+  expect(sent.map(e => [e.versionId, e.ranges])).toEqual([['shrink-b', []]]);
 });
 
 test('the old renders\' frame folders are counted in /api/cache, and deleted only by clearing the cache', async () => {

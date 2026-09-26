@@ -30,6 +30,7 @@ interface FramesEvent {
   ranges: Array<[number, number]>;
   broken: Coverage['broken'];
   segments?: Coverage['segments'];
+  seq?: number;
 }
 
 const sameSegments = (a: Coverage['segments'] | undefined, b: Coverage['segments']) =>
@@ -37,10 +38,17 @@ const sameSegments = (a: Coverage['segments'] | undefined, b: Coverage['segments
 
 // Pure, unit-tested (events.test.ts): the frame service's every `frames` event is the version's whole current
 // coverage, not what's new, so its ranges and broken chapters replace prev's. That's how coverage shrinks, too (frames
-// evicted to stay under the cap, or the cache cleared). The segment keys go along when the event has them.
-export function applyFramesEvent(prev: Coverage, e: Pick<FramesEvent, 'ranges' | 'broken' | 'segments'>): Coverage {
-  const next = { ...prev, ranges: e.ranges, broken: e.broken };
+// evicted to stay under the cap, or the cache cleared). The segment keys go along when the event has them. One older
+// than what's cached (by seq: a GET answered after the event was sent) changes nothing.
+export function applyFramesEvent(prev: Coverage, e: Pick<FramesEvent, 'ranges' | 'broken' | 'segments' | 'seq'>): Coverage {
+  if (e.seq != null && prev.seq != null && e.seq <= prev.seq) return prev;
+  const next = { ...prev, ranges: e.ranges, broken: e.broken, ...(e.seq != null && { seq: e.seq }) };
   return e.segments && !sameSegments(prev.segments, e.segments) ? { ...next, segments: e.segments } : next;
+}
+
+// A GET /api/coverage answer, unless what's cached is newer (a frames event that came while it was on its way).
+export function newerCoverage(cached: Coverage | undefined, answer: Coverage): Coverage {
+  return cached?.seq != null && answer.seq != null && cached.seq > answer.seq ? cached : answer;
 }
 
 // The event handling itself, factored out of the hook below so it can be unit-tested without mounting a component or

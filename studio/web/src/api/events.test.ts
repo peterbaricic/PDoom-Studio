@@ -1,7 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { _resetRestartedForTests, restartedState } from './client';
-import { applyFramesEvent, handleStudioEvent, watchStudioEvents } from './events';
+import { applyFramesEvent, handleStudioEvent, newerCoverage, watchStudioEvents } from './events';
 import type { Coverage, JobWithLog } from './types';
 
 describe('applyFramesEvent', () => {
@@ -40,6 +40,21 @@ describe('applyFramesEvent', () => {
     const next = applyFramesEvent(prev, { ranges: [[0, 551]], broken: [], segments });
     expect(next.ranges).toEqual([[0, 551]]);
     expect(next.segments).toEqual(segments);
+  });
+
+  test('an event older than what\'s cached (a GET answered after it was sent) is ignored', () => {
+    const prev = { ...coverage([[0, 20]]), seq: 7 };
+    expect(applyFramesEvent(prev, { ranges: [[0, 10]], broken: [], seq: 5 })).toBe(prev);
+    expect(applyFramesEvent(prev, { ranges: [[0, 30]], broken: [], seq: 8 }).ranges).toEqual([[0, 30]]);
+    expect(applyFramesEvent(prev, { ranges: [[0, 30]], broken: [], seq: 8 }).seq).toBe(8);
+  });
+
+  test('newerCoverage keeps the cached coverage over a GET answer older than it, and takes the answer otherwise', () => {
+    const cached = { ...coverage([[0, 30]]), seq: 9 };
+    const answer = { ...coverage([[0, 20]]), seq: 8 };
+    expect(newerCoverage(cached, answer)).toBe(cached);
+    expect(newerCoverage({ ...cached, seq: 7 }, answer)).toBe(answer);
+    expect(newerCoverage(undefined, answer)).toBe(answer);
   });
 
   test('leaves total untouched (the event never carries one)', () => {

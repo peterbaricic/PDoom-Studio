@@ -1,8 +1,9 @@
 // service.js: frames for versions, by way of the cache and the painting pool. A version's frames are always looked up
 // under its current snapshot's segment keys and file hashes (studio/frames/keys.js), so when a chapter changes, only
 // that chapter's frames stop counting as cached (and any frame that read one of its CAST entries); the rest stay.
-// Publishes the SSE event `frames` { versionId, ranges, broken, segments } as frames get painted or segments break, at
-// most every 500 ms.
+// Publishes the SSE event `frames` { versionId, ranges, broken, segments, seq }, the version's whole coverage, as
+// frames get painted or segments break (at most every 500 ms), and when segments it had are evicted or cleared.
+// seq only grows, in events and GET /api/coverage answers alike, so a page keeps the newer of the two.
 import { existsSync } from 'node:fs';
 import { snapshotOf, rememberSnapshot } from '../snapshot.js';
 import { N, chapterOfFrame, framesOfChapter, engineHash, segmentKeys, currentShas } from './keys.js';
@@ -48,6 +49,12 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     return { snap, keys: segmentKeys(snap, e), shas: currentShas(snap), engine: e };
   };
 
+  // The versions pages have asked about (their coverage or frames): the ones to tell when frames go from the cache.
+  const watched = new Set();
+  // Microseconds since the epoch, or one more than the last: it grows across restarts too.
+  let seq = 0;
+  const nextSeq = () => (seq = Math.max(seq + 1, Date.now() * 1000));
+
   const dirty = new Set();
   let timer = null, lastPublished = 0;
   const flush = () => {
@@ -55,7 +62,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     for (const versionId of dirty) {
       try {
         const c = coverage(versionId);
-        if (c) events?.publish('frames', { versionId, ranges: c.ranges, broken: c.broken, segments: c.segments });
+        if (c) events?.publish('frames', { versionId, ranges: c.ranges, broken: c.broken, segments: c.segments, seq: c.seq });
+        else watched.delete(versionId);
       } catch (e) { console.error(`frames event for ${versionId}: ${e.message}`); }
     }
     dirty.clear();
@@ -64,6 +72,15 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     dirty.add(versionId);
     timer ??= setTimeout(flush, Math.max(0, lastPublished + publishEveryMs - Date.now()));
   };
+  // Segments evicted (over the cap) or cleared: every watched version that had one is told its coverage now.
+  cache.onRemoved?.(keys => {
+    const gone = new Set(keys);
+    for (const versionId of watched) {
+      const cur = current(versionId);
+      if (!cur) watched.delete(versionId);
+      else if (Object.values(cur.keys).some(k => k && gone.has(k))) changed(versionId);
+    }
+  });
 
   // Resolves to { file, key, depsHash } once painted, { broken, key } if its segment broke, { unavailable: why, key }
   // if the painting browser didn't start (nothing can be painted for a while), or { retry, key } if the request was
@@ -92,6 +109,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   function frame(versionId, i, prio = 'preview', { signal } = {}) {
     const cur = current(versionId);
     if (!cur) return { missing: 'no such version' };
+    watched.add(versionId);
     const n = chapterOfFrame(i), key = cur.keys[n];
     if (!key) return { missing: `chapter ${n} isn't written yet` };
     // The player asking for frames still wants its version painted ahead.
@@ -124,10 +142,11 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   function coverage(versionId) {
     const cur = current(versionId);
     if (!cur) return null;
+    watched.add(versionId);
     const failed = liveEntry(failedSnapshots, cur.snap.id);
     const brokenChapters = Object.entries(cur.keys).map(([n, k]) => [+n, k && (failed || liveEntry(broken, k))]).filter(([, b]) => b)
       .map(([chapter, b]) => ({ chapter, error: b.error, ...(b.until != null && { until: b.until }) }));
-    return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters, segments: cur.keys };
+    return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters, segments: cur.keys, seq: nextSeq() };
   }
 
   // Queues the missing frames of [from, from + count) at prefetch priority, in place of the version's earlier prefetch.
@@ -178,13 +197,18 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     token.lease.unref?.();
   };
   const renewSweep = versionId => { if (sweep?.versionId === versionId) renew(sweep); };
+  // No stream open: the sweep running now stops after streamGraceMs unless one opens. The timer holds on to that sweep:
+  // one started meanwhile (a page asking while its stream is away) gets a grace of its own, not the rest of this one.
   let unwatched = null;
+  const graceFor = token => {
+    clearTimeout(unwatched);
+    unwatched = setTimeout(() => { if (!events.streamCount?.()) stopSweep(token); }, streamGraceMs);
+    unwatched.unref?.();
+  };
   events?.onStreams?.(n => {
     clearTimeout(unwatched);
     unwatched = null;
-    if (n) return;
-    unwatched = setTimeout(() => stopSweep(sweep), streamGraceMs);
-    unwatched.unref?.();
+    if (!n && sweep) graceFor(sweep);
   });
   function paintAhead(versionId, from) {
     let cur = current(versionId);
@@ -196,6 +220,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     const token = { versionId, from, end: () => end };
     sweep = token;
     renew(token);
+    if (events?.streamCount && !events.streamCount()) graceFor(token);
     const going = () => sweep === token;
     const more = () => {
       if (!going()) return;
@@ -225,6 +250,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // The segments themselves aren't touched: the cache is keyed by content, not by version, so another version may
   // share them, and nothing of the deleted one is pinned (it has no render running: deleting waits for its jobs).
   function dropVersion(versionId) {
+    watched.delete(versionId);
     if (sweep?.versionId === versionId) endSweep(sweep);
     for (const prio of PRIORITIES) pool.supersede(versionId, prio);
   }

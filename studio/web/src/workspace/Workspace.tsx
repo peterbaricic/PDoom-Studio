@@ -7,6 +7,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { api } from '@/api/client';
+import { newerCoverage } from '@/api/events';
 import type { Coverage, Job, Manifest, Song } from '@/api/types';
 import { LoadBoundary } from '@/components/LoadBoundary';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -58,6 +59,7 @@ export function brokenRecheckMs(coverage: Coverage | undefined, now: number): nu
 }
 
 export function Workspace({ versionId }: { versionId: string }) {
+  const queryClient = useQueryClient();
   const song = useQuery({ queryKey: ['song'], queryFn: () => api.get<Song>('/api/song'), staleTime: Infinity });
   const manifest = useQuery({
     queryKey: ['version', versionId],
@@ -65,7 +67,11 @@ export function Workspace({ versionId }: { versionId: string }) {
   });
   const coverage = useQuery({
     queryKey: ['coverage', versionId],
-    queryFn: () => api.get<Coverage>(`/api/coverage/${encodeURIComponent(versionId)}`),
+    // a frames event that came while this was on its way is newer than its answer
+    queryFn: async () => {
+      const answer = await api.get<Coverage>(`/api/coverage/${encodeURIComponent(versionId)}`);
+      return newerCoverage(queryClient.getQueryData(['coverage', versionId]), answer);
+    },
     // so the player learns when it can paint a chapter whose break ran out
     refetchInterval: q => brokenRecheckMs(q.state.data, Date.now()),
   });

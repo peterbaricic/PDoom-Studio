@@ -41,6 +41,10 @@ export function createCache({ dir, capBytes }) {
   // key -> { used: logical clock of the last use, bytes, frames: Map<frame, Map<depsHash, deps | null>> | null until read }
   const segments = new Map(), pins = new Map();
   let clock = 0;
+  // Told the keys of the segments evicted or cleared (the frame service tells open pages their coverage shrank).
+  const removedWatchers = new Set();
+  const onRemoved = fn => { removedWatchers.add(fn); return () => removedWatchers.delete(fn); };
+  const removed = keys => { if (keys.length) for (const fn of removedWatchers) fn(keys); };
 
   const writeAtomic = (file, data) => { writeFileSync(file + '.tmp', data); renameSync(file + '.tmp', file); };
   const save = () => writeAtomic(indexFile, JSON.stringify({ clock, segments: Object.fromEntries([...segments].map(([k, s]) => [k, { used: s.used }])) }));
@@ -154,20 +158,23 @@ export function createCache({ dir, capBytes }) {
   // Whole segments, least recently used first, until usage is under the cap. Never a pinned one, and never the most
   // recently used: that's the one being painted or played right now, and dropping it would only have it repainted.
   function evict() {
-    let used = usedBytes(), changed = false;
-    const keep = mostRecent();
+    let used = usedBytes();
+    const keep = mostRecent(), gone = [];
     const candidates = [...segments].filter(([k]) => !pins.has(k) && k !== keep).sort((a, b) => a[1].used - b[1].used);
     for (const [k, s] of candidates) {
       if (used <= capBytes) break;
-      remove(k); used -= s.bytes; changed = true;
+      remove(k); used -= s.bytes; gone.push(k);
     }
-    if (changed) save();
+    if (gone.length) save();
+    removed(gone);
   }
 
   // Everything that isn't pinned.
   function clear() {
-    for (const k of [...segments.keys()]) if (!pins.has(k)) remove(k);
+    const gone = [...segments.keys()].filter(k => !pins.has(k));
+    for (const k of gone) remove(k);
     save();
+    removed(gone);
   }
 
   // [[first, last], ...] (inclusive, merged) of the frames cached for these keys ({ 1..9: key | null }) that are valid
@@ -187,5 +194,5 @@ export function createCache({ dir, capBytes }) {
     return ranges;
   }
 
-  return { has, find, path, put, forget, touch, pin, unpin, usedBytes, evict, clear, coverage, capBytes, dir };
+  return { has, find, path, put, forget, touch, pin, unpin, usedBytes, evict, clear, coverage, onRemoved, capBytes, dir };
 }

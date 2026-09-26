@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Outlet, createRootRoute, createRoute } from '@tanstack/react-router';
 import type { Coverage, Manifest, Song } from '@/api/types';
+import { handleStudioEvent } from '@/api/events';
 import { mockApi, newQueryClient, renderRouteTree } from '../test-utils';
 import { LoadBoundary } from '@/components/LoadBoundary';
 import { Workspace, brokenRecheckMs, workspaceSearch } from './Workspace';
@@ -142,6 +143,27 @@ describe('Workspace', () => {
     await waitFor(() => expect(asked).toBe(2), { timeout: 3000 });
     await new Promise(r => setTimeout(r, 1500));
     expect(asked).toBe(2); // nothing broken now: no more asking
+  });
+
+  test('a coverage answer that started before a newer frames event doesn\'t overwrite it', async () => {
+    let release!: () => void;
+    let asked = 0;
+    stubApi({
+      'GET /api/coverage/mine': async () => {
+        asked++;
+        if (asked === 1) return { ...COVERAGE, seq: 1 };
+        await new Promise<void>(r => (release = r));
+        return { ...COVERAGE, ranges: [[0, 10]], seq: 2 };
+      },
+    });
+    const { queryClient } = renderWorkspace('/versions/mine');
+    await waitFor(() => expect(queryClient.getQueryData<Coverage>(['coverage', 'mine'])?.seq).toBe(1));
+    void queryClient.invalidateQueries({ queryKey: ['coverage', 'mine'] });
+    await waitFor(() => expect(asked).toBe(2));
+    handleStudioEvent(queryClient, 'frames', { versionId: 'mine', ranges: [[0, 99]], broken: [], segments, seq: 3 });
+    release();
+    await waitFor(() => expect(queryClient.isFetching({ queryKey: ['coverage', 'mine'] })).toBe(0));
+    expect(queryClient.getQueryData<Coverage>(['coverage', 'mine'])).toMatchObject({ ranges: [[0, 99]], seq: 3 });
   });
 
   test('shows the lyrics and the render bar', async () => {

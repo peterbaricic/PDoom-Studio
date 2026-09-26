@@ -113,6 +113,8 @@ export interface Coverage {
   // Each chapter's (1..9) segment key, or null for a chapter not written yet. A frame's ETag names the key it was
   // painted under, so the player can tell a frame of a chapter's older code from a current one.
   segments: Record<number, string | null>;
+  // Grows with every coverage the server computes (answers and `frames` events alike): the larger is the newer.
+  seq?: number;
 }
 
 export interface Health {
