@@ -91,7 +91,7 @@ on your own machine.
 4. **Revise** any chapter later: click its block on the timeline, say what should change, and Claude rewrites it.
    Every change, by Claude or by you, is kept as a revision, and **Restore** brings back an earlier one.
 
-Each Claude action has a model picker (the Claude Code default, Opus, Sonnet or Haiku). Claude's buttons are disabled,
+Each Claude action has a model picker: CLI default (whatever Claude Code uses), Opus, Sonnet or Haiku. Claude's buttons are disabled,
 with the reason, while Claude Code is missing or signed out.
 
 The **jobs** indicator in the header opens a drawer with every job: its status, how long it ran, what Claude Code
