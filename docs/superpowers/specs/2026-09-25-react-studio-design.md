@@ -2,7 +2,8 @@
 
 Status: approved in brainstorming on 2026-09-25, section by section. It builds on
 [2026-09-24-studio-design.md](2026-09-24-studio-design.md) and the examples database
-([plan](../plans/2026-09-24-examples-db.md)).
+([plan](../plans/2026-09-24-examples-db.md)). Updated on 2026-09-26 to match what was built: where the build departed
+from an earlier statement, the text says so ("As built" / "Superseded").
 
 ## Goals
 
@@ -70,7 +71,8 @@ answers these SPA routes with `index.html`.
     "Play now (m:ss ready)" and a full-screen mode.
   - `Timeline`: nine chapter blocks sized by their real windows, a playhead, coverage shading (cached frames), a
     working indicator on chapters with a running Claude job, and a lighter indicator for queued ones. Clicking a block
-    selects that chapter and seeks to its start; dragging scrubs.
+    selects that chapter and seeks to its start; dragging scrubs. As built, a block also shows its chapter's thumbnail
+    strip faintly behind its label, when it has a current one (section 3, "Thumbnails").
   - `LyricsTrack`: each lyric line under its time span.
   - `RenderBar`: "Final render (1080p MP4)" (disabled with a reason when fewer than 9 chapters exist or a render is
     running), the latest render's date and duration, and "Watch".
@@ -84,6 +86,9 @@ answers these SPA routes with `index.html`.
       - the engine options (brush wipes, corner meter);
       - the storyboard errors, if any.
     - `ChapterPanel` (a chapter selected):
+      - as built: the chapter's thumbnail strip (a placeholder when it has no current one) and "Refresh thumbnails",
+        which queues the version's `thumbs` job. It's off, with the reason as its tooltip, while previews can't paint,
+        while a render of the version is queued or running, and while a thumbs job is;
       - that chapter's section of the storyboard (its heading through the next heading);
       - a feedback box, model and "Revise chapter";
       - the code history with Restore (not on the current revision);
@@ -96,7 +101,8 @@ answers these SPA routes with `index.html`.
 - **Overlays**
   - `JobsDrawer`: every job, newest first, with filters (this version or all) and status. Each row shows kind,
     chapter, status, started time, duration and cost. Log opens `LogViewer`, which appends live and auto-scrolls when
-    you're at the bottom. Cancel for queued or running jobs; Retry for failed, cancelled or interrupted ones.
+    you're at the bottom. Cancel for queued or running jobs; Retry for failed, cancelled or interrupted ones (for
+    Claude's jobs, off with the reason while the Claude CLI is missing or signed out).
   - `NewVersionDialog`: title (the id is derived as a slug, editable), concept and model, then "Draft storyboard".
   - `RemixDialog`: new title (and id), then navigates to the new version.
   - `PromoteDialog`: explains "moves this version into studio/default.db as an example; it becomes read-only here;
@@ -106,35 +112,60 @@ answers these SPA routes with `index.html`.
     - A checkbox "also delete its finished videos" (unchecked by default).
     - Kept videos stay in the library under the deleted version's last title. `renders` gains `title` and `logline`
       columns, filled when a render is created; `listRenders` uses a LEFT JOIN and falls back to them.
+    - As built, a kept video is **detached** (`renders.detached`): it belongs to no version from then on, not even a
+      new one that takes the same id. It's watched by its render id alone, under its own title. The header shows no
+      version link or menu for it, and the sidebar doesn't mark the same-id version. Both stay neutral until the
+      library has said whether the render watched is detached.
 - **Watch** (`/versions/:id/watch`): `WatchView` shows the MP4 on the left and the synced walkthrough on the right.
   The current chapter is highlighted and expanded, and clicking one seeks there. Below: "How it was made" (concept,
   storyboard in a collapsible, revision count, feedback notes, Claude cost, render date) and older renders.
 - **Library** (`/library`): `LibraryGallery` of poster cards (title, logline, date), with delete per render.
-- **Settings** (a small popover in the header): cache size used and cap, and "Clear cache".
+- **Settings** (a small popover in the header): cache size used and cap, and "Clear cache". As built, it also says
+  what old renders' frame folders (`.studio/frames/`, unused since the frame cache) still take; Clear cache deletes
+  them too.
 
 ### Data flow
 
 - `api/client.ts`:
   - a typed fetch wrapper that adds `X-Studio-Token` from `<meta name="studio-token">`;
-  - on 403 "missing or wrong token" it shows "The studio server restarted, reload this page".
+  - on 403 "missing or wrong token" it shows "The studio server restarted, reload this page". As built, the player's
+    own frame fetches (which carry the token too) raise it the same way.
 - `api/types.ts`: hand-written types mirroring the server's JSON (Version, Manifest, Job, Revision, Render, Coverage,
   Health).
 - **TanStack Query keys:** `['versions']`, `['version', id]`, `['jobs', { version? }]`, `['job', jobId]` (with log),
   `['renders']`, `['coverage', id]`, `['health']`, `['cache']`.
 - `useStudioEvents` (one `EventSource('/api/events')` per app):
-  - `version` → invalidate `['versions']` and `['version', id]`;
+  - `version` → invalidate `['versions']` and `['version', id]` (as built, also `['coverage', id]`: new code means
+    new segment keys);
   - `job` → invalidate `['jobs']` and `['job', id]`;
-  - `log` → append to `['job', id]`'s log via `setQueryData`;
+  - `log` → append to `['job', id]`'s log via `setQueryData` at the event's offset, or refetch the job when the
+    cached log doesn't end there;
   - `library` → invalidate `['renders']`;
-  - `frames` → merge ranges into `['coverage', id]` via `setQueryData`.
+  - `frames` → **replace** `['coverage', id]`'s ranges and broken chapters via `setQueryData`. *Superseded:* the
+    first version merged ranges. Every `frames` event carries the version's whole current coverage, which can also
+    shrink (eviction, Clear cache), and a `seq` (section 3). An event no newer than what's cached is ignored. A
+    coverage GET answer loses to a newer event that arrived while the GET was in flight.
+  - As built, the server opens every stream with `hello { boot }`, naming its run. When the stream comes back after
+    an error, every query is refetched, since events published meanwhile never arrive. A `hello` with another boot id
+    means the server restarted, and the reload banner shows at once.
 - `usePreviewPlayer(versionId)`:
   - schedules frame requests ahead of the playhead (window 48–120 frames, adaptive) and decodes JPEGs with
     `createImageBitmap` (off the main thread);
   - keeps a small bitmap cache and syncs picture to `audio.currentTime`;
   - estimates "safe to play" from coverage plus the measured paint rate. Rules as today: never stutter; wait or
-    "Play now" then pause at a gap.
+    "Play now" then pause at a gap;
+  - as built, frames it fetched count as cached until the coverage shrinks past them;
+  - as built, it asks the server to paint the rest of the song in the background (`POST
+    /api/frames/<id>/paint-ahead { from }`), only while playback wants it: Play or "Play now" with frames still
+    missing ahead. It re-aims on a seek or new keys, and renews every 20 s under the server's lease (section 3).
+    When coverage stops growing it re-aims after 5 s, backing off to 60 s. Play, "Play now" and a seek restart that
+    wait at 5 s.
+  - as built, a 503 (no painting browser) shows the server's reason in place of "Painting…". Until a painted frame
+    arrives again, it asks only for cached frames, plus one probe frame: every 5 s while playback wants frames, once
+    on Play, "Play now" or a seek, and never while merely paused.
 - **Health:** when `/api/health` reports the Claude CLI missing or signed out, a banner explains it and Claude actions
-  are disabled with a tooltip.
+  are disabled with a tooltip. As built, `/api/health` also has `painter: { ok, reason } | null` (null: no frame
+  service). When the painting browser didn't start, the banner says "Previews can't paint: <reason>".
 
 ## 3. Frame cache and frame service
 
@@ -159,6 +190,14 @@ A frame at time `t` is fully determined by the engine, the options, `shared.js` 
 - **Brush wipes:** frames within 0.3 s of a wipe boundary are drawn by the chapter covering `t` plus the engine's
   wipe, so no extra dependency is needed.
 - Content addressing means identical content across versions (a fresh Remix, a restored revision) shares frames.
+- **Chapter windows (as built):** a frame is keyed by the chapter whose window it falls in, so the engine draws each
+  window only with that chapter file's `chapter()` registrations or `shared.js`'s (`chapterAt` in `src/timeline.js`,
+  whose windows a test ties to the studio's). A chapter reaching into a neighbour's window is never drawn there.
+  - The studio's check (`render.mjs --check --target=<n|shared>`) holds only the job's own file to its window.
+    `shared.js` may register anywhere.
+  - A `chapter()` call made after the scripts loaded has no owner file, is never drawn, and is reported by every
+    check.
+  - The pool keeps a tripwire: a frame drawn by any other file breaks for a while instead of being cached.
 
 ### Snapshots and content-addressed code
 
@@ -185,7 +224,12 @@ A frame at time `t` is fully determined by the engine, the options, `shared.js` 
   1. `preview` requests for frames at or near the playhead of a version currently open in the UI;
   2. `prefetch` ahead of the playhead;
   3. `render` fill for a running final-render job;
-  4. `thumbs`.
+  4. `thumbs`;
+  5. as built, `background`: a version's paint-ahead sweep (section 2, `usePreviewPlayer`), a few frames at a time,
+     only when nothing else waits. There is one sweep at a time, and a new one replaces it.
+     - It runs on a lease: each paint-ahead call, and each preview or prefetch request for the version, renews it.
+     - It stops about 45 s after the last renewal, or once no page has been on the event stream for 10 s. A sweep
+       started while none was open gets its own 10 s.
 
   The newest preview request for a version supersedes older preview requests for the same version. Painting is
   per-frame, so a higher-priority request waits at most one frame.
@@ -194,18 +238,54 @@ A frame at time `t` is fully determined by the engine, the options, `shared.js` 
   error. It's shown on the timeline block, and further requests for that segment return 409 with the error until its
   key changes.
 - **Fonts:** the painting page checks `document.fonts.check` for both fonts after load; failure is a page error.
+- **As built:**
+  - Break TTLs: a break from a timeout (60 s) or a snapshot that didn't load (30 s) runs out (`until`). A chapter's own
+    error lasts until its key changes.
+  - No browser: a painting browser that won't start fails requests at once with the reason (the frame API's 503),
+    and is tried again every 30 s.
+  - Engine changes: under `--dev`, a page is reused only for requests of its engine hash. A request made under an
+    engine that is no longer current is answered "ask again" rather than painted.
 
-### Frame API (UI hosts only, GET)
+### Frame API (UI hosts only)
 
 - `GET /api/frames/<versionId>/<frameIndex>.jpg[?prio=preview|prefetch]`:
-  - returns the cached frame (`Cache-Control: private, max-age=31536000, immutable`, `ETag` = segment key);
+  - returns the cached frame;
   - or queues it at the given priority and holds the request until it's painted (up to 30 s, then 202 with
     `Retry-After`).
-- `GET /api/coverage/<versionId>` → `{ total: 3759, ranges: [[a, b], …], broken: [{ chapter, error }] }` for the
-  version's current snapshot.
-- SSE `frames` event: `{ versionId, ranges: [[a, b], …] }` (coalesced, at most every 500 ms).
-- `GET /api/cache` → `{ usedBytes, capBytes }`; `POST /api/cache/clear` (token-guarded) evicts everything not pinned
-  by a running render.
+  - As built:
+    - The ETag is `"<segment key>.<deps hash>"`, with `Cache-Control: private, no-cache`, and a matching
+      `If-None-Match` gets 304. *Superseded:* immutable caching, because a frame's URL names a version, not content.
+    - 404 means no such version or chapter.
+    - 409 means a broken segment, with the error.
+    - 503 `{ error, reason }` means no painting browser.
+- `GET /api/coverage/<versionId>` → `{ total: 3759, ranges: [[a, b], …], broken: [{ chapter, error, until? }],
+  segments: { 1..9: key | null }, seq }` for the version's current snapshot.
+  - `until`: when a break that runs out does.
+  - `segments`: the player drops frames of a chapter's older code by these.
+  - `seq`: grows with every coverage computed. It's microseconds since the epoch, or one more than the last.
+- SSE `frames` event: `{ versionId, ranges, broken, segments, seq }`, the same whole coverage (as built; *superseded:*
+  `{ versionId, ranges }` of what's new). It's sent at most every 500 ms as frames are painted or segments break, and,
+  as built, also for every version pages have asked about that lost a segment to eviction or Clear cache.
+- `POST /api/frames/<versionId>/paint-ahead { from }` (as built, token-guarded): starts or renews the version's
+  background sweep from `from`.
+- `GET /api/cache` → `{ usedBytes, capBytes, legacyBytes }`; `POST /api/cache/clear` (token-guarded) evicts everything
+  not pinned by a running render, and deletes the old renders' frame folders (`legacyBytes`).
+
+### Thumbnails (as built)
+
+- **Strips:** `<data>/.studio/thumbs/<id>/c0N.jpg`, three frames side by side (960×180). They're written by a chapter
+  job's check (from Claude's draft) and by the `thumbs` job (from the frame cache, at `thumbs` priority).
+  `/thumbs/…` serves them under `img-src 'self'`.
+- **Stamps:** each strip has a stamp, `c0N.json { key, mtime }`: the segment key it shows the chapter under, and the
+  file's mtime when stamped.
+  - The thumbs job stamps each strip it writes.
+  - A chapter job stamps its check's strip once the draft is imported.
+- **Manifest:** `GET /api/versions/<id>` (UI hosts) has `thumbs: { n: { mtime, revision } }`, listing only strips
+  whose stamp matches the chapter's current key and file.
+  - So a restored chapter never shows the strip of newer code.
+  - Nor does a strip rewritten by a check whose draft then failed.
+  - The UI asks only for listed strips (no 404s), under URLs naming the revision and mtime.
+- **One job at a time:** a second `thumbs` job for a version is refused (409) while one is queued or running.
 
 ### Final render from the cache
 
@@ -224,7 +304,8 @@ studio.
 - **Cap:** `STUDIO_CACHE_GB` (default 5).
 - **Bookkeeping:** each segment directory's last use is tracked in a small `cache.json` index (atime isn't reliable).
 - **Eviction:** when the cap is exceeded, whole least-recently-used segments are evicted. Segments pinned by a running
-  final render are never evicted.
+  final render are never evicted (as built, nor the most recently used one). Eviction and Clear cache send the
+  affected versions' coverage as `frames` events.
 
 ## 4. Build, security, testing, cleanup
 
@@ -264,6 +345,18 @@ studio.
   - The user approved downloading the two font files on 2026-09-25.
 - **The frame and cache APIs** are UI-host only. The snapshot and blob APIs are renderer-host only, GET only.
 - **Unchanged:** the token, the Origin/Host guard, read-only examples, and the Claude sandbox.
+- **As built, the guard also:**
+  - refuses any `/api/…` request whose `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, whatever
+    its method, so another site can't make the studio paint;
+  - requires the token on `GET /api/frames/…` and `GET /api/coverage/…` on UI hosts, not only on mutations.
+- **Painter secret (as built):** a painting page, `studio.html?render…`, is served only to a URL carrying
+  `&painter=<secret>`.
+  - The secret is new on every start and compared in constant time.
+  - The pool and `render.mjs` use it; `render.mjs --base` reads it from `STUDIO_PAINTER_SECRET`, which the studio
+    gives its own jobs.
+  - Without it, `?render` is 404 on every host.
+- **Scrubber (as built):** `studio.html` without `?render` is the engine's scrubber, which runs version code in the
+  browser that opens it. It's served only with `--dev` (redirected to `w0.localhost`), and is 404 otherwise.
 
 ### Testing
 

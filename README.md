@@ -69,12 +69,15 @@ renders.
 **The timeline workspace**: the song runs left to right as nine chapter blocks, each as wide as its chapter. A block
 shows when Claude is working on it, when it isn't written yet, and when its code is broken (with the error). Click a
 block to open that chapter in the inspector, where you can read its part of the storyboard, ask Claude to revise it,
-or restore an earlier revision. Drag along the track under the blocks to move the playhead.
+or restore an earlier revision. Drag along the track under the blocks to move the playhead. A chapter's thumbnail
+strip (three of its frames) shows in the inspector and faintly on its block, once it matches the chapter's current
+code; **Refresh thumbnails** paints every chapter's strip again.
 
 **Previews**: the player above the timeline plays the version with the song. Chapter code never runs in your
 browser: the server paints every frame in its own sealed headless Chrome and sends it as a JPEG. **Play** waits until
 the rest can play without stopping; **Play now** starts with what is ready and pauses at the first gap. The shading on
-the timeline's track shows which frames are ready.
+the timeline's track shows which frames are ready. If the studio can't start its painting browser (none installed, or
+`CHROME_PATH` pointing nowhere), a banner and the player say so, and it tries again every 30 seconds.
 
 **The frame cache**: painted frames are kept in `.studio/cache/frames/`, keyed by their content: the engine, the
 version's options, `shared.js` and the chapter's code. A frame is painted once and reused by previews, thumbnails and
