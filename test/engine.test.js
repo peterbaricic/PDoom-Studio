@@ -6,7 +6,7 @@ import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import puppeteer from 'puppeteer-core';
 import { launchBrowser, findBrowser, browserArgs, gpuArgs, HOST_RESOLVER_RULES } from '../studio/browser.js';
-import { PAINTER_SECRET } from '../studio/frames/page.js';
+import { PAINTER_SECRET, openSealedPage } from '../studio/frames/page.js';
 import { tempDir, tempDefaultDb, captureHosts, slowTest, sharedBrowser, closeBrowser } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
@@ -292,4 +292,23 @@ setInterval(() => {}, 1000);`);
   for (const t0 = Date.now(); Date.now() - t0 < 10000 && !(gone = !alive(chrome)); ) await Bun.sleep(100);
   if (!gone) process.kill(chrome, 'SIGKILL');   // (don't leave it behind when this fails)
   expect(gone).toBe(true);
+}, T);
+
+// A painting page is ready when window.ready says so (studio.html sets it once the fonts and the version have loaded),
+// not when the network has gone quiet: the song streams, and anything else still loading shouldn't hold a page up.
+slowTest('openSealedPage waits for window.ready, not for the network to go idle', async () => {
+  const hang = [];
+  const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: req => new URL(req.url).pathname === '/hang'
+    ? new Promise(r => hang.push(r))   // never answered while the page opens
+    : new Response('<!doctype html><img src="/hang"><script>window.ready = true</script>', { headers: { 'content-type': 'text/html' } }) });
+  try {
+    const t0 = Date.now();
+    const page = await openSealedPage(await plainBrowser.get(), `http://127.0.0.1:${server.port}/`, { readyTimeout: 4000 });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(await page.evaluate(() => window.ready)).toBe(true);
+    await page.close();
+  } finally {
+    for (const r of hang) r(new Response(''));
+    server.stop(true);
+  }
 }, T);

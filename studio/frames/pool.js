@@ -222,7 +222,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     let lastBlob = null, page;
     try {
       page = await openSealedPage(b, pageUrl(pageSnapshot), {
-        waitUntil: 'domcontentloaded', readyTimeout: loadTimeoutMs, recordScriptErrors: true,
+        readyTimeout: loadTimeoutMs, recordScriptErrors: true,
         onRequest: r => { const m = /\/api\/blob\/([0-9a-f]{64})$/.exec(r.url()); if (m) lastBlob = m[1]; },
       });
       const state = await within(page.evaluate(() => ({

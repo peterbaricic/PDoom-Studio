@@ -7,9 +7,10 @@
 // the page's own origin are allowed; the fonts studio.html uses are bundled, so no other origin ever needs to load.
 //
 // onConsole(message) and onPageError(error) get the page's console messages (minus one harmless warning, below) and
-// uncaught errors; onRequest(request) sees every request the page makes (allowed or not). waitUntil is goto's
-// (render.mjs waits for the network to go idle; the pool, which paints straight away, doesn't wait for the song to
-// finish buffering). recordScriptErrors keeps { file, message } for each uncaught error in window.scriptErrors, so the
+// uncaught errors; onRequest(request) sees every request the page makes (allowed or not). waitUntil is goto's:
+// domcontentloaded by default, since what a painting page needs is window.ready (waited for below), which studio.html
+// sets only once the fonts and the version's scripts have loaded; waiting for the network to go idle as well only
+// waited for the song to finish buffering, which painting never uses. recordScriptErrors keeps { file, message } for each uncaught error in window.scriptErrors, so the
 // pool can tell which chapter's script threw while the page loaded.
 // Resolves once window.ready is true; the caller checks window.loadError. Every step is bounded by readyTimeout, and
 // on any failure the page is closed before the error is passed on.
@@ -22,7 +23,7 @@ import { randomBytes } from 'node:crypto';
 // studio's in STUDIO_PAINTER_SECRET (studio/claude-job.js passes it to the check and to Claude's own render runs).
 export const PAINTER_SECRET = randomBytes(16).toString('hex');
 
-export async function openSealedPage(browser, url, { onConsole, onPageError, onRequest, waitUntil = 'networkidle0', readyTimeout = 60000, recordScriptErrors = false } = {}) {
+export async function openSealedPage(browser, url, { onConsole, onPageError, onRequest, waitUntil = 'domcontentloaded', readyTimeout = 60000, recordScriptErrors = false } = {}) {
   const allowedOrigin = new URL(url).origin;
   const bounded = (promise, what) => {
     let timer;
@@ -76,8 +77,9 @@ export async function openSealedPage(browser, url, { onConsole, onPageError, onR
     page.on('pageerror', e => onPageError?.(e));
     // The chapter scripts that follow load asynchronously (waited for below via window.ready) and could try to
     // navigate away as soon as they run, so the gesture that arms beforeunload has to land as soon as there's a
-    // document for it to land on — at domcontentloaded, well before that — not after goto's own networkidle0 wait,
-    // which only settles once everything, including a malicious attempt, has already happened. A key press, not a
+    // document for it to land on — at domcontentloaded, before any of them runs — not after goto returns (and
+    // certainly not after a wait for the network to go idle, which settles only once everything, including a
+    // malicious attempt, has already happened). A key press, not a
     // mouse click: p5 tracks mouseX/mouseY/mouseIsPressed and would fire mousePressed() off a synthetic click, which
     // no sketch reads today but would still be this code nudging a chapter's own state. Tab counts as "real" input to
     // Chrome's activation tracking the same way a click does (a bare modifier like Shift does not — verified: with
