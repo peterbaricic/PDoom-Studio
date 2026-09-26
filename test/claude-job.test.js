@@ -8,7 +8,7 @@ import { createClaudeRunner, chapterPath, permissionSettings, checkWithRenderer 
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
-import { currentThumbs } from '../studio/thumbs.js';
+import { chapterKey, currentThumbs, stampThumb } from '../studio/thumbs.js';
 import { goodStoryboard, tempDefaultDb, slowTest } from './helpers.js';
 
 // root is the real repo (the fake CLI script, the brief's paths); data is a throwaway data root for the runner's
@@ -70,16 +70,42 @@ test('a chapter job imports only its own file', async () => {
   expect(db.getVersion('v').status).toBe('chapters');
 });
 
-// The check (checkWithRenderer, faked here) writes the chapter's strip from the draft; once that draft is imported,
-// the strip is stamped as the picture of the chapter's new code. A strip the job didn't write isn't.
-test('a chapter job stamps the strip its check wrote, once its code is imported', async () => {
-  const strip = join(data, '.studio/thumbs/v/c03.jpg');
-  const writesStrip = async () => { mkdirSync(join(data, '.studio/thumbs/v'), { recursive: true }); writeFileSync(strip, 'jpeg'); return []; };
-  await runner([{ files: { 'ch/c03.js': '// three' } }], writesStrip)(job('chapter', { chapter: 3 }), ctx());
+// The check (checkWithRenderer, faked here) writes the chapter's strip from the draft into the work folder; once the
+// draft is imported, and only if the chapter is still what the check painted, the strip takes the chapter's place
+// and is stamped as the picture of its new code.
+const workStrip = j => join(data, '.studio/work', String(j.id), 'strip.jpg');
+const writesStrip = (j, also = () => {}) => async () => { writeFileSync(workStrip(j), 'draft strip'); also(); return []; };
+test('a chapter job moves the strip its check painted into place, stamped, once its code is imported', async () => {
+  const j = job('chapter', { chapter: 3 });
+  await runner([{ files: { 'ch/c03.js': '// three' } }], writesStrip(j))(j, ctx());
   const rev = db.listFiles('v').find(f => f.path === 'ch/c03.js').revision_id;
   expect(currentThumbs(db, root, data, 'v')).toEqual({ 3: { mtime: expect.any(Number), revision: rev } });
-  // a revision whose check wrote no strip: the old strip is of the old code
+  expect(readFileSync(join(data, '.studio/thumbs/v/c03.jpg'), 'utf8')).toBe('draft strip');
+  // a revision whose check painted no strip: the old strip is of the old code
   await runner([{ files: { 'ch/c03.js': '// three, again' } }])(job('chapter', { chapter: 3 }), ctx());
+  expect(currentThumbs(db, root, data, 'v')).toEqual({});
+});
+
+// Thumbs jobs run in the render lane, beside Claude's: one can write (and stamp) a strip of the chapter's old code
+// while the chapter job runs. That strip must not be relabelled as the new code's.
+test('a strip a thumbs job painted of the old code while the chapter job ran is never stamped as the new code\'s', async () => {
+  db.writeFiles('v', [{ path: 'ch/c03.js', content: '// old three' }], { source: 'manual' });
+  const oldKey = chapterKey(db, root, 'v', 3);
+  const thumbsJobMeanwhile = async () => {
+    mkdirSync(join(data, '.studio/thumbs/v'), { recursive: true });
+    writeFileSync(join(data, '.studio/thumbs/v/c03.jpg'), 'old code strip');
+    stampThumb(data, 'v', 3, oldKey);
+    return [];
+  };
+  await runner([{ files: { 'ch/c03.js': '// new three' } }], thumbsJobMeanwhile)(job('chapter', { chapter: 3 }), ctx());
+  expect(currentThumbs(db, root, data, 'v')).toEqual({});   // the old code's strip, still labelled as the old code's
+});
+
+test('a check\'s strip is dropped when the chapter changed some other way meanwhile (shared.js, here)', async () => {
+  const j = job('chapter', { chapter: 3 });
+  const sharedChanges = writesStrip(j, () => db.writeFiles('v', [{ path: 'shared.js', content: '// changed meanwhile' }], { source: 'manual' }));
+  await runner([{ files: { 'ch/c03.js': '// three' } }], sharedChanges)(j, ctx());
+  expect(existsSync(join(data, '.studio/thumbs/v/c03.jpg'))).toBe(false);
   expect(currentThumbs(db, root, data, 'v')).toEqual({});
 });
 
@@ -284,7 +310,7 @@ setTimeout(() => chapter('late', ${a + 2}, ${a + 3}, []), 0);`;
     'ch/c03.js': `chapter('c3', ${c}, ${d}, [[${c}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`,
   });
   const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, versionId: 'v', chapter: j.params?.chapter, ...extra });
-  const thumb = join(data, '.studio/thumbs/v/c02.jpg');
+  const thumb = join(data, '.studio/work', String(good.id), 'strip.jpg');   // the runner moves it into place after the import
   try {
     const [passed, threw, notCovered, notLoaded, overran, besideOverrun, sharedRegisters, lateInOwn, lateBeside] = await Promise.all(
       [check(good), check(bad), check(uncovered), check(shared), check(overruns), check(neighbour), check(sharedDraws), check(lateOwn), check(besideLate)]);
@@ -325,5 +351,6 @@ slowTest('with the real check, a chapter that fails it goes back to Claude once,
     expect(logs.join('')).toContain('the first draft paints nothing');
     expect(db.getFile('v', 'ch/c02.js').content).toBe(fixed);
     expect(readFileSync(join(data, '.studio/thumbs/v/c02.jpg')).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
+    expect(Object.keys(currentThumbs(db, root, data, 'v'))).toEqual(['2']);   // stamped as the fix's picture
   } finally { srv.stop(); }
 }, 120000);

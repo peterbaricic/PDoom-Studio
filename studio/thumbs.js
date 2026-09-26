@@ -6,7 +6,8 @@
 // code) or a strip rewritten since (a check whose draft then failed) shows no strip rather than a wrong one.
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { snapshotOf } from './snapshot.js';
+import { sha256, snapshotOf } from './snapshot.js';
+import { DEFAULT_OPTIONS } from './versions.js';
 import { chapterPaths, engineHash, segmentKeys } from './frames/keys.js';
 
 export const thumbPath = (data, versionId, n) => join(data, '.studio/thumbs', versionId, `c0${n}.jpg`);
@@ -18,6 +19,13 @@ export const thumbMtime = (data, versionId, n) => mtimeOf(thumbPath(data, versio
 export function chapterKey(db, root, versionId, n, { dev = false } = {}) {
   const snap = snapshotOf(db, versionId);
   return snap ? segmentKeys(snap, engineHash(root, { recheck: dev }))[n] : null;
+}
+
+// Chapter n's segment key for these files ({ path: content }, a Map) and options: what a check of a work folder
+// paints it under.
+export function filesKey(files, options, root, n, { dev = false } = {}) {
+  const snap = { options: { ...DEFAULT_OPTIONS, ...options }, files: Object.fromEntries([...files].map(([p, c]) => [p, sha256(c)])) };
+  return segmentKeys(snap, engineHash(root, { recheck: dev }))[n];
 }
 
 // Records that the strip on disk shows chapter n as painted under `key`.

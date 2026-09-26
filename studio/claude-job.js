@@ -3,13 +3,17 @@
 // there. The result is checked, sent back once for a fix if it fails, and imported as a new revision of the job's one
 // target file. Only the target is imported, so before every check the other version files are put back as they
 // were: the check then sees exactly what the version will be.
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readWorkFiles } from './versions.js';
 import { parseStoryboard, CHAPTER_WINDOWS } from './storyboard.js';
 import { taskBrief, renderCommand } from './prompts.js';
 import { PAINTER_SECRET } from './frames/page.js';
-import { chapterKey, stampThumb, thumbMtime } from './thumbs.js';
+import { chapterKey, filesKey, stampThumb, thumbPath } from './thumbs.js';
+
+// Where a chapter job's check paints the chapter's strip: its work folder, not the version's thumbs, so a draft that's
+// never imported can't replace a good strip. The runner moves it into place after the import (see createClaudeRunner).
+export const workStrip = (data, jobId) => join(data, '.studio/work', String(jobId), 'strip.jpg');
 
 export function chapterPath(db, versionId, n) {
   const re = new RegExp(`^ch/c0${n}(_[a-z0-9_]+)?\\.js$`);
@@ -40,7 +44,7 @@ export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kin
   if (kind === 'chapter') {
     const [a, b] = CHAPTER_WINDOWS[chapter - 1];
     times = [a + .3, (a + b) / 2, b - .3].map(t => t.toFixed(2)).join(',');
-    thumb = join(data, '.studio/thumbs', versionId, `c0${chapter}.jpg`);
+    thumb = workStrip(data, jobId);
   }
   // --target: only the job's own file is held to the chapter-window rule (another file's mistakes aren't Claude's to fix)
   const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, `--target=${kind === 'chapter' ? chapter : 'shared'}`,
@@ -109,8 +113,9 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
   return { cost };
 }
 
+// dev: the server's --dev (the engine hash is checked afresh on every use, as the frame service does).
 export function createClaudeRunner({ db, root, data = root, baseUrl, events = null, claudeCmd = (process.env.CLAUDE_BIN || 'claude').split(' '),
-  env = {}, validate = checkWithRenderer, timeoutMs = 30 * 60 * 1000 }) {
+  env = {}, validate = checkWithRenderer, timeoutMs = 30 * 60 * 1000, dev = false }) {
   return async (job, ctx) => {
     const { kind, version_id: vid, params } = job, version = db.getVersion(vid);
     // The API refuses these jobs for examples, but one queued (or retried) before its version was promoted still
@@ -143,11 +148,7 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
     mkdirSync(dirname(settings), { recursive: true });
     writeFileSync(settings, JSON.stringify(permissionSettings({ root, jobId: job.id, dir }), null, 2));
 
-    // The chapter's strip as it was before this job: one the job's check writes (from the draft) is stamped once the
-    // draft is imported (studio/thumbs.js); one it didn't write stays of the old code.
-    const stripBefore = kind === 'chapter' ? thumbMtime(data, vid, params.chapter) : null;
-
-    let spent = 0;
+    let spent = 0, checkedKey = null;
     const attempt = async prompt => {
       // A previous attempt could have planted its own .claude/settings.json; remove it before every attempt so a
       // fix attempt can't load permissions Claude wrote for itself (--setting-sources project reads the cwd).
@@ -175,6 +176,12 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
       const file = join(dir, target);
       if (!existsSync(file)) return [`${target} was not written`];
       if (kind === 'storyboard') return parseStoryboard(readFileSync(file, 'utf8')).errors;
+      if (kind === 'chapter') {
+        // What this check paints the chapter under: the job-start files plus the draft (revertOthers put the rest
+        // back), with the version's options. Its strip is painted afresh, never left over from Claude or a check before.
+        rmSync(workStrip(data, job.id), { force: true });
+        checkedKey = filesKey(readWorkFiles(dir), db.getVersion(vid)?.options, root, params.chapter, { dev });
+      }
       return validate({ root, data, baseUrl, jobId: job.id, kind, versionId: vid, chapter: params.chapter, signal: ctx.signal });
     };
 
@@ -199,8 +206,15 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
     } else if (kind === 'chapter') {
       const n = db.listFiles(vid).filter(f => f.path.startsWith('ch/')).length;
       db.updateVersion(vid, { status: n >= 9 ? 'ready' : 'chapters' });
-      const strip = thumbMtime(data, vid, params.chapter);
-      if (strip != null && strip !== stripBefore) stampThumb(data, vid, params.chapter, chapterKey(db, root, vid, params.chapter));
+      // The check's strip becomes the chapter's only if the chapter is still exactly what the check painted (a
+      // shared.js or options change meanwhile would make it another picture); the strip on disk until then (a thumbs
+      // job's, say, which runs beside Claude's jobs) keeps its own stamp.
+      const strip = workStrip(data, job.id);
+      if (existsSync(strip) && checkedKey && checkedKey === chapterKey(db, root, vid, params.chapter, { dev })) {
+        mkdirSync(dirname(thumbPath(data, vid, params.chapter)), { recursive: true });
+        renameSync(strip, thumbPath(data, vid, params.chapter));
+        stampThumb(data, vid, params.chapter, checkedKey);
+      }
     }
     events?.publish('version', { id: vid });
     rmSync(dir, { recursive: true, force: true });

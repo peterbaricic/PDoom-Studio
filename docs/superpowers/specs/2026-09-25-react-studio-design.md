@@ -282,7 +282,10 @@ A frame at time `t` is fully determined by the engine, the options, `shared.js` 
 - **Stamps:** each strip has a stamp, `c0N.json { key, mtime }`: the segment key it shows the chapter under, and the
   file's mtime when stamped.
   - The thumbs job stamps each strip it writes.
-  - A chapter job stamps its check's strip once the draft is imported.
+  - A chapter job's check paints its strip into the job's work folder, never over the version's strip. After the
+    import, the strip is moved into place and stamped, but only if the chapter's key is still the one the check
+    painted under (the job-start files plus the draft). Otherwise it's dropped, so a strip written meanwhile, say by
+    a thumbs job running beside the Claude job, keeps its own stamp.
 - **Manifest:** `GET /api/versions/<id>` (UI hosts) has `thumbs: { n: { mtime, revision } }`, listing only strips
   whose stamp matches the chapter's current key and file.
   - So a restored chapter never shows the strip of newer code.

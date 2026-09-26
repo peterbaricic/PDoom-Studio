@@ -101,7 +101,7 @@ if (process.env.STUDIO_TEST_SKIP_CHECK) {
     console.warn('STUDIO_TEST_SKIP_CHECK: Claude jobs are imported without the studio\'s check (tests only, with test/fake-claude.js).');
   } else console.warn('STUDIO_TEST_SKIP_CHECK is ignored: it only applies with CLAUDE_BIN set to test/fake-claude.js.');
 }
-const claude = createClaudeRunner({ db, root, data, baseUrl, events, ...skipCheck });
+const claude = createClaudeRunner({ db, root, data, baseUrl, events, dev, ...skipCheck });
 const { render, thumbs } = createRenderRunner({ db, root, data, events, frames });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
 const srv = serve({ db, root, data, token, queue, events, port, frames, dev });
