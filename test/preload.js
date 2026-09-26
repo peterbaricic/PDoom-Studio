@@ -8,4 +8,4 @@ export const FAKE_CLAUDE_BIN = `bun ${join(import.meta.dir, 'fake-claude.js')}`;
 process.env.CLAUDE_BIN = FAKE_CLAUDE_BIN;
 
 // `bun run test:fast` (see slowTest in test/helpers.js): said once, up front, so a fast run is never taken for a full one.
-if (process.env.STUDIO_FAST_TESTS) console.error('STUDIO_FAST_TESTS is set: the tests that launch Chrome or encode with ffmpeg are skipped (counted under "skip"). `bun test` runs everything.');
+if (process.env.STUDIO_FAST_TESTS === '1') console.error('STUDIO_FAST_TESTS is set: the tests that launch Chrome or encode with ffmpeg are skipped (counted under "skip"). `bun test` runs everything.');

@@ -5,11 +5,11 @@ import { tmpdir } from 'node:os';
 import { inflateSync } from 'node:zlib';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
 
-// `bun run test:fast` sets STUDIO_FAST_TESTS: every test that launches Chrome (directly, through render.mjs, or
-// through a painting pool) or encodes with ffmpeg is written as slowTest, and skipped then; bun's summary counts them
-// under "skip" (test/preload.js says so up front too). A plain `bun test` runs them all. A beforeAll that launches
-// Chrome for such tests returns early under FAST_TESTS.
-export const FAST_TESTS = !!process.env.STUDIO_FAST_TESTS;
+// `bun run test:fast` sets STUDIO_FAST_TESTS=1 (any other value, "0" included, runs everything): every test that
+// launches Chrome (directly, through render.mjs, or through a painting pool) or encodes with ffmpeg is written as
+// slowTest, and skipped then; bun's summary counts them under "skip" (test/preload.js says so up front too). A plain
+// `bun test` runs them all. A beforeAll that launches Chrome for such tests returns early under FAST_TESTS.
+export const FAST_TESTS = process.env.STUDIO_FAST_TESTS === '1';
 export const slowTest = test.skipIf(FAST_TESTS);
 
 // Closes a test file's browser (or the promise of one) without letting a hung Chrome hang the run: after `ms` its
@@ -19,6 +19,20 @@ export async function closeBrowser(browser, ms = 20000) {
   if (!b) return;
   await Promise.race([b.close(), Bun.sleep(ms)]).catch(() => {});
   b.process()?.kill('SIGKILL');
+}
+
+// At most `max` of the functions given to run() going at once; the rest wait their turn, first come first served. A
+// finished run hands its slot straight to the next in line, so nothing arriving in between can take it as well (no
+// overshoot). running(): how many are going.
+export function limiter(max) {
+  let running = 0;
+  const waiting = [];
+  const run = async fn => {
+    if (running >= max) await new Promise(r => waiting.push(r));   // woken with a slot handed over
+    else running++;
+    try { return await fn(); } finally { const next = waiting.shift(); if (next) next(); else running--; }
+  };
+  return { run, running: () => running };
 }
 
 // One browser shared by the tests of a file that need the same launch flags: launched on first use (so a file whose
@@ -41,7 +55,7 @@ export const tempDir = (prefix = 'studio-data-') => mkdtempSync(join(tmpdir(), p
 // target for promoteVersion) make one of these once per file and reuse it, instead of touching the repo's own copy.
 export const tempDefaultDb = () => {
   const p = join(tempDir('default-db-'), 'default.db');
-  cpSync(join(process.cwd(), 'studio/default.db'), p);
+  cpSync(join(import.meta.dir, '../studio/default.db'), p);
   return p;
 };
 

@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { mkdtempSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, availableParallelism } from 'node:os';
 import { openDb } from '../studio/db.js';
 import { permissionSettings } from '../studio/claude-job.js';
 import { serve } from '../studio/serve.js';
@@ -9,29 +9,24 @@ import { createEvents } from '../studio/events.js';
 import { findBrowser, gpuArgs } from '../studio/browser.js';
 import { PAINTER_SECRET } from '../studio/frames/page.js';
 import puppeteer from 'puppeteer-core';
-import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch, slowTest } from './helpers.js';
+import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch, slowTest, limiter } from './helpers.js';
 
 // Every run gets a throwaway database and data root, so render.mjs's in-process server never opens the repo's.
-// Each render.mjs run is a process with a Chrome of its own (nothing to share across processes), and most of its
-// time goes on waiting for the page's network to go idle, so the tests up to the SIGTERM ones are test.concurrent,
-// with at most RUNS_AT_ONCE runs going at a time. Every test keeps its own data, output folders and capture hosts.
+// Each render.mjs run is a process with a Chrome of its own (nothing to share across processes), so the tests up to
+// the SIGTERM ones are test.concurrent, with at most RUNS_AT_ONCE runs going at a time: STUDIO_TEST_RENDERS, or by
+// default half the machine's cores, from 2 to 6. Every test keeps its own data, output folders and capture hosts.
 // The SIGTERM tests, which time how fast things stop, run on their own afterwards.
 const root = process.cwd(), T = { timeout: 300000 };
 const defaultDbPath = tempDefaultDb();   // once per file: a private copy, examples are read from it, never written
-const RUNS_AT_ONCE = 6;
-let running = 0;
-const waiting = [];
+const RUNS_AT_ONCE = Number(process.env.STUDIO_TEST_RENDERS) || Math.min(6, Math.max(2, availableParallelism() >> 1));
+const renders = limiter(RUNS_AT_ONCE);
 const spawnNow = async (argv, opts) => {
   const p = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe', ...opts });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { out, err, code };
 };
 // A run that launches Chrome waits for a free slot first.
-const spawn = async (argv, opts) => {
-  if (running >= RUNS_AT_ONCE) await new Promise(r => waiting.push(r));
-  running++;
-  try { return await spawnNow(argv, opts); } finally { running--; waiting.shift()?.(); }
-};
+const spawn = (argv, opts) => renders.run(() => spawnNow(argv, opts));
 const run = (...a) => spawn(['bun', 'render.mjs', ...a], { env: isolatedEnv() });
 // An MP4's video frame count and each stream's length, from ffprobe.
 const probe = file => {

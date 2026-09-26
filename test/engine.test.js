@@ -226,11 +226,13 @@ Object.assign(Event.prototype, { preventDefault });
 Object.assign(EventTarget.prototype, { addEventListener });
 attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh'; m.content = '0;url=' + E['nav-meta'] + '/nav-meta'; document.head.append(m); });
 ` }], { source: 'manual' });
-  const plain = await plainBrowser.get();
+  // A browser context of its own: whatever this hostile chapter manages to leave behind (cookies, storage, a stray
+  // page) goes with it, instead of into the shared browser's default context the file's other tests use.
+  const plain = await plainBrowser.get(), context = await plain.createBrowserContext();
   let rendering, state, page;
-  const popups = [], onTarget = t => { if (t.type() === 'page') popups.push(t.url()); };
+  const popups = [], onTarget = t => { if (t.type() === 'page' && t.browserContext() === context) popups.push(t.url()); };
   try {
-    page = await plain.newPage();
+    page = await context.newPage();
     plain.on('targetcreated', onTarget);
     await page.goto(`${devSrv.url}/studio.html?v=b-escapee`);
     // The scrubber comes up and goes on painting frames, its chapter's attempts notwithstanding.
@@ -241,6 +243,7 @@ attempt(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh
   } finally {
     plain.off('targetcreated', onTarget);
     await page?.close().catch(() => {});
+    await context.close().catch(() => {});
     cap.stop();
   }
   expect(cap.hits).toEqual({});
