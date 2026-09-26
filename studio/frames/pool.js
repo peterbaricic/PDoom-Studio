@@ -52,9 +52,13 @@ const within = (promise, ms, error) => {
   return Promise.race([promise, new Promise((_, bad) => { timer = setTimeout(() => bad(error()), ms); })]).finally(() => clearTimeout(timer));
 };
 
+// currentEngine: the engine hash now (studio/frames/keys.js; under --dev it changes when the engine is edited). A
+// request asked for under another is answered "ask again" when its turn comes, instead of being painted: the page
+// would load the engine files as they are now, and the frame be kept under the old engine's key (mislabelled), and a
+// page would reload for each engine in turn.
 export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeoutMs = 20000, loadTimeoutMs = 60000,
   brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET,
-  find = findBrowser }) {
+  find = findBrowser, currentEngine = null }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
   const pageUrl = snapshotId => `${origin.origin}/studio.html?render&painter=${painterSecret}&record-cast&snapshot=${snapshotId}`;
   // engine: the engine hash the page's snapshot was requested under. Under --dev the engine may change while a page is
@@ -166,6 +170,12 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       const job = free.length && nextJob();
       if (!job) return;
       const w = leadOf(job);
+      const engineNow = currentEngine?.();
+      if (engineNow && w.engine && w.engine !== engineNow) {
+        jobs.delete(job.id);
+        settle(job.waiters, { ok: false, error: 'the engine changed since this frame was asked for' });
+        continue;
+      }
       // A page that already has this snapshot, or else the one idle the longest (an empty one first).
       const holds = s => s.page && s.snapshotId === w.snapshotId && s.engine === w.engine;
       const slot = free.find(holds) || free.sort((a, b) => (!!a.page - !!b.page) || a.used - b.used)[0];

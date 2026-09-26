@@ -58,3 +58,19 @@ test('with plainly no browser to launch, health says so from the start, and the 
     expect(launches).toBe(1);
   } finally { await Promise.all([none.close(), badPath.close(), found.close()]); }
 });
+
+// Under --dev the engine can change while requests wait. One asked for under an older engine than the current one
+// would be painted with the new engine's files but kept under the old key (a mislabelled frame), and would make a
+// page reload for "its" engine and back: it's answered "ask again" instead, without a page.
+test('a request whose engine is no longer the current one is answered "ask again", with nothing loaded or painted', async () => {
+  let launches = 0, engine = 'e1';
+  const pool = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, find: () => process.execPath, currentEngine: () => engine,
+    launch: async () => { launches++; throw new Error('nope'); } });
+  const ask = (e, frame) => pool.request({ versionId: 'v', snapshotId: 's', engine: e, key: `k-${e}`, frame, prio: 'prefetch' });
+  try {
+    expect(await ask('e0', 1)).toEqual({ ok: false, error: 'the engine changed since this frame was asked for' });
+    expect(launches).toBe(0);
+    expect(await ask('e1', 2)).toMatchObject({ unavailable: true });   // the current engine's is painted (tried, here)
+    expect(launches).toBe(1);
+  } finally { await pool.close(); }
+});
