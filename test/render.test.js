@@ -111,6 +111,17 @@ slowTest.concurrent('renders a short range of frames and encodes it', async () =
   expectExactly(out, 12);
 }, T);
 
+slowTest.concurrent('a clip that doesn\'t end on a frame is its frames all the same, the song cut to their length', async () => {
+  // 40–40.3 s: eight frames (the last starts at 40.29 s), so 1/3 s of picture, and as much song
+  const out = join(mkdtempSync(join(tmpdir(), 'clip-')), 'clip.mp4');
+  const c = await run('--clip=40:40.3', `--out=${out}`);
+  expect(c.code).toBe(0);
+  const p = probe(out);
+  expect(p.frames).toBe(8);
+  expect(Math.abs(p.video - 8 / 24)).toBeLessThan(.001);
+  expect(Math.abs(p.audio - 8 / 24)).toBeLessThan(.001);
+}, T);
+
 slowTest.concurrent('a clip is exactly its frames, with the song cut to match', async () => {
   const out = join(mkdtempSync(join(tmpdir(), 'clip-')), 'clip.mp4');
   const c = await run('--clip=40:40.25', `--out=${out}`);

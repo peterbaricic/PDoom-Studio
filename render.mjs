@@ -252,8 +252,10 @@ if (args.check) {
   const out = outPath('out/clip.mp4'); mkdirSync(dirname(out), { recursive: true });
   // Every frame whose time falls in [a, b), the song's last partial frame included.
   const n = Math.ceil((b - a) * fps - 1e-6), start = Date.now();
+  // The song from a on, cut by the output's -t to the n frames' length (not to b - a: the last frame runs past b when
+  // b isn't on a frame boundary).
   const ff = child('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'mjpeg', '-i', '-',
-    '-ss', String(a), '-t', String(b - a), '-i', 'assets/pdoom.mp3',
+    '-ss', String(a), '-i', 'assets/pdoom.mp3',
     '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'medium', '-crf', '19', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
     '-frames:v', String(n), '-t', (n / fps).toFixed(6), out],
     { stdio: ['pipe', 'inherit', 'inherit'] });
