@@ -9,6 +9,7 @@ import { readWorkFiles } from './versions.js';
 import { parseStoryboard, CHAPTER_WINDOWS } from './storyboard.js';
 import { taskBrief, renderCommand } from './prompts.js';
 import { PAINTER_SECRET } from './frames/page.js';
+import { chapterKey, stampThumb, thumbMtime } from './thumbs.js';
 
 export function chapterPath(db, versionId, n) {
   const re = new RegExp(`^ch/c0${n}(_[a-z0-9_]+)?\\.js$`);
@@ -142,6 +143,10 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
     mkdirSync(dirname(settings), { recursive: true });
     writeFileSync(settings, JSON.stringify(permissionSettings({ root, jobId: job.id, dir }), null, 2));
 
+    // The chapter's strip as it was before this job: one the job's check writes (from the draft) is stamped once the
+    // draft is imported (studio/thumbs.js); one it didn't write stays of the old code.
+    const stripBefore = kind === 'chapter' ? thumbMtime(data, vid, params.chapter) : null;
+
     let spent = 0;
     const attempt = async prompt => {
       // A previous attempt could have planted its own .claude/settings.json; remove it before every attempt so a
@@ -194,6 +199,8 @@ export function createClaudeRunner({ db, root, data = root, baseUrl, events = nu
     } else if (kind === 'chapter') {
       const n = db.listFiles(vid).filter(f => f.path.startsWith('ch/')).length;
       db.updateVersion(vid, { status: n >= 9 ? 'ready' : 'chapters' });
+      const strip = thumbMtime(data, vid, params.chapter);
+      if (strip != null && strip !== stripBefore) stampThumb(data, vid, params.chapter, chapterKey(db, root, vid, params.chapter));
     }
     events?.publish('version', { id: vid });
     rmSync(dir, { recursive: true, force: true });

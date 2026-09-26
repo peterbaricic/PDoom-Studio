@@ -45,8 +45,9 @@ export interface Manifest {
   walkthrough: WalkthroughChapter[];
   fileRevisions: Record<string, number>;
   storyboardErrors: string[];
-  // The chapters (1..9) with a thumbnail strip, each with when it was written (ms since the epoch).
-  thumbs?: Record<number, number>;
+  // The chapters (1..9) whose thumbnail strip shows their current code: when it was written (ms since the epoch) and
+  // the chapter file's revision (studio/thumbs.js).
+  thumbs?: Record<number, { mtime: number; revision: number }>;
 }
 
 export type JobKind = 'storyboard' | 'shared' | 'chapter' | 'render' | 'thumbs';

@@ -8,6 +8,9 @@ import { createQueue } from '../studio/queue.js';
 import { buildWebIfStale } from '../studio/build-web.js';
 import { launchBrowser } from '../studio/browser.js';
 import { PAINTER_SECRET } from '../studio/frames/page.js';
+import { segmentKeys, engineHash } from '../studio/frames/keys.js';
+import { snapshotOf } from '../studio/snapshot.js';
+import { stampThumb } from '../studio/thumbs.js';
 import { goodStoryboard, tempDir, tempDefaultDb, isolatedEnv, FAST_TESTS, slowTest, closeBrowser } from './helpers.js';
 
 const root = process.cwd();
@@ -529,14 +532,16 @@ test('version responses carry storyboard errors, and the whole history', async (
   expect(hist[0].content).toBeUndefined();
 });
 
-test("a version's detail says which chapters have a thumbnail strip, and when each was written (UI hosts only)", async () => {
+test("a version's detail lists the chapters whose thumbnail strip shows their current code (UI hosts only)", async () => {
   db.createVersion({ id: 'a' });
+  db.writeFiles('a', [{ path: 'ch/c02.js', content: '// two' }, { path: 'ch/c07.js', content: '// seven' }], { source: 'manual' });
   const dir = join(data, '.studio/thumbs/a');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'c02.jpg'), 'jpg'); writeFileSync(join(dir, 'c07.jpg'), 'jpg'); writeFileSync(join(dir, 'notes.txt'), '');
   utimesSync(join(dir, 'c02.jpg'), 1_700_000_000, 1_700_000_000.25);
-  const { thumbs } = await (await get('/api/versions/a')).json();
-  expect(thumbs).toEqual({ 2: 1_700_000_000_250, 7: Math.floor(statSync(join(dir, 'c07.jpg')).mtimeMs) });
+  stampThumb(data, 'a', 2, segmentKeys(snapshotOf(db, 'a'), engineHash(root))[2]);   // c07's has no stamp
+  const { thumbs, fileRevisions } = await (await get('/api/versions/a')).json();
+  expect(thumbs).toEqual({ 2: { mtime: 1_700_000_000_250, revision: fileRevisions['ch/c02.js'] } });
   db.createVersion({ id: 'b' });
   expect((await (await get('/api/versions/b')).json()).thumbs).toEqual({});
   // a painting page has no use for them
@@ -785,10 +790,11 @@ beforeAll(async () => {
   ffmpeg('-i', mp4, '-frames:v', '1', join(dir, 'library/csp-original.jpg'));
   cpSync(mp4, join(dir, 'library/csp-gone.mp4')); cpSync(join(dir, 'library/csp-original.jpg'), join(dir, 'library/csp-gone.jpg'));
   // a thumbnail strip for the Original's chapter 2, which its timeline block shows
-  mkdirSync(join(dir, '.studio/thumbs/original'), { recursive: true });
-  cpSync(join(dir, 'library/csp-original.jpg'), join(dir, '.studio/thumbs/original/c02.jpg'));
   const userDb = openDb(join(dir, 'user.db'), { defaultPath: defaultDbPath });
   userDb.addRender({ versionId: 'original', file: 'csp-original.mp4', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-original.jpg' });
+  mkdirSync(join(dir, '.studio/thumbs/original'), { recursive: true });
+  cpSync(join(dir, 'library/csp-original.jpg'), join(dir, '.studio/thumbs/original/c02.jpg'));
+  stampThumb(dir, 'original', 2, segmentKeys(snapshotOf(userDb, 'original'), engineHash(root))[2]);
   userDb.addRender({ versionId: 'csp-gone', file: 'csp-gone.mp4', title: 'CSP gone', logline: 'Its version was deleted.', durationS: 30, renderS: 60, sizeBytes: 1, poster: 'csp-gone.jpg' });
   userDb.close();
   // The fake Claude: the page asks for the studio's health, which asks the CLI whether it's signed in.

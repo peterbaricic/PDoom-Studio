@@ -4,6 +4,7 @@ import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CHAPTER_WINDOWS } from './storyboard.js';
 import { FPS, DURATION, frameRange } from './frames/keys.js';
+import { stampThumb, thumbPath } from './thumbs.js';
 
 // Runs ffmpeg directly, killing it on cancellation.
 async function runFfmpeg(argv, { root, ctx }) {
@@ -35,15 +36,18 @@ function writeConcatList(path, files) {
 // One frame through the frame service, waiting out a pending paint: the file path once painted (or already
 // cached), or thrown if the version/chapter is missing, the segment is broken, or nothing could be painted. With no
 // painting browser at all, the error says why and is marked unavailable: that's no chapter's fault, nor worth
-// skipping past.
+// skipping past. frameFile: its path; paintedFrame: { file, key } (the segment key it was painted under).
 async function frameFile(frames, versionId, i, prio, ctx) {
+  return (await paintedFrame(frames, versionId, i, prio, ctx)).file;
+}
+async function paintedFrame(frames, versionId, i, prio, ctx) {
   const r = frames.frame(versionId, i, prio, { signal: ctx.signal });
   if (r.missing) throw new Error(r.missing);
   const settled = r.pending ? await r.pending : r;
   if (settled.unavailable) throw Object.assign(new Error(settled.unavailable), { unavailable: true });
   if (settled.broken) throw new Error(settled.broken);
   if (!settled.file) throw new Error(settled.retry || `frame ${i} was not painted`);
-  return settled.file;
+  return settled;
 }
 
 export function createRenderRunner({ db, root, data = root, events = null, frames }) {
@@ -124,14 +128,16 @@ export function createRenderRunner({ db, root, data = root, events = null, frame
       const [a, b] = CHAPTER_WINDOWS[n - 1];
       const frameIdx = [a + .3, (a + b) / 2, b - .3].map(t => Math.round(t * FPS));
       try {
-        const files = await Promise.all(frameIdx.map(i => frameFile(frames, vid, i, 'thumbs', ctx)));
-        const out = join(data, '.studio/thumbs', vid, `c0${n}.jpg`);
+        const painted = await Promise.all(frameIdx.map(i => paintedFrame(frames, vid, i, 'thumbs', ctx)));
+        const files = painted.map(p => p.file), out = thumbPath(data, vid, n);
         mkdirSync(dirname(out), { recursive: true });
         await runFfmpeg([
           '-y', '-loglevel', 'error', '-i', files[0], '-i', files[1], '-i', files[2],
           '-filter_complex', '[0:v]scale=320:-1[s0];[1:v]scale=320:-1[s1];[2:v]scale=320:-1[s2];[s0][s1][s2]hstack=inputs=3',
           '-frames:v', '1', '-q:v', '3', out,
         ], { root, ctx });
+        // the chapter as its three frames were painted (the same key for all three: they're one chapter's)
+        stampThumb(data, vid, n, painted[0].key);
       } catch (e) {
         if (ctx.signal.aborted) throw new Error('cancelled');
         if (e.unavailable) throw new Error(e.message);

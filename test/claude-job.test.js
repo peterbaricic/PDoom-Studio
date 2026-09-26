@@ -8,6 +8,7 @@ import { createClaudeRunner, chapterPath, permissionSettings, checkWithRenderer 
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
+import { currentThumbs } from '../studio/thumbs.js';
 import { goodStoryboard, tempDefaultDb, slowTest } from './helpers.js';
 
 // root is the real repo (the fake CLI script, the brief's paths); data is a throwaway data root for the runner's
@@ -67,6 +68,19 @@ test('a chapter job imports only its own file', async () => {
   expect(db.getFile('v', 'shared.js')).toBeNull();
   expect(logs.join('')).toContain('Reverted changes outside ch/c03.js before the check: ch/c04.js, shared.js');
   expect(db.getVersion('v').status).toBe('chapters');
+});
+
+// The check (checkWithRenderer, faked here) writes the chapter's strip from the draft; once that draft is imported,
+// the strip is stamped as the picture of the chapter's new code. A strip the job didn't write isn't.
+test('a chapter job stamps the strip its check wrote, once its code is imported', async () => {
+  const strip = join(data, '.studio/thumbs/v/c03.jpg');
+  const writesStrip = async () => { mkdirSync(join(data, '.studio/thumbs/v'), { recursive: true }); writeFileSync(strip, 'jpeg'); return []; };
+  await runner([{ files: { 'ch/c03.js': '// three' } }], writesStrip)(job('chapter', { chapter: 3 }), ctx());
+  const rev = db.listFiles('v').find(f => f.path === 'ch/c03.js').revision_id;
+  expect(currentThumbs(db, root, data, 'v')).toEqual({ 3: { mtime: expect.any(Number), revision: rev } });
+  // a revision whose check wrote no strip: the old strip is of the old code
+  await runner([{ files: { 'ch/c03.js': '// three, again' } }])(job('chapter', { chapter: 3 }), ctx());
+  expect(currentThumbs(db, root, data, 'v')).toEqual({});
 });
 
 test('the work folder gets a read-only reference/original/ copy of the Original\'s storyboard and chapters', async () => {

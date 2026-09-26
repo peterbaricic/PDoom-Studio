@@ -11,6 +11,7 @@ import { createRenderRunner } from '../studio/render-job.js';
 import { snapshotOf } from '../studio/snapshot.js';
 import { FPS, segmentKeys, engineHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
+import { currentThumbs } from '../studio/thumbs.js';
 import { tempDir, tempDefaultDb, slowTest } from './helpers.js';
 
 // One sealed painting pool for the file, over small versions whose one or two chapters paint in a few tens of
@@ -214,6 +215,8 @@ slowTest('thumbnails are composed from three cached frames per chapter, and a se
   // Chapter 1's cached frames are 1920x1080; three of them scaled to 320 px wide, side by side.
   expect(streams[0]).toMatchObject({ width: 960, height: 180 });
   expect(pool.stats().painted - before).toBe(6);   // 3 frames each for boundary's two chapters, none cached yet
+  // each stamped as the picture of its chapter's current code, so the studio shows them
+  expect(Object.keys(currentThumbs(db, root, data, 'boundary'))).toEqual(['1', '2']);
 
   const before2 = pool.stats().painted;
   const job2 = db.getJob(db.addJob({ kind: 'thumbs', versionId: 'boundary' }));

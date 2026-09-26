@@ -1,6 +1,6 @@
 // app.js: every URL the studio answers. Pages and the shared engine come from the repo (root), version code from the
 // database, work folders and thumbnails from <data>/.studio/, finished videos from <data>/library/ (data defaults to root).
-import { readFileSync, existsSync, unlinkSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { join, extname } from 'node:path';
 import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
@@ -11,6 +11,7 @@ import { getSnapshot, blobBySha } from './snapshot.js';
 import { N, FPS, DURATION } from './frames/keys.js';
 import { PAINTER_SECRET } from './frames/page.js';
 import { legacyFrames } from './frames/cache.js';
+import { currentThumbs } from './thumbs.js';
 
 // Repo files anyone may load: the shared engine, the libraries, the song and the bundled fonts. Nothing else.
 const PUBLIC = [/^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
@@ -91,12 +92,6 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   const LY = new Function(`${readFileSync(join(root, 'src/lyrics.js'), 'utf8')}\nreturn LY;`)();
   const song = { fps: FPS, frames: N, duration: DURATION, chapters: CHAPTER_WINDOWS, lyrics: LY };
   const body = async req => { try { return await req.json(); } catch { return {}; } };
-  // The chapters with a thumbnail strip (<data>/.studio/thumbs/<id>/c0N.jpg, from a chapter job's check or the thumbs
-  // job), each with when it was written: the UI shows only those that exist (no 404 for the others) and names each
-  // file's mtime in its URL, so a rewritten strip is loaded afresh.
-  const thumbsOf = id => Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap(n => {
-    try { return [[n, Math.floor(statSync(join(dirs.thumbs, id, `c0${n}.jpg`)).mtimeMs)]]; } catch { return []; }
-  }));
   const file = (req, dir, rel, headers) => {
     let p; try { p = safeJoin(dir, decodeURIComponent(rel)); } catch { p = null; }
     return p ? serveFile(req, p, headers) : error(404, 'not found');
@@ -241,7 +236,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       // STORYBOARD.md predates the studio's stricter format and will never parse clean; don't flag it as broken.
       return json({ ...m, concept: db.getVersion(id).concept, fileRevisions: Object.fromEntries(db.listFiles(id).map(f => [f.path, f.revision_id])),
         storyboardErrors: sb && !m.files.includes('walkthrough.json') ? parseStoryboard(sb.content).errors : [],
-        ...(onRenderer(req) ? {} : { thumbs: thumbsOf(id) }) });
+        // The chapters whose thumbnail strip shows their current code (studio/thumbs.js), with its mtime and the
+        // chapter's revision: the UI asks only for those (no 404 for the others), under URLs that change with either.
+        ...(onRenderer(req) ? {} : { thumbs: currentThumbs(db, root, data, id, { dev }) }) });
     }],
     ['GET', /^\/api\/versions\/([a-z0-9-]+)\/history$/, (req, [, id]) => json(db.history(id, null).map(({ content, ...r }) => r))],
     ['PUT', /^\/api\/versions\/([a-z0-9-]+)$/, async (req, [, id]) => {
