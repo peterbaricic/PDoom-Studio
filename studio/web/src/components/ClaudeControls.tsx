@@ -41,9 +41,10 @@ export function useClaudeUnavailable(): string | null {
   return claudeUnavailable(useHealth().data);
 }
 
-// A button that starts Claude: while `unavailable` is set it's disabled, and hovering or focusing it says why. (A
-// disabled button gets no pointer events, so the tooltip hangs on a focusable wrapper instead.)
-export function ClaudeButton({ unavailable, disabled, ...props }: ComponentProps<typeof Button> & { unavailable: string | null }) {
+// A button that's off for a reason while `unavailable` is set: hovering or focusing it says why. (A disabled button
+// gets no pointer events, so the tooltip hangs on a focusable wrapper instead.) ClaudeButton, for a button that starts
+// Claude, with the reason Claude can't run.
+export function ReasonButton({ unavailable, disabled, ...props }: ComponentProps<typeof Button> & { unavailable: string | null }) {
   if (!unavailable) return <Button disabled={disabled} {...props} />;
   return (
     <Tooltip>
@@ -56,3 +57,5 @@ export function ClaudeButton({ unavailable, disabled, ...props }: ComponentProps
     </Tooltip>
   );
 }
+
+export const ClaudeButton = ReasonButton;

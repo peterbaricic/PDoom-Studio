@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Coverage, Song } from '@/api/types';
@@ -145,5 +146,28 @@ describe('Timeline', () => {
     expect(img).toHaveAttribute('alt', '');
     expect((await block(2)).querySelector('img')).toBeNull();
     expect((await block(3)).querySelector('img')).toBeNull();
+  });
+
+  test('a strip that fails to load is left out, and a new one (its URL changed) gets its chance', async () => {
+    function Harness() {
+      const [url, setUrl] = useState('/thumbs/mine/c01.jpg?r=5.1');
+      return (
+        <>
+          <button type="button" onClick={() => setUrl('/thumbs/mine/c01.jpg?r=5.2')}>
+            new strip
+          </button>
+          <Timeline versionId="mine" song={SONG} coverage={{ total: 3759, ranges: [], broken: [], segments: segments() }} jobs={[]} thumbs={{ 1: url }} time={0} onSeek={() => {}} />
+        </>
+      );
+    }
+    renderInRouter(<Harness />, { path: '/versions/mine' });
+    const visibleStrip = async () => {
+      const img = (await block(1)).querySelector('img');
+      return img && !img.hidden ? img : null;
+    };
+    fireEvent.error((await visibleStrip())!);
+    await waitFor(async () => expect(await visibleStrip()).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'new strip' }));
+    await waitFor(async () => expect(await visibleStrip()).toHaveAttribute('src', '/thumbs/mine/c01.jpg?r=5.2'));
   });
 });

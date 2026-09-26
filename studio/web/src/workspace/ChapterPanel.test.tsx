@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Revision } from '@/api/types';
 import { calls, job } from '../test-utils';
-import { bodies, manifest, never, renderInspector } from './inspectorTestUtils';
+import { HEALTHY, bodies, manifest, never, renderInspector } from './inspectorTestUtils';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -203,6 +203,21 @@ describe('ChapterPanel', () => {
     test.each(['queued', 'running'] as const)('Refresh thumbnails is off while a thumbs job is %s', async status => {
       renderChapter({ jobs: [job({ id: 30, kind: 'thumbs', status })] });
       expect(await screen.findByRole('button', { name: 'Refresh thumbnails' })).toBeDisabled();
+    });
+
+    test('Refresh thumbnails is off, saying why, while a render of the version is queued or running', async () => {
+      renderChapter({ jobs: [job({ id: 31, kind: 'render', status: 'queued' })] });
+      const button = await screen.findByRole('button', { name: 'Refresh thumbnails' });
+      expect(button).toBeDisabled();
+      fireEvent.focus(button.parentElement!);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent('A final render of this version is under way');
+    });
+
+    test('Refresh thumbnails is off, saying why, while previews can\'t be painted', async () => {
+      renderChapter({ health: { ...HEALTHY, painter: { ok: false, reason: 'no Chromium-based browser found' } } });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh thumbnails' })).toBeDisabled());
+      fireEvent.focus(screen.getByRole('button', { name: 'Refresh thumbnails' }).parentElement!);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent("Previews can't paint: no Chromium-based browser found");
     });
 
     test('an example can refresh its thumbnails too (it changes none of its code)', async () => {

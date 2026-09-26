@@ -5,7 +5,7 @@
 // block whose chapter has a thumbnail strip shows it faintly behind its label.
 import { useNavigate } from '@tanstack/react-router';
 import { ClockIcon, LoaderCircleIcon, TriangleAlertIcon } from 'lucide-react';
-import type { PointerEvent as ReactPointerEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Coverage, Job, Song, WalkthroughChapter } from '@/api/types';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -39,6 +39,8 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, thumbs,
   const duration = songEnd(song.chapters);
   const blocks = timelineGeometry(song.chapters, 100);
   const total = coverage?.total ?? song.frames;
+  // Strips that didn't load, by URL: left out, until a chapter's strip has a new URL.
+  const [failedThumbs, setFailedThumbs] = useState<ReadonlySet<string>>(() => new Set());
   const chapterJobs = (n: number) => jobs.filter(j => j.kind === 'chapter' && Number(j.params.chapter) === n);
 
   const scrubTo = (e: ReactPointerEvent<HTMLElement>) => {
@@ -76,7 +78,7 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, thumbs,
           const share = coverage ? coveredShare(coverage.ranges, first, Math.min(last, total - 1)) : 0;
           const span = `${formatClock(b.start)}–${formatClock(b.end)}`;
           const status = error ? 'broken' : !written ? 'not written yet' : working ? 'Claude is working on it' : queued ? 'queued' : null;
-          const thumb = written && !error ? thumbs?.[b.n] : undefined;
+          const thumb = written && !error && thumbs?.[b.n] && !failedThumbs.has(thumbs[b.n]!) ? thumbs[b.n] : undefined;
           return (
             <Tooltip key={b.n}>
               <TooltipTrigger asChild>
@@ -106,7 +108,7 @@ export function Timeline({ versionId, song, coverage, jobs, walkthrough, thumbs,
                       alt=""
                       aria-hidden
                       loading="lazy"
-                      onError={e => (e.currentTarget.hidden = true)}
+                      onError={() => setFailedThumbs(failed => new Set(failed).add(thumb))}
                       className="pointer-events-none absolute inset-0 size-full object-cover opacity-30"
                     />
                   )}

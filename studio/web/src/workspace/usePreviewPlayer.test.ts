@@ -330,6 +330,7 @@ describe('scheduling', () => {
   test.each([
     ['a seek', (p: ReturnType<typeof mount>) => p.result.current.seek(20)],
     ['Play again', (p: ReturnType<typeof mount>) => (p.result.current.play(), p.result.current.play())],
+    ['Play now', (p: ReturnType<typeof mount>) => (p.result.current.play(), p.result.current.playNow())],
   ])('%s re-aims a stalled paint-ahead, and its stall wait starts over at 5 s', async (_, reAim) => {
     const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
     await flush();
@@ -338,7 +339,7 @@ describe('scheduling', () => {
     await flush(36_000); // aimed, then re-aimed after 5 s, 10 s and 20 s: the next wait would be 40 s
     const before = paintAhead.length;
     act(() => reAim(p));
-    expect(p.result.current.state).toBe('waiting');
+    expect(p.result.current.state).not.toBe('paused'); // waiting, or (Play now) playing what's there
     await flush(1_000);
     expect(paintAhead.length).toBe(before + 1);
     await flush(3_500);
@@ -781,42 +782,73 @@ describe('the server refusing frames', () => {
     expect(restartedState.value).toBe(false);
   });
 
-  test('a 503 (no painting browser) shows the server\'s reason instead of "painting", asks only for the playhead\'s frame now and then, and clears once a frame comes', async () => {
+  const refuse = (reason = 'no Chromium-based browser found') => {
+    for (const r of open()) answer(r, json(503, { error: 'the studio cannot paint frames right now', reason }));
+  };
+
+  test('a 503 (no painting browser) shows the server\'s reason instead of "painting"; paused, it asks nothing more; playing, one frame every 5 s; a painted frame clears it', async () => {
     const p = mount({ initialTime: 0 });
     await flush();
     expect(p.result.current.cantPaint).toBeNull();
-    for (const r of open()) answer(r, json(503, { error: 'the studio cannot paint frames right now', reason: 'no Chromium-based browser found' }));
+    refuse();
     await flush();
     expect(p.result.current.painting).toBe(true);
     expect(p.result.current.cantPaint).toBe('no Chromium-based browser found');
     expect(requests).toHaveLength(4); // not the rest of the window, which would only be refused too
+    await flush(30_000);
+    expect(requests).toHaveLength(4); // paused: nobody is waiting for it
+    act(() => p.result.current.play());
+    await flush();
+    expect(framesAsked().slice(4)).toEqual([0]); // Play asks at once
+    refuse();
     await flush(4_000);
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(5);
     await flush(1_500);
-    expect(framesAsked().slice(4)).toEqual([0]);
+    expect(framesAsked().slice(5)).toEqual([0]); // and every 5 s while it waits
     answerFrame(0, 'a1');
     await flush();
     expect(p.result.current.cantPaint).toBeNull();
     expect(open()).toHaveLength(4); // and the window is asked for again
   });
 
-  test('with the playhead\'s frame already on screen, it still finds out when the server can paint again', async () => {
+  test.each([
+    ['a seek', (p: ReturnType<typeof mount>) => p.result.current.seek(2 / 24)],
+    ['Play now', (p: ReturnType<typeof mount>) => p.result.current.playNow()],
+  ])('with the playhead\'s frame already on screen, %s asks whether the server can paint again', async (_, ask) => {
     const p = mount({ initialTime: 0 });
     await flush();
     for (const i of [0, 1, 2, 3]) answerFrame(i, 'a1');
     await flush();
     expect(p.result.current.painting).toBe(false);
-    for (const r of open()) answer(r, json(503, { error: 'the studio cannot paint frames right now', reason: 'no browser' }));
+    refuse('no browser');
     await flush();
     expect(p.result.current.cantPaint).toBe('no browser');
     const asked = requests.length;
-    await flush(4_000);
-    expect(requests).toHaveLength(asked);
-    await flush(1_500);
+    await flush(30_000);
+    expect(requests).toHaveLength(asked); // paused
+    act(() => ask(p));
+    await flush();
     expect(requests).toHaveLength(asked + 1); // one frame, to ask
     answer(open()[0]!, frameResponse(open()[0]!.frame, 'a1'));
     await flush();
     expect(p.result.current.cantPaint).toBeNull();
     expect(open()).toHaveLength(4);
+  });
+
+  test('a frame the server already had doesn\'t say it can paint again: only a painted one does', async () => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 1]], keys('a')) });
+    await flush();
+    for (const r of open().filter(r => r.frame >= 2)) answer(r, json(503, { error: 'no', reason: 'no browser' }));
+    await flush();
+    expect(p.result.current.cantPaint).toBe('no browser');
+    answerFrame(0, 'a1'); // cached: served without painting
+    await flush();
+    expect(p.result.current.cantPaint).toBe('no browser');
+    act(() => p.result.current.play());
+    await flush();
+    const probe = open().find(r => r.frame >= 2)!;
+    answer(probe, frameResponse(probe.frame, 'a1'));
+    await flush();
+    expect(p.result.current.cantPaint).toBeNull();
   });
 });

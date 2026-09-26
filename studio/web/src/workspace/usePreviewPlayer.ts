@@ -18,7 +18,7 @@
 //     "safe to play" closer. While playback waits for it (or plays towards frames not painted yet), it's re-aimed when a
 //     broken chapter clears, and when the coverage stops growing (the sweep ended early): after STALL_MS, then twice
 //     as long each time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop. The wait starts over
-//     at STALL_MS when the coverage grows, and when Play or a seek aims it afresh.
+//     at STALL_MS when the coverage grows, and when Play, "Play now" or a seek aims it afresh.
 //   - A seek cancels (AbortController) every request the new position doesn't need, and re-asks for the new playhead
 //     frame as a `preview` if it was on its way as `prefetch`: the server withdraws cancelled requests from its
 //     painting queue (Review Focus 3).
@@ -37,8 +37,10 @@
 // server's reason, until the keys change.
 //
 // The server's own troubles: a 503 (no painting browser: none installed, a bad CHROME_PATH) is shown with its reason
-// in place of "Painting…", and until a frame comes again only frames the server has cached are asked for, plus one it
-// would have to paint every CANT_PAINT_RETRY_MS (the first the window lacks), to learn when it can again. A 403 for a
+// in place of "Painting…", and until a frame it had to paint comes again (one it had cached says nothing about its
+// browser), only frames it has cached are asked for, plus, to learn when it can paint again, one it would have to
+// paint: every CANT_PAINT_RETRY_MS while playback wants frames (waiting or playing), and once on Play, "Play now" or a
+// seek; never while merely paused. A 403 for a
 // stale token (the studio restarted since this page loaded) raises the reload banner (api/client.ts).
 //
 // Coverage is the server's whole current cache for the version, so it can shrink (frames evicted to stay under the
@@ -154,6 +156,7 @@ export class PreviewEngine {
   private brokenSig: string | null = null; // the coverage's broken chapters, to tell when they change
   private cantPaint: string | null = null; // the server's reason, from a 503
   private nextProbeAt = 0; // while it can't paint: when to ask for a frame it would have to paint again
+  private probeNow = false; // ...and Play, "Play now" or a seek asks at once
   private running = false;
   private last: Snapshot | null = null;
 
@@ -458,7 +461,8 @@ export class PreviewEngine {
       if (this.hasBlob(i) || !this.wanted(i)) continue;
       // the server can't paint: what it has cached still comes, and now and then one frame asks whether it can again
       if (this.cantPaint != null && !this.covered[i]) {
-        if (Date.now() < this.nextProbeAt) continue;
+        if (!this.probeNow && (this.mode === 'paused' || Date.now() < this.nextProbeAt)) continue;
+        this.probeNow = false;
         this.nextProbeAt = Date.now() + CANT_PAINT_RETRY_MS;
       }
       this.request(i);
@@ -492,6 +496,7 @@ export class PreviewEngine {
     const ctrl = new AbortController();
     const key = this.keyOf(i)!;
     const prio = i === this.ph ? 'preview' : 'prefetch';
+    const wasPainted = this.covered[i] !== 1; // not cached when asked for: an answer means the server painted it
     this.inflight.set(i, { ctrl, prio });
     const mine = () => this.inflight.get(i)?.ctrl === ctrl;
     const settle = (retryInMs?: number) => {
@@ -505,11 +510,11 @@ export class PreviewEngine {
       .then(async res => {
         if (!mine()) return;
         if (res.status === 200) {
-          const painted = keyOfEtag(res.headers.get('etag'));
+          const paintedKey = keyOfEtag(res.headers.get('etag'));
           const blob = await res.blob();
           if (!settle()) return;
-          this.cantPaint = null;
-          this.arrived(i, painted, blob);
+          if (wasPainted) this.cantPaint = null;
+          this.arrived(i, paintedKey, blob);
         } else if (res.status === 409) {
           const error = await res
             .json()
@@ -707,6 +712,7 @@ export class PreviewEngine {
     if (this.blockedAt(this.ph)) return this.notify();
     if (this.safeNow() && this.hasBlob(this.ph)) return this.startAudio();
     this.mode = 'waiting';
+    this.probeNow = true;
     this.aimPaintAhead(true);
     this.pump();
     this.notify();
@@ -714,11 +720,15 @@ export class PreviewEngine {
 
   playNow = () => {
     if (this.mode === 'playing' || !this.frames || this.blockedAt(this.ph)) return;
-    if (this.hasBlob(this.ph)) return this.startAudio();
-    if (!this.isCached(this.ph)) return;
-    // cached on the server, on its way here: start as soon as it arrives
-    this.mode = 'waiting';
-    this.nowPending = true;
+    if (!this.hasBlob(this.ph) && !this.isCached(this.ph)) return;
+    this.probeNow = true;
+    if (this.hasBlob(this.ph)) this.startAudio();
+    else {
+      // cached on the server, on its way here: start as soon as it arrives
+      this.mode = 'waiting';
+      this.nowPending = true;
+    }
+    if (this.wantsPainting()) this.aimPaintAhead(true);
     this.pump();
     this.notify();
   };
@@ -745,6 +755,7 @@ export class PreviewEngine {
     const i = this.frameOf(t);
     this.ph = i;
     this.nowPending = false; // "Play now" was for where the playhead was
+    this.probeNow = true;
     // cancel what the new position doesn't need (everything outside its window), and the new playhead frame if it's
     // on its way as a prefetch: it's asked for again as a preview, which the server paints first
     for (const [k, f] of [...this.inflight]) if (k < i || k >= i + this.window() || (k === i && f.prio !== 'preview')) this.abort(k);

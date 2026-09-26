@@ -9,7 +9,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/api/client';
 import type { Job, Manifest, Revision } from '@/api/types';
+import { ReasonButton } from '@/components/ClaudeControls';
 import { Button } from '@/components/ui/button';
+import { useHealth } from '@/shell/HealthBanner';
 import { Textarea } from '@/components/ui/textarea';
 import { ACTIVE, ClaudeButton, JobList, ModelSelect, StoryboardMarkdown, useClaudeUnavailable } from './inspectorControls';
 import { storyboardSection } from './storyboardSections';
@@ -74,6 +76,16 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
   });
   const thumbsBusy = jobs.some(j => j.kind === 'thumbs' && ACTIVE.includes(j.status));
+  const painter = useHealth().data?.painter;
+  // Why it can't run now: thumbnails are painted like any frame, after a final render's (which takes the pages).
+  const thumbsBlocked =
+    painter && !painter.ok
+      ? `Previews can't paint: ${painter.reason ?? 'the painting browser did not start'}`
+      : jobs.some(j => j.kind === 'render' && ACTIVE.includes(j.status))
+        ? 'A final render of this version is under way: refresh the thumbnails once it is done'
+        : thumbsBusy
+          ? 'The thumbnails are being painted'
+          : null;
 
   const section = storyboard === undefined ? undefined : storyboardSection(storyboard, chapter);
   const reviseBlocked = active
@@ -86,17 +98,18 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
     <div className="flex flex-col gap-4 p-3">
       <section aria-label="Thumbnails" data-thumbs className="flex flex-col gap-1.5">
         <ThumbStrip chapter={chapter} src={chapterThumbs(manifest)[chapter]} written={!!path} />
-        <Button
+        <ReasonButton
+          unavailable={thumbsBlocked}
           size="sm"
           variant="ghost"
           className="text-muted-foreground -ml-2 w-fit"
-          disabled={thumbsBusy || refreshThumbs.isPending}
-          title={thumbsBusy ? 'The thumbnails are being painted' : "Paint every chapter's thumbnails again"}
+          disabled={refreshThumbs.isPending}
+          title={thumbsBlocked ? undefined : "Paint every chapter's thumbnails again"}
           onClick={() => refreshThumbs.mutate()}
         >
           <RefreshCwIcon aria-hidden className={thumbsBusy ? 'animate-spin' : undefined} />
           Refresh thumbnails
-        </Button>
+        </ReasonButton>
       </section>
 
       <section aria-label="Storyboard section" className="flex flex-col gap-2">
