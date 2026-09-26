@@ -53,17 +53,20 @@ test('chapter() registrations must stay inside their own chapter\'s window', () 
   expect(chapterWindowErrors([reg('ch/c04.js', 70, 60)])).toEqual(["ch/c04.js: chapter('x', 70, 60) is not a window of time (start before end)"]);
   expect(chapterWindowErrors([reg('ch/c04.js', NaN, 60)])).toHaveLength(1);
   // shared.js may register anywhere (its hash is in every segment key); nothing else may at all
-  expect(chapterWindowErrors([reg('shared.js', 0, 156.6), reg(null, 0, 23)])).toEqual([
-    "chapter('x', 0, 23) is called from outside the version's files: only a chapter file (ch/c0<n>…js) or shared.js may call chapter()",
+  expect(chapterWindowErrors([reg('shared.js', 0, 156.6), reg('STORYBOARD.md', 0, 23)])).toEqual([
+    "chapter('x', 0, 23) is called from STORYBOARD.md: only a chapter file (ch/c0<n>…js) or shared.js may call chapter()",
   ]);
-  // a job is held to its own file only: another chapter's overrun (or a stray registration) is no business of chapter
-  // 3's job, nor of a shared.js job
+  // a registration made after the scripts loaded belongs to no file (the page knows only which script is loading), and
+  // the engine never draws it: said in every check, since it's most likely the job's own file doing it
+  const late = "chapter('x', 5, 6) was called after the scripts loaded: chapter() must be called while the chapter's script loads (at the top level of its IIFE), not later";
+  // a job is held to its own file only: another chapter's overrun is no business of chapter 3's job, nor of a
+  // shared.js job
   const mixed = [reg('ch/c01.js', 0, 25), reg('ch/c03.js', 38.5, 59), reg(null, 5, 6), reg('shared.js', 50, 60)];
-  expect(chapterWindowErrors(mixed, 3)).toEqual([]);
-  expect(chapterWindowErrors(mixed, '3')).toEqual([]);
-  expect(chapterWindowErrors(mixed, 'shared')).toEqual([]);
-  expect(chapterWindowErrors(mixed, 1)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)"]);
-  expect(chapterWindowErrors(mixed)).toHaveLength(2);   // by hand, everything
+  expect(chapterWindowErrors(mixed, 3)).toEqual([late]);
+  expect(chapterWindowErrors(mixed, '3')).toEqual([late]);
+  expect(chapterWindowErrors(mixed, 'shared')).toEqual([late]);
+  expect(chapterWindowErrors(mixed, 1)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)", late]);
+  expect(chapterWindowErrors(mixed)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)", late]);   // by hand, everything
 });
 
 // The engine draws each window only with its own chapter's registrations (chapterAt in src/timeline.js), by windows it
