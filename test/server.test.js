@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, cpSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb, EXAMPLE_REVISION_FLOOR } from '../studio/db.js';
@@ -55,6 +55,31 @@ test('says at start how much the old renders\' frame folders hold, and leaves th
   const clean = await start(join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db'));
   try { expect(clean.out).not.toContain('frames from old renders'); } finally { clean.p.kill(); await clean.p.exited; }
 }, { timeout: 30000 });
+
+test('STUDIO_TEST_SKIP_CHECK is honoured only with the fake Claude, and said either way', async () => {
+  const stderrOf = async extra => {
+    const { p } = await start(join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db'), { STUDIO_TEST_SKIP_CHECK: '1', ...extra });
+    p.kill();
+    return new Response(p.stderr).text();
+  };
+  // test/preload.js pins CLAUDE_BIN to test/fake-claude.js
+  expect(await stderrOf({})).toContain("STUDIO_TEST_SKIP_CHECK: Claude jobs are imported without the studio's check (tests only, with test/fake-claude.js).");
+  // any other Claude (a copy of the fake under another name stands in for a real one; nothing here runs it)
+  const other = join(mkdtempSync(join(tmpdir(), 'other-claude-')), 'claude.js');
+  cpSync(join(process.cwd(), 'test/fake-claude.js'), other);
+  const ignored = await stderrOf({ CLAUDE_BIN: `bun ${other}` });
+  expect(ignored).toContain('STUDIO_TEST_SKIP_CHECK is ignored: it only applies with CLAUDE_BIN set to test/fake-claude.js.');
+  expect(ignored).not.toContain('imported without');
+}, { timeout: 30000 });
+
+// A second studio started by mistake must not rebuild studio/web/dist under the running one: the build comes after the
+// lock. (Read from the source: a test can't make the repo's dist stale without touching the user's working tree.)
+test('the web build runs only once the lock is taken', () => {
+  const src = readFileSync(join(process.cwd(), 'studio/server.js'), 'utf8');
+  const lock = src.indexOf('acquireLock(userPath'), build = src.indexOf('buildWebIfStale(root');
+  expect(lock).toBeGreaterThan(0);
+  expect(build).toBeGreaterThan(lock);
+});
 
 test('refuses to start when DEFAULT_DB does not exist', async () => {
   const userPath = join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db');

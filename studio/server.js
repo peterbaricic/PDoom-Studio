@@ -47,11 +47,6 @@ if (!existsSync(defaultPath)) {
   process.exit(1);
 }
 
-// studio/web/dist is what studio/app.js serves the SPA from; build it now if it's missing or stale, so `bun run
-// studio` (and `bun run dev`, which still serves the built app on the studio's own port even though the Vite dev
-// server on 5173 is what the browser actually talks to) always has something current to serve.
-buildWebIfStale(root, { log: console.log });
-
 // The legacy studio.db, if any, is looked for beside userPath, not at the fixed project root: with USER_DB and
 // STUDIO_DATA left at their defaults that's the same directory, but when either points elsewhere (as every test does,
 // to stay off the real project's files), migration stays confined there too instead of reaching for the real studio.db.
@@ -62,6 +57,12 @@ let release;
 try { release = acquireLock(userPath, port); }
 catch (err) { console.error(err.message); process.exit(1); }
 process.on('exit', release);
+
+// studio/web/dist is what studio/app.js serves the SPA from; build it now if it's missing or stale, so `bun run
+// studio` (and `bun run dev`, which still serves the built app on the studio's own port even though the Vite dev
+// server on 5173 is what the browser actually talks to) always has something current to serve. Only once the lock is
+// ours: a second studio started by mistake must not rebuild the dist the running one is serving.
+buildWebIfStale(root, { log: console.log });
 
 const db = openDb(userPath, { defaultPath });
 const interrupted = db.markInterrupted();
@@ -89,8 +90,15 @@ const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: c
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root, dev });
 // STUDIO_TEST_SKIP_CHECK exists only for test/ui.test.js, whose fake Claude writes trivial chapters: its jobs import
-// without render.mjs's check (a Chrome of its own per job), which test/claude-job.test.js runs for real instead.
-const skipCheck = process.env.STUDIO_TEST_SKIP_CHECK ? { validate: async () => [] } : {};
+// without render.mjs's check (a Chrome of its own per job), which test/claude-job.test.js runs for real instead. It's
+// honoured only with that fake Claude (CLAUDE_BIN ending in test/fake-claude.js), never with a real one, and said so.
+let skipCheck = {};
+if (process.env.STUDIO_TEST_SKIP_CHECK) {
+  if (/(^|[\s/\\])test[/\\]fake-claude\.js$/.test(process.env.CLAUDE_BIN || '')) {
+    skipCheck = { validate: async () => [] };
+    console.warn('STUDIO_TEST_SKIP_CHECK: Claude jobs are imported without the studio\'s check (tests only, with test/fake-claude.js).');
+  } else console.warn('STUDIO_TEST_SKIP_CHECK is ignored: it only applies with CLAUDE_BIN set to test/fake-claude.js.');
+}
 const claude = createClaudeRunner({ db, root, data, baseUrl, events, ...skipCheck });
 const { render, thumbs } = createRenderRunner({ db, root, data, events, frames });
 const queue = createQueue({ db, events, runners: { storyboard: claude, shared: claude, chapter: claude, render, thumbs } });
