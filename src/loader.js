@@ -33,6 +33,9 @@ const CAST = new URLSearchParams(location.search).has('record-cast') ? (() => {
   });
 })() : {};
 window.ENGINE = { wipes: true, cornerMeter: true };
+// URL path of each version script as loaded -> its path in the version (ch/c03.js, shared.js), whatever it was loaded
+// from (/v/<id>/…, /work/<id>/…, /api/blob/<sha>): chapter() reads it to name the script a late call came from.
+window.SCRIPT_PATHS = new Map();
 
 // Before any version code runs, take away the ways out that studio.html's policy can't block. This matters most in the
 // user's own browser, where the studio.html scrubber runs chapter code with none of the render browser's network
@@ -71,6 +74,7 @@ window.versionLoaded = (async () => {
       const el = document.createElement('script');
       el.dataset.path = path;   // whose chapter() registrations these are (see chapter() in timeline.js)
       el.src = base + s; el.onload = ok; el.onerror = () => bad(new Error('could not load ' + s));
+      window.SCRIPT_PATHS.set(new URL(el.src, location.href).pathname, path);
       document.head.append(el);
     });
   }

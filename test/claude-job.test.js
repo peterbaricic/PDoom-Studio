@@ -273,11 +273,21 @@ slowTest('checkWithRenderer checks a chapter job at three times in its window an
     'ch/c03.js': `chapter('c3', ${c}, ${d}, [[${c}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`,
   });
   workFolder(sharedDraws.id, { 'shared.js': `chapter('s', 0, 5, [[0, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);` });
+  // chapter 2 also registering from a timer, once its script has loaded: the engine traces the call to ch/c02.js, so
+  // it fails chapter 2's own check and no other
+  const lateTwo = `chapter('c2', ${a}, ${b}, [[${a}, t => paint(rectPts(0, 0, W, H), { wash: PAL.rose, ink: null })]]);
+setTimeout(() => chapter('late', ${a + 2}, ${a + 3}, []), 0);`;
+  const lateOwn = job('chapter', { chapter: 2 }), besideLate = job('chapter', { chapter: 3 });
+  workFolder(lateOwn.id, { 'ch/c02.js': lateTwo });
+  workFolder(besideLate.id, {
+    'ch/c02.js': lateTwo,
+    'ch/c03.js': `chapter('c3', ${c}, ${d}, [[${c}, t => paint(rectPts(0, 0, W, H), { wash: PAL.sky, ink: null })]]);`,
+  });
   const check = (j, extra = {}) => checkWithRenderer({ root, data, baseUrl: srv.url, jobId: j.id, kind: j.kind, versionId: 'v', chapter: j.params?.chapter, ...extra });
   const thumb = join(data, '.studio/thumbs/v/c02.jpg');
   try {
-    const [passed, threw, notCovered, notLoaded, overran, besideOverrun, sharedRegisters] = await Promise.all(
-      [check(good), check(bad), check(uncovered), check(shared), check(overruns), check(neighbour), check(sharedDraws)]);
+    const [passed, threw, notCovered, notLoaded, overran, besideOverrun, sharedRegisters, lateInOwn, lateBeside] = await Promise.all(
+      [check(good), check(bad), check(uncovered), check(shared), check(overruns), check(neighbour), check(sharedDraws), check(lateOwn), check(besideLate)]);
     expect(passed).toEqual([]);
     expect(readFileSync(thumb).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));   // a JPEG
     expect(threw.join('\n')).toContain('chapter two paints nothing');
@@ -288,6 +298,8 @@ slowTest('checkWithRenderer checks a chapter job at three times in its window an
     expect(overran).toEqual([`ch/c02.js: chapter('c2', ${a}, ${b + 1.5}) reaches outside chapter 2's window (${a}–${b} s)`]);
     expect(besideOverrun).toEqual([]);
     expect(sharedRegisters).toEqual([]);
+    expect(lateInOwn).toEqual([`ch/c02.js: chapter('late', ${a + 2}, ${a + 3}) was called after its script finished loading: chapter() must be called while the chapter's script loads (at the top level of its IIFE), not later`]);
+    expect(lateBeside).toEqual([]);
     // cancelled, the check stops and says so
     const ctrl = new AbortController();
     const cancelled = check(good, { signal: ctrl.signal });

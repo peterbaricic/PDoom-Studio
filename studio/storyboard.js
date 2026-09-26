@@ -10,18 +10,25 @@ export const CHAPTER_WINDOWS = [[0, 23], [23, 38.5], [38.5, 59], [59, 73], [73, 
 // registration, for render.mjs --check run by hand): a chapter file may register only inside its own window (as many
 // sub-windows as it likes), shared.js anywhere (its hash is in every key), and nothing else at all. The song ends
 // inside the last window, so a registration may run past its end (the Original's finale ends at DUR + 1). Another
-// file's mistakes never fail a job about a different file: Claude can't change them. The exception is a registration
-// made after the scripts loaded (owner null: the page knows only which script is loading), which the engine never
-// draws: it's reported in every check, since which file made it can't be told, and the job's own is the likeliest.
-// Returns the errors, one line each.
+// file's mistakes never fail a job about a different file: Claude can't change them. A registration made after its
+// script finished loading (a timer, say; owner null, and never drawn) is reported too. The engine names the script
+// its call came from when the call's stack shows one (lateFrom, see chapter() in src/timeline.js): then it's that
+// file's mistake alone, like any other. One it couldn't trace is reported in every check, since the job's own file is
+// the likeliest. Returns the errors, one line each.
 const chapterOfScript = owner => +(/^ch\/c0([1-9])[_.]/.exec(owner || '')?.[1] || 0);
 export function chapterWindowErrors(registrations, target = null) {
   const errors = [], eps = 1e-9, songEnd = CHAPTER_WINDOWS.at(-1)[1];
   const mine = target === 'shared' ? r => r.owner === 'shared.js' : target ? r => chapterOfScript(r.owner) === +target : () => true;
-  for (const { owner, name, start, end } of registrations.filter(r => r.owner == null || mine(r))) {
+  const counts = r => r.owner != null ? mine(r) : typeof r.lateFrom !== 'string' || target == null || mine({ owner: r.lateFrom });
+  const loadRule = "chapter() must be called while the chapter's script loads (at the top level of its IIFE), not later";
+  for (const { owner, name, start, end, lateFrom } of registrations.filter(counts)) {
     if (owner === 'shared.js') continue;
     const what = `chapter('${name}', ${start}, ${end})`, n = chapterOfScript(owner);
-    if (owner == null) { errors.push(`${what} was called after the scripts loaded: chapter() must be called while the chapter's script loads (at the top level of its IIFE), not later`); continue; }
+    if (owner == null) {
+      errors.push(typeof lateFrom === 'string' ? `${lateFrom}: ${what} was called after its script finished loading: ${loadRule}`
+        : `${what} was called after the scripts loaded: ${loadRule}`);
+      continue;
+    }
     if (!n) { errors.push(`${what} is called from ${owner}: only a chapter file (ch/c0<n>…js) or shared.js may call chapter()`); continue; }
     const [a, b] = CHAPTER_WINDOWS[n - 1];
     if (!(Number.isFinite(start) && Number.isFinite(end) && start < end)) errors.push(`${owner}: ${what} is not a window of time (start before end)`);

@@ -4,7 +4,9 @@
 // A shot function is called as fn(t, lt, dur): t = song time, lt = t - t0, dur = shot length. It paints the whole frame
 // (backgrounds included) and must be a pure function of t: frames render in parallel and out of order.
 // Each registration remembers the script that made it (owner: its path, as src/loader.js names it; null for one made
-// by anything but a version script as it loads).
+// by anything but a version script as it loads). A call made after its script finished loading (from a timer, say) has
+// no owner and is never drawn; lateFrom names the version script its stack shows it came from (null if none), so the
+// studio's check can tell whose mistake it is.
 //
 // The song is cut into nine fixed windows, CH_WINDOWS (the same as studio/storyboard.js's CHAPTER_WINDOWS, which a test
 // holds them to), and the studio caches frames per window, keyed by that window's chapter file(s) and shared.js. So
@@ -15,10 +17,23 @@
 
 const CH = [];
 let CH_DRAWN = null;
+const CH_Error = Error;   // taken before any version code runs (it could replace Error)
 const CH_WINDOWS = [[0, 23], [23, 38.5], [38.5, 59], [59, 73], [73, 95.4], [95.4, 109.4], [109.4, 123.5], [123.5, 140.5], [140.5, 156.6]];
 function chapter(name, start, end, shots) {
-  CH.push({ name, start, end, shots, owner: document.currentScript?.dataset.path ?? null });
+  const owner = document.currentScript?.dataset.path ?? null;
+  CH.push({ name, start, end, shots, owner, lateFrom: owner == null ? lateCaller() : null });
   CH.sort((a, b) => a.start - b.start);
+}
+// The version script a call's stack goes through, innermost first (this file's own frames name no version script).
+function lateCaller() {
+  const paths = window.SCRIPT_PATHS;
+  if (!(paths instanceof Map)) return null;
+  for (const [url] of String(new CH_Error().stack).matchAll(/https?:\/\/[^\s()]+/g)) {
+    let path;
+    try { path = new URL(url.replace(/(?::\d+){1,2}$/, '')).pathname; } catch { continue; }
+    if (paths.has(path)) return paths.get(path);
+  }
+  return null;
 }
 // The window (1..9) t falls in; before the song, the first; from its end on, the last.
 function windowAt(t) {

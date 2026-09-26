@@ -195,8 +195,11 @@ A frame at time `t` is fully determined by the engine, the options, `shared.js` 
   whose windows a test ties to the studio's). A chapter reaching into a neighbour's window is never drawn there.
   - The studio's check (`render.mjs --check --target=<n|shared>`) holds only the job's own file to its window.
     `shared.js` may register anywhere.
-  - A `chapter()` call made after the scripts loaded has no owner file, is never drawn, and is reported by every
-    check.
+  - A `chapter()` call made after its script finished loading (from a timer, say) has no owner file and is never
+    drawn. The check sees such a call only if it's made before the check reads the registrations (`CH`) after load.
+    - The engine names the version script the call's stack came from (`lateFrom`, via the URLs `src/loader.js`
+      loaded each script from). That file's own check then fails, and no other.
+    - A call it can't trace fails every check.
   - The pool keeps a tripwire: a frame drawn by any other file breaks for a while instead of being cached.
 
 ### Snapshots and content-addressed code

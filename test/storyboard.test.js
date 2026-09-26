@@ -67,6 +67,14 @@ test('chapter() registrations must stay inside their own chapter\'s window', () 
   expect(chapterWindowErrors(mixed, 'shared')).toEqual([late]);
   expect(chapterWindowErrors(mixed, 1)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)", late]);
   expect(chapterWindowErrors(mixed)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)", late]);   // by hand, everything
+  // one the engine could trace (its call's stack names a version script: lateFrom) is that file's business alone
+  const traced = [reg('ch/c03.js', 38.5, 59), { ...reg(null, 25, 30, 'later'), lateFrom: 'ch/c02_tent.js' }];
+  const lateTwo = "ch/c02_tent.js: chapter('later', 25, 30) was called after its script finished loading: chapter() must be called while the chapter's script loads (at the top level of its IIFE), not later";
+  expect(chapterWindowErrors(traced, 3)).toEqual([]);
+  expect(chapterWindowErrors(traced, 'shared')).toEqual([]);
+  expect(chapterWindowErrors(traced, 2)).toEqual([lateTwo]);
+  expect(chapterWindowErrors(traced)).toEqual([lateTwo]);
+  expect(chapterWindowErrors([{ ...reg(null, 0, 1), lateFrom: 'shared.js' }], 'shared')).toHaveLength(1);
 });
 
 // The engine draws each window only with its own chapter's registrations (chapterAt in src/timeline.js), by windows it

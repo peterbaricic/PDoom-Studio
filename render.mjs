@@ -183,7 +183,8 @@ if (args.check) {
   const errors = [], ts = times(args.check).filter(Number.isFinite);
   const page = await openPage('', errors).catch(e => { errors.push(e.message); return null; });
   if (page && !errors.length) {
-    const registrations = await page.evaluate(() => CH.map(c => ({ owner: typeof c.owner === 'string' ? c.owner : null, name: String(c.name), start: +c.start, end: +c.end })))
+    const registrations = await page.evaluate(() => CH.map(c => ({ owner: typeof c.owner === 'string' ? c.owner : null,
+      lateFrom: typeof c.lateFrom === 'string' ? c.lateFrom : null, name: String(c.name), start: +c.start, end: +c.end })))
       .catch(e => { errors.push(e.message); return []; });
     errors.push(...chapterWindowErrors(registrations, args.target ?? null));
   }
