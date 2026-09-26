@@ -158,7 +158,7 @@ slowTest.concurrent('the network lockdown leaves the picture as it was: stills m
   expect(r.code).toBe(0);
   const db = openDb(join(tempDir(), 'user.db'), { defaultPath: defaultDbPath });
   const srv = serve({ db, root, data: tempDir(), token: 't', events: createEvents(), port: 0 });
-  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
+  const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, pipe: true, args: gpuArgs() });
   try {
     const page = await plain.newPage();
     await page.goto(`${srv.url}/studio.html?render&painter=${PAINTER_SECRET}&v=original`);

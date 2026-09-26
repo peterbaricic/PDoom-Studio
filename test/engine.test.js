@@ -16,7 +16,7 @@ const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
 // one test that needs each.
 let db, srv, devSrv;
 const main = sharedBrowser(() => launchBrowser({ port: srv.port }));
-const plainBrowser = sharedBrowser(() => puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() }));
+const plainBrowser = sharedBrowser(() => puppeteer.launch({ executablePath: findBrowser(), headless: true, pipe: true, args: gpuArgs() }));
 beforeAll(async () => {
   db = openDb(':memory:', { defaultPath: tempDefaultDb() });
   srv = serve({ db, root, data, token: 't', events: createEvents(), port: 0 });
@@ -92,7 +92,7 @@ slowTest('the launched browser goes direct only to the studio port; everything e
 slowTest('behind the proxy, --host-resolver-rules still refuses to resolve any host outside the allow-list', async () => {
   // The proxy means Chrome never resolves a proxied host itself, so the rules can't be seen at work through the
   // launched browser; they're checked on their own here (and that launchBrowser passes them, below).
-  const bare = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: ['--host-resolver-rules=' + HOST_RESOLVER_RULES] });
+  const bare = await puppeteer.launch({ executablePath: findBrowser(), headless: true, pipe: true, args: ['--host-resolver-rules=' + HOST_RESOLVER_RULES] });
   try {
     const probe = await bare.newPage();
     await probe.goto('about:blank');
@@ -119,7 +119,7 @@ slowTest('a chapter cannot leak data through dns-prefetch/preconnect, under the 
     `const p = document.createElement('link'); p.rel = 'dns-prefetch'; p.href = '//${host}'; document.head.append(p);`,
     `const c = document.createElement('link'); c.rel = 'preconnect'; c.href = 'https://pc-${host}'; document.head.append(c);`,
   ].join('\n') }], { source: 'manual' });
-  const logged = await puppeteer.launch({ executablePath: findBrowser(), headless: true,
+  const logged = await puppeteer.launch({ executablePath: findBrowser(), headless: true, pipe: true,
     args: [...browserArgs({ port: srv.port }), `--log-net-log=${netlog}`, '--net-log-capture-mode=Everything'] });
   try {
     const { page, errors } = await open('v=dns-probe', logged);
@@ -267,4 +267,26 @@ slowTest('on a renderer host, every page but studio.html is inert: an opaque ori
     cap.stop();
   }
   expect(cap.hits).toEqual({});
+}, T);
+
+// Talking to Chrome over a pipe rather than a WebSocket, Chrome ends with the process that launched it, however that
+// ends: a studio (or render.mjs, or a test) killed with SIGKILL leaves no painting browser behind.
+slowTest('a browser from launchBrowser dies with the process that launched it, even on SIGKILL', async () => {
+  const script = join(tempDir('owner-'), 'owner.js');
+  writeFileSync(script, `import { launchBrowser } from ${JSON.stringify(join(root, 'studio/browser.js'))};
+const b = await launchBrowser({ port: 1 });
+console.log('chrome pid ' + b.process().pid);
+setInterval(() => {}, 1000);`);
+  const owner = Bun.spawn(['bun', script], { stdout: 'pipe', stderr: 'pipe' });
+  const reader = owner.stdout.getReader();
+  let out = '';
+  while (!/chrome pid (\d+)/.test(out)) { const { value, done } = await reader.read(); if (done) throw new Error('the owner exited: ' + out); out += new TextDecoder().decode(value); }
+  const chrome = +/chrome pid (\d+)/.exec(out)[1], alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  expect(alive(chrome)).toBe(true);
+  owner.kill('SIGKILL');
+  await owner.exited;
+  let gone = false;
+  for (const t0 = Date.now(); Date.now() - t0 < 10000 && !(gone = !alive(chrome)); ) await Bun.sleep(100);
+  if (!gone) process.kill(chrome, 'SIGKILL');   // (don't leave it behind when this fails)
+  expect(gone).toBe(true);
 }, T);

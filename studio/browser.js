@@ -81,7 +81,9 @@ export function isolationArgs(port) {
 export const browserArgs = ({ angle = ANGLE, port }) => [...gpuArgs(angle), ...isolationArgs(port)];
 
 // port: the studio server's port, the only one on this machine the browser may reach. Rejects (never exits) when
-// there's no browser to launch or it won't start.
+// there's no browser to launch or it won't start. pipe: puppeteer talks to Chrome over a pipe instead of a WebSocket,
+// so Chrome exits when the process that launched it does, however that ends (SIGKILL included): no painting browser
+// outlives its studio, render.mjs or test.
 export async function launchBrowser({ chrome, angle = ANGLE, fromEnv = true, port } = {}) {
-  return puppeteer.launch({ executablePath: findBrowser(chrome, { fromEnv }), headless: true, protocolTimeout: 0, args: browserArgs({ angle, port }) });
+  return puppeteer.launch({ executablePath: findBrowser(chrome, { fromEnv }), headless: true, pipe: true, protocolTimeout: 0, args: browserArgs({ angle, port }) });
 }
