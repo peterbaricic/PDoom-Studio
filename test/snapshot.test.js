@@ -71,6 +71,25 @@ test('blobBySha finds content in the user database and in an attached example da
   expect(blobBySha(db, sha256('never written anywhere'))).toBeNull();
 });
 
+test('blobBySha reads the examples database\'s revisions once, not on every miss, and again once a promote added some', () => {
+  const defaultPath = tempDefaultDb(), db2 = openDb(':memory:', { defaultPath });
+  const scans = [], query = db2.db.query.bind(db2.db);
+  db2.db.query = sql => { if (/^SELECT (id, )?content FROM def\.revisions$/.test(sql)) scans.push(sql); return query(sql); };
+  const origSha = db2.fileSha('original', 'ch/c01_lab.js');
+  for (let k = 0; k < 5; k++) {
+    expect(blobBySha(db2, origSha)).toBe(db2.getFile('original', 'ch/c01_lab.js').content);
+    expect(blobBySha(db2, sha256(`never written ${k}`))).toBeNull();
+  }
+  expect(scans).toHaveLength(1);
+  // promoted, a version's files live in default.db only: found there, after one more read of it
+  db2.createVersion({ id: 'promoted' });
+  db2.writeFiles('promoted', [{ path: 'ch/c01.js', content: '// promoted content' }], { source: 'manual' });
+  db2.promoteVersion('promoted');
+  expect(blobBySha(db2, sha256('// promoted content'))).toBe('// promoted content');
+  expect(blobBySha(db2, sha256('still nowhere'))).toBeNull();
+  expect(scans).toHaveLength(2);
+});
+
 test('opening an older database backfills sha256 for its existing revisions', () => {
   // A user.db from before this column existed: same shape as db.js's SCHEMA, minus sha256.
   const path = join(tempDir(), 'old.db');

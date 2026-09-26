@@ -52,15 +52,25 @@ export function getSnapshot(id) {
 }
 
 // A file's content by hash, searching the revisions of both databases. The user's own are indexed (sha256 is
-// filled on write and backfilled at open); an example's may not have the column filled, or at all, so its rows are
-// hashed in memory instead — default.db holds only a handful of revisions, and this only runs for a hash the fast
-// path didn't already resolve.
+// filled on write and backfilled at open); an example's may not have the column filled, or at all, so default.db's
+// rows are hashed in memory instead, once: into a sha -> revision id map, kept per database and read again only when
+// a miss finds default.db holding other revisions than it was built from (a promote adds some).
+const defIndexes = new WeakMap();   // db -> { stamp, ids: Map<sha, revision id> }
 export function blobBySha(db, sha) {
   const own = db.db.query('SELECT content FROM revisions WHERE sha256 = $sha LIMIT 1').get({ sha });
   if (own) return own.content;
   if (!db.hasDef) return null;
-  for (const { content } of db.db.query('SELECT content FROM def.revisions').all()) {
-    if (sha256(content) === sha) return content;
-  }
-  return null;
+  const fromDef = index => {
+    const id = index?.ids.get(sha);
+    return id == null ? null : db.db.query('SELECT content FROM def.revisions WHERE id = $id').get({ id })?.content ?? null;
+  };
+  let index = defIndexes.get(db);
+  const hit = fromDef(index);
+  if (hit != null) return hit;
+  const { n, m } = db.db.query('SELECT count(*) AS n, max(id) AS m FROM def.revisions').get(), stamp = `${n}:${m}`;
+  if (index?.stamp === stamp) return null;
+  index = { stamp, ids: new Map() };
+  for (const { id, content } of db.db.query('SELECT id, content FROM def.revisions').all()) index.ids.set(sha256(content), id);
+  defIndexes.set(db, index);
+  return fromDef(index);
 }
