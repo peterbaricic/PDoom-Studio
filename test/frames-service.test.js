@@ -320,22 +320,33 @@ slowTest('a chapter that throws, one that never finishes and one whose script th
   expect((await frameOf('bad', 601)).file).toBeDefined();
 }, T);
 
-slowTest('a frame drawn by another chapter\'s registration (one reaching past its own window) breaks its segment for a while, with a clear error', async () => {
-  // chapter 2 reaches 1.5 s into chapter 3's window: the frames there are keyed under chapter 3, but chapter 2 draws them
+slowTest('a chapter reaching into its neighbour\'s window never draws there: the neighbour paints its own frames, nothing breaks, and it renders', async () => {
+  // chapter 1 registers up to 25 s, 2 s into chapter 2's window; shared.js registers over chapter 3's (allowed: its hash
+  // is in every segment key). Were a frame drawn by any file but its own window's chapter or shared.js, the pool's
+  // tripwire would break it: nothing broken means chapter 2 drew chapter 2's frames.
   db.createVersion({ id: 'overrun' });
   db.writeFiles('overrun', [
-    { path: 'ch/c02.js', content: fastChapter(2).replace(', 38.5, [[', ', 40, [[') },
+    { path: 'shared.js', content: "chapter('s', 40, 45, [[40, t => paint(rectPts(0, 0, W, H), { wash: PAL.rose, ink: null })]]);" },
+    { path: 'ch/c01.js', content: fastChapter(1).replace(', 23, [[', ', 25, [[') },
+    { path: 'ch/c02.js', content: fastChapter(2) },
     { path: 'ch/c03.js', content: fastChapter(3) },
   ], { source: 'manual' });
-  const into3 = 930;   // 38.75 s
-  const r = await frameOf('overrun', into3, 'prefetch');
-  expect(r.broken).toBe("frame 930 was drawn by ch/c02.js, not by chapter 3: a chapter() window reaches into chapter 3's 38.5–59 s");
-  expect(service.coverage('overrun').broken).toEqual([{ chapter: 3, error: r.broken, until: expect.any(Number) }]);
-  expect(existsSync(cache.path(keysOf('overrun')[3], into3))).toBe(false);   // never cached under chapter 3's key
-  // chapter 2's own frames are fine; chapter 3's past the overrun too, once the break has run out (4 s here)
-  expect((await frameOf('overrun', 600, 'prefetch')).file).toBeDefined();
-  await until(() => !service.frame('overrun', 1000, 'prefetch').broken, 10000);
-  expect((await frameOf('overrun', 1000, 'prefetch')).file).toBeDefined();
+  const results = await Promise.all([552, 560, 590, 959, 1000, 500].map(i => frameOf('overrun', i, 'prefetch')));
+  for (const r of results) expect(r.file).toBeDefined();
+  expect(service.coverage('overrun').broken).toEqual([]);
+  const { files, release } = await service.fillForRender('overrun', null, { from: 540, to: 600 });
+  expect(files).toHaveLength(61);
+  release();
+}, T);
+
+slowTest('a frame reported as drawn by another chapter\'s file (the pool\'s tripwire) breaks its segment for a while, with a clear error', async () => {
+  // what the engine never does by itself (chapterAt): chapter 5's shot claims chapter 4 drew the frame
+  db.createVersion({ id: 'tripwire' });
+  db.writeFiles('tripwire', [{ path: 'ch/c05.js', content: fastChapter(5, "CH_DRAWN = { owner: 'ch/c04.js' };") }], { source: 'manual' });
+  const r = await frameOf('tripwire', 1800, 'prefetch');
+  expect(r.broken).toBe("frame 1800 was drawn by ch/c04.js, not by chapter 5: a chapter() window reaches into chapter 5's 73–95.4 s");
+  expect(service.coverage('tripwire').broken).toEqual([{ chapter: 5, error: r.broken, until: expect.any(Number) }]);
+  expect(existsSync(cache.path(keysOf('tripwire')[5], 1800))).toBe(false);   // never cached under chapter 5's key
 }, T);
 
 slowTest('a chapter that never finishes painting holds one painter only: the other chapters\' frames are answered first', async () => {

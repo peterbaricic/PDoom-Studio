@@ -4,15 +4,30 @@
 // A shot function is called as fn(t, lt, dur): t = song time, lt = t - t0, dur = shot length. It paints the whole frame
 // (backgrounds included) and must be a pure function of t: frames render in parallel and out of order.
 // Each registration remembers the script that made it (owner: its path, as src/loader.js names it; null for one made
-// by anything but a version script as it loads), and CH_DRAWN the registration that drew the last frame (null: none
-// covered it). The studio caches frames per chapter window (studio/storyboard.js's CHAPTER_WINDOWS), so it checks that
-// a chapter registers only inside its own window, and that a frame was drawn by its own window's chapter.
+// by anything but a version script as it loads).
+//
+// The song is cut into nine fixed windows, CH_WINDOWS (the same as studio/storyboard.js's CHAPTER_WINDOWS, which a test
+// holds them to), and the studio caches frames per window, keyed by that window's chapter file(s) and shared.js. So
+// time t is drawn only by a registration of t's own window's chapter file, or of shared.js (both part of the key):
+// chapterAt(t). One reaching past its window into a neighbour's is simply not used there; within its own window it
+// draws as it always did (its own start, its own shot times). CH_DRAWN is the registration that drew the last frame
+// (null: none did, the placeholder), which the studio's painting pool checks.
 
 const CH = [];
 let CH_DRAWN = null;
+const CH_WINDOWS = [[0, 23], [23, 38.5], [38.5, 59], [59, 73], [73, 95.4], [95.4, 109.4], [109.4, 123.5], [123.5, 140.5], [140.5, 156.6]];
 function chapter(name, start, end, shots) {
   CH.push({ name, start, end, shots, owner: document.currentScript?.dataset.path ?? null });
   CH.sort((a, b) => a.start - b.start);
+}
+// The window (1..9) t falls in; before the song, the first; from its end on, the last.
+function windowAt(t) {
+  const k = CH_WINDOWS.findIndex(([a, b]) => t >= a && t < b);
+  return k >= 0 ? k + 1 : t < CH_WINDOWS[0][0] ? 1 : CH_WINDOWS.length;
+}
+function chapterAt(t) {
+  const n = windowAt(t), mine = new RegExp(`^ch/c0${n}[_.]`);
+  return CH.find(c => (c.owner === 'shared.js' || mine.test(c.owner || '')) && t >= c.start && t < c.end) || null;
 }
 
 // Chapter breaks that get a brush wipe (cover by the boundary, reveal after it).
@@ -35,9 +50,9 @@ function pdoomAt(t) {
 // with no karaoke, meter or wipes. t is then loop time, not song time.
 const LOOPS = {};
 function drawWorld(t) {
-  if (window.LOOP) { window.LOOP(t); flushLetters(); return; }
-  const ch = CH.find(c => t >= c.start && t < c.end);
-  CH_DRAWN = ch || null;
+  if (window.LOOP) { CH_DRAWN = null; window.LOOP(t); flushLetters(); return; }
+  const ch = chapterAt(t);
+  CH_DRAWN = ch;
   if (!ch) placeholder(t);
   else {
     let i = 0; while (i + 1 < ch.shots.length && t >= ch.shots[i + 1][0]) i++;

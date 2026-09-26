@@ -1,4 +1,6 @@
 import { test, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseStoryboard, chapterWindowErrors, CHAPTER_WINDOWS } from '../studio/storyboard.js';
 import { goodStoryboard } from './helpers.js';
 
@@ -50,9 +52,23 @@ test('chapter() registrations must stay inside their own chapter\'s window', () 
   // not a window at all
   expect(chapterWindowErrors([reg('ch/c04.js', 70, 60)])).toEqual(["ch/c04.js: chapter('x', 70, 60) is not a window of time (start before end)"]);
   expect(chapterWindowErrors([reg('ch/c04.js', NaN, 60)])).toHaveLength(1);
-  // registered by anything but a chapter file
-  expect(chapterWindowErrors([reg('shared.js', 0, 23), reg(null, 0, 23)])).toEqual([
-    "chapter('x', 0, 23) is called from shared.js: only a chapter file (ch/c0<n>…js) may call chapter()",
-    "chapter('x', 0, 23) is called from outside the version's files: only a chapter file (ch/c0<n>…js) may call chapter()",
+  // shared.js may register anywhere (its hash is in every segment key); nothing else may at all
+  expect(chapterWindowErrors([reg('shared.js', 0, 156.6), reg(null, 0, 23)])).toEqual([
+    "chapter('x', 0, 23) is called from outside the version's files: only a chapter file (ch/c0<n>…js) or shared.js may call chapter()",
   ]);
+  // a job is held to its own file only: another chapter's overrun (or a stray registration) is no business of chapter
+  // 3's job, nor of a shared.js job
+  const mixed = [reg('ch/c01.js', 0, 25), reg('ch/c03.js', 38.5, 59), reg(null, 5, 6), reg('shared.js', 50, 60)];
+  expect(chapterWindowErrors(mixed, 3)).toEqual([]);
+  expect(chapterWindowErrors(mixed, '3')).toEqual([]);
+  expect(chapterWindowErrors(mixed, 'shared')).toEqual([]);
+  expect(chapterWindowErrors(mixed, 1)).toEqual(["ch/c01.js: chapter('x', 0, 25) reaches outside chapter 1's window (0–23 s)"]);
+  expect(chapterWindowErrors(mixed)).toHaveLength(2);   // by hand, everything
+});
+
+// The engine draws each window only with its own chapter's registrations (chapterAt in src/timeline.js), by windows it
+// keeps itself: they must be the studio's.
+test('the engine\'s chapter windows are the studio\'s', () => {
+  const src = readFileSync(join(import.meta.dir, '../src/timeline.js'), 'utf8');
+  expect(JSON.parse(/const CH_WINDOWS = (\[.*\]);/.exec(src)[1])).toEqual(CHAPTER_WINDOWS);
 });

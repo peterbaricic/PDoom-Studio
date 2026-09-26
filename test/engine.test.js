@@ -312,3 +312,21 @@ slowTest('openSealedPage waits for window.ready, not for the network to go idle'
     server.stop(true);
   }
 }, T);
+
+// chapterAt draws each window only with its own chapter's registrations (or shared.js's). The Original's chapters keep
+// to their windows, so for every frame of the song it picks exactly the registration the engine picked before (the
+// first covering t): its pictures can't have changed.
+slowTest('for the Original, chapterAt picks what the first covering registration was at every frame', async () => {
+  const { page, errors } = await open('v=original');
+  const differ = await page.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < 3759; i++) {
+      const t = i / 24, before = CH.find(c => t >= c.start && t < c.end) || null;
+      if (chapterAt(t) !== before || !before) out.push(i);
+    }
+    return out;
+  });
+  expect(differ).toEqual([]);
+  expect(errors).toEqual([]);
+  await page.close();
+}, T);

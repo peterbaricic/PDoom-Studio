@@ -294,13 +294,13 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       }
       if (typeof out?.url !== 'string' || !out.url.startsWith('data:image/jpeg;base64,')) throw new Broken('the painting page returned no JPEG');
       const snap = getSnapshot(snapshotId) || { options: {}, files: {} };
-      // The frame is keyed by its window's chapter: drawn by another chapter's registration (one reaching past its
-      // own window), it would change with that chapter's code, not this key's. Not this chapter's fault, so the break
-      // lasts brokenTtlMs: fixing the other chapter doesn't change this key. (Drawn by nothing, it's the engine's
-      // placeholder, which is this key's too.)
+      // The frame is keyed by its window's chapter and shared.js, and the engine draws a window only with those
+      // (chapterAt in src/timeline.js), so this never happens: a tripwire. Drawn by any other file, the frame would
+      // change with that file's code, not this key's: it's broken for brokenTtlMs (not for good: the fault may be
+      // another file's, which doesn't change this key). Drawn by nothing, it's the engine's placeholder, this key's too.
       if (out.drawnBy) {
         const owner = typeof out.drawnBy.owner === 'string' ? out.drawnBy.owner : null;
-        if (!chapterPaths(snap.files, n).includes(owner)) {
+        if (owner !== 'shared.js' && !chapterPaths(snap.files, n).includes(owner)) {
           const [a, b] = CHAPTER_WINDOWS[n - 1];
           throw new Broken(`frame ${frame} was drawn by ${owner || 'code outside the version\'s chapter files'}, not by chapter ${n}: `
             + `a chapter() window reaches into chapter ${n}'s ${a}–${b} s`, Date.now() + brokenTtlMs);

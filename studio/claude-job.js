@@ -41,7 +41,9 @@ export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kin
     times = [a + .3, (a + b) / 2, b - .3].map(t => t.toFixed(2)).join(',');
     thumb = join(data, '.studio/thumbs', versionId, `c0${chapter}.jpg`);
   }
-  const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, ...(baseUrl ? [`--base=${baseUrl}`] : []),
+  // --target: only the job's own file is held to the chapter-window rule (another file's mistakes aren't Claude's to fix)
+  const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, `--target=${kind === 'chapter' ? chapter : 'shared'}`,
+    ...(baseUrl ? [`--base=${baseUrl}`] : []),
     ...(thumb ? [`--out=${thumb}`, '--cols=3', '--w=320'] : [])];
   // (--base: through this studio, whose painter secret it needs; see studio/frames/page.js)
   const p = Bun.spawn(argv, { cwd: root, env: { ...process.env, STUDIO_PAINTER_SECRET: PAINTER_SECRET }, stdout: 'ignore', stderr: 'pipe' });

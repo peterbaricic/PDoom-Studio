@@ -17,7 +17,7 @@ Chapters live in a version, not in the repository: each chapter is one file, `ch
 })();
 ```
 
-- `chapter(name, start, end, shots)` registers the chapter. A shot fn is called as `fn(t, lt, dur)` (song time, time since shot start, shot length) and must paint the **entire frame**, background included. Cuts land on each shot's start time. Call it only from the chapter's own file, and only for times inside that chapter's window (several calls for parts of it are fine): the studio caches frames per chapter window, and its check refuses a chapter whose `chapter()` reaches into a neighbour's.
+- `chapter(name, start, end, shots)` registers the chapter. A shot fn is called as `fn(t, lt, dur)` (song time, time since shot start, shot length) and must paint the **entire frame**, background included. Cuts land on each shot's start time. Call it only from the chapter's own file, and only for times inside that chapter's window (several calls for parts of it are fine): the engine draws each window only with its own chapter's registrations, so anything reaching into a neighbour's window is never shown there, and the studio's check refuses it.
 - **Frames render in parallel and out of order.** Every shot must be a pure function of `t`: no state that carries between frames, and no `Math.random()`. Use `hash(i)` for stable per-object randomness and `jit(a)` for hand-drawn jitter. `jit` is reseeded 12×/s, which makes the linework "boil" like hand-drawn animation, and that's wanted.
 - Only edit your own chapter file. If a shared helper is missing, write it privately inside your IIFE. If you find a real bug in a shared file, report it; don't edit it. Shared files: core.js, clawd.js, cast.js, props.js, timeline.js, lyrics.js, studio.html, render.mjs.
 

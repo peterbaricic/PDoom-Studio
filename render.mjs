@@ -176,19 +176,20 @@ const writeSheet = async (page, ts, out) => {
 };
 
 if (args.check) {
-  // Validation for studio jobs: the version must load without errors, every chapter() registration must lie inside its
-  // own chapter's window (see chapterWindowErrors), and each time must be covered by a chapter and paint within 20 s
-  // without throwing.
+  // Validation for studio jobs: the version must load without errors, the job's own file's chapter() registrations must
+  // lie inside its chapter's window (--target=<n> or --target=shared names it; without one, every file is held to it:
+  // see chapterWindowErrors), and each time must be covered by a chapter and paint within 20 s without throwing.
   // --check=load only loads the version (used for shared.js, which covers no time of its own).
   const errors = [], ts = times(args.check).filter(Number.isFinite);
   const page = await openPage('', errors).catch(e => { errors.push(e.message); return null; });
   if (page && !errors.length) {
     const registrations = await page.evaluate(() => CH.map(c => ({ owner: typeof c.owner === 'string' ? c.owner : null, name: String(c.name), start: +c.start, end: +c.end })))
       .catch(e => { errors.push(e.message); return []; });
-    errors.push(...chapterWindowErrors(registrations));
+    errors.push(...chapterWindowErrors(registrations, args.target ?? null));
   }
   for (const t of (page && !errors.length) ? ts : []) {
-    const covered = await page.evaluate(t => CH.some(c => t >= c.start && t < c.end), t).catch(e => { errors.push(e.message); return null; });
+    // (as the engine draws it: by t's own window's chapter or shared.js, see chapterAt in src/timeline.js)
+    const covered = await page.evaluate(t => !!chapterAt(t), t).catch(e => { errors.push(e.message); return null; });
     if (covered === null) continue;
     if (!covered) { errors.push(`no chapter covers t=${t}`); continue; }
     const slow = new Promise((_, bad) => setTimeout(() => bad(new Error(`painting t=${t} took over 20 s`)), 20000));
