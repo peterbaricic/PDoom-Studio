@@ -744,13 +744,19 @@ test('coverage says when a break that runs out does (until), so the page can ask
   expect(svc.coverage('breaks').broken).toEqual([{ chapter: 2, error: 'painting frame 600 took over 20 s', until }, { chapter: 3, error: 'boom' }]);
 });
 
-test('under --dev, an engine edit changes every segment key, so frames of the old engine are never shown for the new', () => {
-  fastVersion('engine-dev');
+// A copy of the engine files (all a painting page loads from the repo), to edit without touching the repo's.
+function engineCopy() {
   const copy = tempDir('engine-');
   for (const p of ['studio.html', 'src', 'node_modules/p5/lib/p5.min.js', 'node_modules/p5.brush/dist/p5.brush.js', 'assets/fonts']) {
     mkdirSync(join(copy, p, '..'), { recursive: true });
     cpSync(join(root, p), join(copy, p), { recursive: true });
   }
+  return copy;
+}
+
+test('under --dev, an engine edit changes every segment key, so frames of the old engine are never shown for the new', () => {
+  fastVersion('engine-dev');
+  const copy = engineCopy();
   const fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 });
   const dev = createFrameService({ db, cache: fakeCache, pool: fakePool(fakeCache), events, root: copy, dev: true });
   const before = dev.coverage('engine-dev').segments;
@@ -759,6 +765,27 @@ test('under --dev, an engine edit changes every segment key, so frames of the ol
   for (let n = 1; n <= 9; n++) expect(after[n]).not.toBe(before[n]);
   // (outside --dev the engine is taken as fixed: see test/frames-keys.test.js)
 });
+
+slowTest('under --dev, a painting page opened before an engine edit is not used after it: the new engine is loaded', async () => {
+  const copy = engineCopy(), ownPort = freePort();
+  const ownSrv = serve({ db, root: copy, data, token, events, port: ownPort });
+  const painted = [];
+  const own = createPool({ port: ownPort, baseUrl: `http://localhost:${ownPort}`, painters: 1, onPainted: p => { painted.push(p.key); cache.put(p.key, p.frame, p.jpeg, p.deps); } });
+  const svc = createFrameService({ db, cache, pool: own, events, root: copy, dev: true });
+  const get = async i => { const r = svc.frame('engine-edit', i, 'prefetch'); return r.pending ? r.pending : r; };
+  fastVersion('engine-edit', { wipes: false, cornerMeter: false });
+  try {
+    expect((await get(24)).file).toBeDefined();
+    expect((await get(25)).file).toBeDefined();
+    expect(own.stats().loads).toBe(1);   // the same page, for the same snapshot and engine
+    appendFileSync(join(copy, 'src/timeline.js'), '\n// edited');
+    const r = await get(26);
+    expect(r.file).toBeDefined();
+    expect(own.stats().loads).toBe(2);   // loaded again, with the edited engine
+    expect(painted.at(-1)).toBe(svc.coverage('engine-edit').segments[1]);
+    expect(painted.at(-1)).not.toBe(painted[0]);
+  } finally { await own.close(); ownSrv.stop(); }
+}, T);
 
 test('a paint-ahead sweep stops once its lease runs out: nothing more is queued, and what was queued is withdrawn', async () => {
   fastVersion('lease-1');

@@ -54,7 +54,9 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
   const pageUrl = snapshotId => `${origin.origin}/studio.html?render&painter=${painterSecret}&record-cast&snapshot=${snapshotId}`;
-  const emptySlot = () => ({ page: null, snapshotId: null, without: '', chapterErrors: {}, loadReads: {} });
+  // engine: the engine hash the page's snapshot was requested under. Under --dev the engine may change while a page is
+  // open (studio/frames/keys.js): a page is used only for requests of its own engine, and reloaded for another.
+  const emptySlot = () => ({ page: null, snapshotId: null, engine: null, without: '', chapterErrors: {}, loadReads: {} });
   const slots = Array.from({ length: painters }, () => ({ ...emptySlot(), busy: false, used: 0 }));
   const jobs = new Map();            // `${key}:${frame}` -> { id, key, frame, waiters, state: 'queued' | 'painting', seq }
   const broken = new Map();          // segment key -> { error, until }
@@ -95,7 +97,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   // A request's result: { ok: true, depsHash }; { ok: false, broken: true, error, until?, snapshot? } (snapshot: the
   // whole snapshot failed to load, not this segment); { ok: false, unavailable: true, error } (the painting browser
   // didn't start: error says why); or { ok: false, error, superseded? | cancelled? } (ask again).
-  function request({ versionId, snapshotId, key, frame, prio = 'preview', currentShas = {}, signal, near = frame }) {
+  function request({ versionId, snapshotId, engine = null, key, frame, prio = 'preview', currentShas = {}, signal, near = frame }) {
     if (!PRIORITIES.includes(prio)) throw new Error(`unknown priority: ${prio}`);
     return new Promise(resolve => {
       if (closed) return resolve({ ok: false, error: 'the painting pool is closed' });
@@ -105,7 +107,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       if (b) return resolve(brokenResult(b.error, b.until));
       if (f) return resolve({ ...brokenResult(f.error, f.until), snapshot: true });
       if (signal?.aborted) return resolve({ ok: false, cancelled: true, error: 'cancelled' });
-      const w = { versionId, snapshotId, key, frame, prio: PRIORITIES.indexOf(prio), currentShas, signal, near, resolve };
+      const w = { versionId, snapshotId, engine, key, frame, prio: PRIORITIES.indexOf(prio), currentShas, signal, near, resolve };
       w.onAbort = () => cancel(w);
       signal?.addEventListener('abort', w.onAbort, { once: true });
       enqueue(w);
@@ -155,11 +157,12 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       if (!job) return;
       const w = leadOf(job);
       // A page that already has this snapshot, or else the one idle the longest (an empty one first).
-      const slot = free.find(s => s.page && s.snapshotId === w.snapshotId) || free.sort((a, b) => (!!a.page - !!b.page) || a.used - b.used)[0];
+      const holds = s => s.page && s.snapshotId === w.snapshotId && s.engine === w.engine;
+      const slot = free.find(holds) || free.sort((a, b) => (!!a.page - !!b.page) || a.used - b.used)[0];
       job.state = 'painting'; slot.busy = true;
       // A snapshot no page has loaded yet: its first load runs alone, so its other requests wait (nextJob skips them)
       // instead of each taking a page, all of them held for as long as a hanging chapter holds one.
-      const first = !(slot.page && slot.snapshotId === w.snapshotId) && !loaded.has(w.snapshotId);
+      const first = !holds(slot) && !loaded.has(w.snapshotId);
       if (first) firstLoads.add(w.snapshotId);
       paint(slot, job, w).finally(() => { if (first) firstLoads.delete(w.snapshotId); slot.busy = false; slot.used = Date.now(); pump(); });
     }
@@ -202,13 +205,13 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   const chaptersWithSha = (snap, sha) => [1, 2, 3, 4, 5, 6, 7, 8, 9].filter(n => sha && chapterPaths(snap.files, n).some(p => snap.files[p] === sha));
 
   // Loads the snapshot into the slot's page, leaving out the chapters in `without` (they hang while loading).
-  async function load(slot, snapshotId, without) {
+  async function load(slot, snapshotId, without, engine) {
     // (Already marked when pump() handed this paint a snapshot no page had loaded: then the mark lasts the whole paint.)
     const first = !loaded.has(snapshotId) && !firstLoads.has(snapshotId);
     if (first) firstLoads.add(snapshotId);
-    try { return await loadInto(slot, snapshotId, without); } finally { if (first) firstLoads.delete(snapshotId); }
+    try { return await loadInto(slot, snapshotId, without, engine); } finally { if (first) firstLoads.delete(snapshotId); }
   }
-  async function loadInto(slot, snapshotId, without) {
+  async function loadInto(slot, snapshotId, without, engine) {
     await closePage(slot);
     const b = await getBrowser();
     const snap = getSnapshot(snapshotId);
@@ -237,7 +240,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
         if (!chapters.length) throw new Error(`the version did not load: ${message}`);
         for (const n of chapters) chapterErrors[n] ??= message;
       }
-      Object.assign(slot, { page, snapshotId, without: [...without].sort().join(','), chapterErrors, loadReads: state.loadReads || {} });
+      Object.assign(slot, { page, snapshotId, engine, without: [...without].sort().join(','), chapterErrors, loadReads: state.loadReads || {} });
       loaded.add(snapshotId);
       if (loaded.size > 1000) loaded.delete(loaded.values().next().value);
       // A crashed renderer: the slot starts over with a fresh page.
@@ -264,8 +267,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       for (;;) {
         const without = hungIn(snapshotId), h = without.get(n);
         if (h) throw new Broken(h.error, h.until);
-        if (slot.page && slot.snapshotId === snapshotId && slot.without === [...without.keys()].sort().join(',')) break;
-        try { await load(slot, snapshotId, new Set(without.keys())); break; }
+        if (slot.page && slot.snapshotId === snapshotId && slot.engine === w.engine && slot.without === [...without.keys()].sort().join(',')) break;
+        try { await load(slot, snapshotId, new Set(without.keys()), w.engine); break; }
         catch (e) {
           if (!(e instanceof Hung)) throw e;
           if (!hung.has(snapshotId)) hung.set(snapshotId, new Map());

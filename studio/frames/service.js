@@ -44,7 +44,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     const snap = snapshotOf(db, versionId);
     if (!snap) return null;
     rememberSnapshot(snap);
-    return { snap, keys: segmentKeys(snap, engine()), shas: currentShas(snap) };
+    const e = engine();
+    return { snap, keys: segmentKeys(snap, e), shas: currentShas(snap), engine: e };
   };
 
   const dirty = new Set();
@@ -69,7 +70,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // superseded, cancelled or couldn't be painted (it's worth asking again).
   const paint = (versionId, cur, i, prio, { signal, near } = {}) => {
     const key = cur.keys[chapterOfFrame(i)];
-    return pool.request({ versionId, snapshotId: cur.snap.id, key, frame: i, prio, currentShas: cur.shas, signal, near }).then(r => {
+    return pool.request({ versionId, snapshotId: cur.snap.id, engine: cur.engine, key, frame: i, prio, currentShas: cur.shas, signal, near }).then(r => {
       if (r.unavailable) return { unavailable: r.error, key };
       if (r.broken) {
         (r.snapshot ? failedSnapshots : broken).set(r.snapshot ? cur.snap.id : key, { error: r.error, until: r.until ?? null });
