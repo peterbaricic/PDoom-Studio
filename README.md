@@ -33,93 +33,178 @@ The video took two generations, both in Claude Code:
 [`ANIMATION_GUIDE.md`](ANIMATION_GUIDE.md) was written by Opus to brief the subagents it ran in parallel.
 
 `STORYBOARD.md` (now kept in `studio/default.db` as part of the Original) was also written by Opus after the first generation, after being instructed to use P5 brushstrokes, make each scene visually interesting, and make every scene transition into the next.
+
 ## What's here
 
 | Path | What it is |
 |---|---|
-| [`src/`](src/) | Shared code: Clawd, the guest characters, props, lyrics and the timeline |
+| [`src/`](src/) | The engine: Clawd, the guest characters, props, lyrics, the timeline and the script loader |
 | [`studio.html`](studio.html) | The page every frame is painted in, using p5.js and p5.brush (with `--dev`, also a scrubber) |
-| [`render.mjs`](render.mjs) | Renders frames in headless Chromium and encodes the MP4 with ffmpeg |
-| [`studio/`](studio/) | The studio: server, database, jobs and the frame cache; its web UI is in [`studio/web/`](studio/web/) |
+| [`render.mjs`](render.mjs) | Paints frames in headless Chromium and encodes MP4s with ffmpeg, from the command line |
+| [`studio/`](studio/) | The studio's server: databases, Claude and render jobs, the painting pool and the frame cache |
+| [`studio/web/`](studio/web/) | The studio's web UI (React, TypeScript, Vite, Tailwind, shadcn/ui) |
 | [`studio/default.db`](studio/default.db) | Example versions, starting with the original video (its storyboard and chapters) |
 | [`assets/`](assets/) | The song, and the two fonts the video uses, bundled with their licenses |
-| [`ANIMATION_GUIDE.md`](ANIMATION_GUIDE.md) | Opus's style and code guide for its subagents |
+| [`ANIMATION_GUIDE.md`](ANIMATION_GUIDE.md) | Opus's style and code guide, which Claude still reads before writing a chapter |
+| [`test/`](test/) | Server, engine, renderer and end-to-end tests |
+| [`docs/superpowers/`](docs/superpowers/) | The design specs and implementation plans the studio was built from |
 
 ## The studio
 
-The studio is a local web app for making new versions of the video: same song, same characters, new story. It needs
-[Bun](https://bun.sh), ffmpeg, a Chromium-based browser (Chrome, Edge, Brave, or `bun run get-browser`), and
-[Claude Code](https://claude.com/claude-code) signed in, for creating versions.
+The studio is a local web app for making new versions of the video: same song, same characters, new story. You
+describe a concept, Claude plans nine chapters and writes the code for each, and you preview, revise and render the
+result, all on your own machine.
+
+### What you need
+
+- [Bun](https://bun.sh) (tested with 1.4.2)
+- ffmpeg, for final renders and thumbnails
+- A Chromium-based browser for painting frames: Chrome, Chromium, Edge or Brave, found in its usual place, or a
+  headless Chromium that `bun run get-browser` downloads into `.browsers/` (about 100 MB). Set `CHROME_PATH` to use
+  any other binary.
+- [Claude Code](https://claude.com/claude-code), signed in (`claude auth login`), to create and revise versions.
+  Watching, previewing and rendering existing versions works without it.
+
+On macOS, `brew install ffmpeg` and an installed Chrome are enough. On Linux, install ffmpeg and Chromium from your
+distribution (for example `sudo apt install ffmpeg chromium`), or use `bun run get-browser`.
+
+### Starting it
 
 ```bash
 bun install
 bun run studio          # then open http://localhost:8080/
 ```
 
-`bun run studio` builds the web UI (React, in `studio/web/`) whenever it has changed, then serves it. To work on the UI
-itself, `bun run dev` runs the studio server with `--dev` on port 8080 beside Vite's dev server: open
-http://localhost:5173/ for hot reloading. Only use it with test data, since `--dev` also accepts changes from that
-second origin and turns on the engine's scrubber (below).
+`bun run studio` (or `bun studio`) builds the web UI whenever its sources have changed, then serves it on port 8080;
+`--port=<n>` or `PORT` picks another port. Only one studio can run on the same `user.db` at a time. It listens only
+on your own machine.
 
-**Versions**: the sidebar lists the examples (read-only, marked ★) and your own versions. **New version** takes a
-title and a concept, and Claude drafts a storyboard (the plan for the nine chapters). Review it in the inspector, edit
-it or ask for changes, then approve it and Claude builds the chapters, three at a time, checking each one with real
-renders.
+### Making a version
 
-**The timeline workspace**: the song runs left to right as nine chapter blocks, each as wide as its chapter. A block
-shows when Claude is working on it, when it isn't written yet, and when its code is broken (with the error). Click a
-block to open that chapter in the inspector, where you can read its part of the storyboard, ask Claude to revise it,
-or restore an earlier revision. Drag along the track under the blocks to move the playhead. A chapter's thumbnail
-strip (three of its frames) shows in the inspector and faintly on its block, once it matches the chapter's current
-code; **Refresh thumbnails** paints every chapter's strip again.
+1. **New version** (in the sidebar) takes a title and a concept. Claude drafts a storyboard: the plan for the nine
+   chapters, each with its lines of the song, its shots and its transitions.
+2. **Review the storyboard** in the inspector on the right: read it, edit the text yourself, or ask Claude for
+   changes. You can also change the concept and have Claude redraft the whole storyboard, and switch the two engine
+   options: brush wipes between chapters, and the P(doom) meter in the corner.
+3. **Approve** it, and Claude writes the shared code first, then the nine chapters, up to three at a time. Every
+   chapter is checked by painting it in the sealed browser; if a check fails, Claude gets the errors and one more try.
+4. **Revise** any chapter later: click its block on the timeline, say what should change, and Claude rewrites it.
+   Every change, by Claude or by you, is kept as a revision, and **Restore** brings back an earlier one.
 
-**Previews**: the player above the timeline plays the version with the song. Chapter code never runs in your
-browser: the server paints every frame in its own sealed headless Chrome and sends it as a JPEG. **Play** waits until
-the rest can play without stopping; **Play now** starts with what is ready and pauses at the first gap. The shading on
-the timeline's track shows which frames are ready. If the studio can't start its painting browser (none installed, or
-`CHROME_PATH` pointing nowhere), a banner and the player say so, and it tries again every 30 seconds.
+Each Claude action has a model picker (the Claude Code default, Opus, Sonnet or Haiku). Claude's buttons are disabled,
+with the reason, while Claude Code is missing or signed out.
 
-**The frame cache**: painted frames are kept in `.studio/cache/frames/`, keyed by their content: the engine, the
-version's options, `shared.js` and the chapter's code. A frame is painted once and reused by previews, thumbnails and
-final renders; changing a chapter repaints only that chapter. The cache holds at most 5 GB (set `STUDIO_CACHE_GB` to
-change it) and drops the least recently used frames past that. The settings menu shows how full it is and can clear
-it. Renders from before the frame cache kept their frames in `.studio/frames/<version>/`; nothing uses those any
-more, and the studio never deletes them by itself: it says at start how much they hold, and clearing the cache
-deletes them too. `STUDIO_PAINTERS` sets how many pages paint at once (default 3, at most 8).
+The **jobs** indicator in the header opens a drawer with every job: its status, how long it ran, what Claude Code
+reported it cost, its full log, and Cancel or Retry.
 
-**Final render** paints whatever frames aren't cached yet and encodes the 1080p MP4 into `library/` (about 20 minutes
-from an empty cache).
+### The workspace
 
-**Library and watch**: the library shows every finished render. Watching one plays the video beside a walkthrough
-that follows playback, and how the version was made.
+- **The timeline**: the song runs left to right as nine chapter blocks, each as wide as its chapter. A block shows
+  when Claude is working on it, when it isn't written yet, and when its code is broken (with the error). Click a
+  block to open that chapter in the inspector; Escape goes back to the whole storyboard. Drag along the track under
+  the blocks to move the playhead. The lyrics run underneath.
+- **Previews**: the player above the timeline plays the version with the song (Space plays and pauses; there is a
+  full-screen button). Chapter code never runs in your browser: the server paints every frame in its own sealed
+  headless Chrome and sends it as a JPEG. **Play** waits until the rest can play without stopping, and shows how long
+  that will take; **Play now** starts with what is ready and pauses at the first gap. The shading on the track shows
+  which frames are ready. While you play, the server keeps painting ahead of the playhead; it stops shortly after you
+  pause or close the page.
+- **Thumbnails**: a chapter's strip (three of its frames) shows in the inspector and faintly on its block, once it
+  matches the chapter's current code. **Refresh thumbnails** paints them all again.
+
+### The frame cache
+
+Painted frames are kept in `.studio/cache/frames/`, keyed by their content: the engine, the version's options,
+`shared.js` and the chapter's code. A frame is painted once and reused by previews, thumbnails and final renders.
+Changing a chapter repaints only that chapter; changing the engine (anything in `src/`) repaints everything once.
+
+The cache holds at most 5 GB (`STUDIO_CACHE_GB`) and drops the least recently used frames past that. The settings
+menu in the header shows how full it is and can clear it. Renders from before the frame cache kept their frames in
+`.studio/frames/<version>/`; nothing uses those any more, and the studio never deletes them by itself: it says at
+start how much they hold, and clearing the cache deletes them too.
+
+### Final renders, the library and watching
+
+**Final render** (under the timeline, once all nine chapters are written) paints whatever frames aren't cached yet
+and encodes the full 1080p MP4 into `library/`. From an empty cache that takes a while (about 20 minutes here); from
+a warm one, mostly just the encode.
+
+**The library** shows every finished render, the latest per version first. **Watching** one plays the video beside a
+walkthrough that follows playback, and a "how it was made" section: the concept, the storyboard, the revisions and
+your notes to Claude, and what the Claude jobs cost.
+
+### The version menu
 
 The **⋯ menu** in the header acts on the version on screen:
 
 - **Remix** copies it (an example, or one of your own) into a new version of your own, which you can then edit freely.
+  Examples offer only Remix.
 - **Promote** moves one of your own versions into `studio/default.db`, where it becomes a read-only example for
   everyone once you commit that file.
-- **Delete** removes one of your own versions: its files, revisions, jobs and thumbnails. Its finished videos stay in
-  the library under the version's last title unless you tick **Also delete its finished videos**. A kept video is
-  detached from the version, so a new version that later takes the same id doesn't pick it up.
+- **Delete** removes one of your own versions after you type its title: its files, revisions, jobs and thumbnails.
+  Its finished videos stay in the library under the version's last title unless you tick **Also delete its finished
+  videos**. A kept video is detached from the version, so a new version that later takes the same id doesn't pick it
+  up.
 
-Everything you make lives in `user.db` (git-ignored: your versions, every revision, jobs), `library/` (the videos)
-and `.studio/` (work folders, thumbnails and the frame cache). Example versions, starting with the original video,
-its storyboard and chapters, live separately in [`studio/default.db`](studio/default.db), tracked in git and
-read-only to the studio. On first start, an existing `studio.db` from before this split is moved to `user.db`
-automatically. `STUDIO_DATA` moves all of these to another folder, and `USER_DB` and `DEFAULT_DB` pick other
-databases.
+### Where your work is kept
 
-The studio listens only on your machine, and Claude jobs can only write inside their own temporary work folder. Every
-change the studio accepts needs its own `Origin` and the token it puts in its page (a new one each time the server
-starts), so after a restart an open page asks you to reload it.
+| What | Where |
+|---|---|
+| Your versions, every revision, and all jobs with their logs | `user.db` (git-ignored) |
+| Finished videos and their posters | `library/` |
+| Claude's work folders, thumbnails and the frame cache | `.studio/` |
+| Example versions, starting with the original video | [`studio/default.db`](studio/default.db), tracked in git, read-only to the studio |
 
-**The engine's scrubber** is a tool for working on the engine, and only a server started with `--dev` (as by
-`bun run dev`) serves it: `http://localhost:8080/studio.html?v=<version>` sends you to `w0.localhost`, where a slider
-and Play paint the version live. Unlike everything else in the studio, it runs the version's code in your own browser,
-so only open it on versions you trust. It needs a browser that resolves `*.localhost`, such as Chrome or Firefox.
-Without `--dev`, studio.html is only served as a painting page, and only to a URL carrying the studio's painter
-secret (new on every start), so no other site can open one in your browser. For a sealed look at a version outside
-the studio, use `render.mjs --sheet` or `--clip` (below), which paint in their own locked-down headless browser.
+On first start, a `studio.db` from before the examples split is moved to `user.db` automatically. Its copy of the
+Original is dropped, since that now comes from `studio/default.db`; if you had edited it, it is kept as
+`original-edited` instead.
+
+### Settings
+
+| Variable | What it does | Default |
+|---|---|---|
+| `PORT` (or `--port=<n>`) | The studio's port | `8080` |
+| `STUDIO_DATA` | The folder for `user.db`, `library/` and `.studio/` | this project's folder |
+| `USER_DB` | Another user database | `$STUDIO_DATA/user.db` |
+| `DEFAULT_DB` | Another examples database | `studio/default.db` |
+| `STUDIO_CACHE_GB` | The frame cache's size limit, in GB | `5` |
+| `STUDIO_PAINTERS` | How many pages paint frames at once (1 to 8) | `3` |
+| `CHROME_PATH` | The browser that paints frames | found automatically |
+| `CLAUDE_BIN` | The Claude Code command | `claude` |
+
+### Safety
+
+The studio is built so that code written by Claude never runs in your own browser, and nothing it writes can reach
+the network:
+
+- Chapter code runs only in the studio's own headless Chrome, behind a dead proxy and strict content security
+  policies, on separate `w<n>.localhost` hosts that the UI never shares with.
+- Claude Code runs headless with only the permissions it needs: it can read the project, write only in its job's own
+  work folder, and run only the studio's render check. Web access and subagents are denied.
+- The server listens only on your machine. Every change needs the page's token (new each time the server starts, so
+  after a restart an open page asks you to reload it), and requests from other websites are refused.
+
+### Troubleshooting
+
+- **"Previews can't paint: …"** (a banner at the top): the studio can't find or start its painting browser. Install Chrome or Chromium, run
+  `bun run get-browser`, or set `CHROME_PATH`. It tries again every 30 seconds.
+- **Claude's buttons are disabled**: Claude Code is missing or signed out. Run `claude auth login`.
+- **"The studio server restarted — reload this page"**: the server was restarted since the page loaded.
+- **"ffmpeg not found"**: install ffmpeg; previews work without it, final renders and thumbnails don't.
+- **"another studio is already running on this database"** (when starting it): only one server can use a `user.db`. Stop the other one, or give this
+  one its own `STUDIO_DATA`.
+
+### Working on the studio itself
+
+`bun run dev` runs the studio server with `--dev` on port 8080 beside Vite's dev server: open http://localhost:5173/
+for hot reloading. Only use it with test data, since `--dev` also accepts changes from that second origin and turns
+on the engine's scrubber.
+
+**The engine's scrubber** is a tool for working on the engine, served only with `--dev`:
+`http://localhost:8080/studio.html?v=<version>` sends you to `w0.localhost`, where a slider and Play paint the version
+live. Unlike everything else in the studio, it runs the version's code in your own browser, so only open it on
+versions you trust. It needs a browser that resolves `*.localhost`, such as Chrome or Firefox. For a sealed look at a
+version outside the studio, use `render.mjs --sheet` or `--clip` (below).
 
 **Fonts**: the lettering uses [Permanent Marker](https://fonts.google.com/specimen/Permanent+Marker) (Apache License
 2.0) and [Shantell Sans](https://fonts.google.com/specimen/Shantell+Sans) at weight 800 (SIL Open Font License 1.1).
