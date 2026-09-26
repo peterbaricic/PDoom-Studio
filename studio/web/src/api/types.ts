@@ -136,4 +136,6 @@ export interface Song {
 export interface CacheInfo {
   usedBytes: number;
   capBytes: number;
+  // What the old renders' frame folders (<data>/.studio/frames/) still hold: unused, deleted by Clear cache too.
+  legacyBytes: number;
 }

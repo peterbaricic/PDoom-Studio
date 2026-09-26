@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb, EXAMPLE_REVISION_FLOOR } from '../studio/db.js';
@@ -40,6 +40,20 @@ test('starts, serves the examples database and marks unfinished jobs as interrup
     const job = (await (await fetch(url + '/api/jobs')).json()).find(j => j.id === jid);
     expect(job.status).toBe('interrupted');
   } finally { p.kill(); }
+}, { timeout: 30000 });
+
+test('says at start how much the old renders\' frame folders hold, and leaves them be', async () => {
+  const data = mkdtempSync(join(tmpdir(), 'srv-legacy-')), legacy = join(data, '.studio/frames');
+  mkdirSync(join(legacy, 'old'), { recursive: true });
+  writeFileSync(join(legacy, 'old/f00001.jpg'), Buffer.alloc(25e6));
+  const { p, out } = await startWith(isolatedEnv(data, { DEFAULT_DB: defaultDbPath }));
+  try {
+    expect(out).toContain(`0.03 GB of frames from old renders in ${legacy} (unused now; Settings → Clear cache deletes them).`);
+    expect(existsSync(join(legacy, 'old/f00001.jpg'))).toBe(true);
+  } finally { p.kill(); await p.exited; }
+  // none there: nothing said
+  const clean = await start(join(mkdtempSync(join(tmpdir(), 'srv-')), 'user.db'));
+  try { expect(clean.out).not.toContain('frames from old renders'); } finally { clean.p.kill(); await clean.p.exited; }
 }, { timeout: 30000 });
 
 test('refuses to start when DEFAULT_DB does not exist', async () => {

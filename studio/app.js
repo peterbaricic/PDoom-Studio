@@ -9,6 +9,7 @@ import { isValidPath } from './db.js';
 import { getSnapshot, blobBySha } from './snapshot.js';
 import { N, FPS, DURATION } from './frames/keys.js';
 import { PAINTER_SECRET } from './frames/page.js';
+import { legacyFrames } from './frames/cache.js';
 
 // Repo files anyone may load: the shared engine, the libraries, the song and the bundled fonts. Nothing else.
 const PUBLIC = [/^src\/[a-z0-9_]+\.js$/, /^node_modules\/p5\/lib\/[\w.-]+$/, /^node_modules\/p5\.brush\/dist\/[\w.-]+$/, /^assets\/pdoom\.mp3$/,
@@ -77,6 +78,8 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   const guard = makeGuard({ port: () => app.port, token, extraOrigins: dev ? ['http://localhost:5173'] : [] });
   const dirs = { web: join(root, 'studio/web/dist'), work: join(data, '.studio/work'),
     library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
+  const legacy = legacyFrames(data);
+  const cacheInfo = () => ({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes, legacyBytes: legacy.bytes() });
   // GET /api/song: the engine's fixed timing (studio/frames/keys.js) plus every lyric line, for the timeline and
   // lyrics track. src/lyrics.js is a plain script (no export — it's loaded as a <script> by studio.html/src/timeline.js
   // in the browser), so it's evaluated once here in its own Function scope to pull LY out of it; it's a trusted repo
@@ -197,12 +200,13 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       const c = frames.coverage(id);
       return c ? json(c) : error(404, 'no such version');
     }],
-    ['GET', /^\/api\/cache$/, req => onRenderer(req) || !frames ? error(404, 'not found')
-      : json({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes })],
+    // legacyBytes: what the old renders' frame folders still hold (see legacyFrames); clearing deletes those too.
+    ['GET', /^\/api\/cache$/, req => onRenderer(req) || !frames ? error(404, 'not found') : json(cacheInfo())],
     ['POST', /^\/api\/cache\/clear$/, req => {
       if (onRenderer(req) || !frames) return error(404, 'not found');
       frames.cache.clear();
-      return json({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes });
+      legacy.clear();
+      return json(cacheInfo());
     }],
 
     ['GET', /^\/api\/health$/, async () => {

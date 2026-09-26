@@ -15,7 +15,7 @@ import { createClaudeRunner } from './claude-job.js';
 import { createRenderRunner } from './render-job.js';
 import { serve } from './serve.js';
 import { acquireLock } from './lock.js';
-import { createCache } from './frames/cache.js';
+import { createCache, legacyFrames } from './frames/cache.js';
 import { createPool } from './frames/pool.js';
 import { createFrameService } from './frames/service.js';
 import { buildWebIfStale } from './build-web.js';
@@ -82,6 +82,9 @@ if (dev) {
   console.warn(`--dev: ${baseUrl}/studio.html?v=<version> is the engine's scrubber — the studio.html scrubber runs version code in your browser, outside the sealed painting browser.`);
 }
 // Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
+// The old renders' own frame folders aren't used any more, and aren't ours to delete unasked: said once, here.
+const legacy = legacyFrames(data), legacyBytes = legacy.bytes();
+if (legacyBytes) console.log(`${(legacyBytes / 1e9).toFixed(2)} GB of frames from old renders in ${legacy.dir} (unused now; Settings → Clear cache deletes them).`);
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
 const frames = createFrameService({ db, cache, pool, events, root, dev });

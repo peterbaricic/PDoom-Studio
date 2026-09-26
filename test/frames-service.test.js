@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { readFileSync, existsSync, rmSync, mkdirSync, cpSync, appendFileSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync, mkdirSync, cpSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { serve } from '../studio/serve.js';
@@ -787,6 +787,17 @@ test('a paint-ahead sweep stops when no studio page is left on the event stream'
   expect(fake.background()).toEqual([]);
 });
 
+test('the old renders\' frame folders are counted in /api/cache, and deleted only by clearing the cache', async () => {
+  const own = tempDir(), legacy = join(own, '.studio/frames');
+  for (const v of ['old-a', 'old-b']) { mkdirSync(join(legacy, v), { recursive: true }); writeFileSync(join(legacy, v, 'f00001.jpg'), Buffer.alloc(1000)); }
+  const app = createApp({ db, root, data: own, token, events, port, frames: createFrameService({ db, cache: createCache({ dir: join(own, '.studio/cache/frames'), capBytes: 1e12 }), pool, events, root }) });
+  const call = (path, init = {}) => app.fetch(new Request(`http://localhost:${port}${path}`, { ...init, headers: { host: `localhost:${port}`, origin: `http://localhost:${port}`, 'x-studio-token': token } }));
+  expect(await (await call('/api/cache')).json()).toEqual({ usedBytes: 0, capBytes: 1e12, legacyBytes: 2000 });
+  expect(existsSync(join(legacy, 'old-a/f00001.jpg'))).toBe(true);   // looking deletes nothing
+  expect(await (await call('/api/cache/clear', { method: 'POST' })).json()).toEqual({ usedBytes: 0, capBytes: 1e12, legacyBytes: 0 });
+  expect(existsSync(legacy)).toBe(false);
+});
+
 test('missing versions, chapters and frames are 404s', async () => {
   expect((await fetchT(`${srv.url}/api/frames/partial/1500.jpg`)).status).toBe(404);
   expect((await fetchT(`${srv.url}/api/frames/nope/10.jpg`)).status).toBe(404);
@@ -813,6 +824,6 @@ slowTest('clearing the cache needs the token', async () => {
   expect(info.capBytes).toBe(1e12);
   const res = await fetch(url, { method: 'POST', headers: { origin, 'x-studio-token': token } });
   expect(res.status).toBe(200);
-  expect(await res.json()).toEqual({ usedBytes: 0, capBytes: 1e12 });
+  expect(await res.json()).toEqual({ usedBytes: 0, capBytes: 1e12, legacyBytes: 0 });
   expect(service.coverage('tiny').ranges).toEqual([]);
 }, T);

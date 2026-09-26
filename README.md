@@ -80,7 +80,9 @@ the timeline's track shows which frames are ready.
 version's options, `shared.js` and the chapter's code. A frame is painted once and reused by previews, thumbnails and
 final renders; changing a chapter repaints only that chapter. The cache holds at most 5 GB (set `STUDIO_CACHE_GB` to
 change it) and drops the least recently used frames past that. The settings menu shows how full it is and can clear
-it. `STUDIO_PAINTERS` sets how many pages paint at once (default 3, at most 8).
+it. Renders from before the frame cache kept their frames in `.studio/frames/<version>/`; nothing uses those any
+more, and the studio never deletes them by itself: it says at start how much they hold, and clearing the cache
+deletes them too. `STUDIO_PAINTERS` sets how many pages paint at once (default 3, at most 8).
 
 **Final render** paints whatever frames aren't cached yet and encodes the 1080p MP4 into `library/` (about 20 minutes
 from an empty cache).

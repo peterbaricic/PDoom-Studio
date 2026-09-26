@@ -16,6 +16,25 @@ import { framesOfChapter, depsHash } from './keys.js';
 
 const KEY = /^[0-9a-f]{64}$/, FRAME = /^f(\d+)(?:-([0-9a-f]{64}))?\.jpg$/;
 
+// The frames the studio's renders used to keep per version, before this cache (<data>/.studio/frames/<version>/):
+// nothing reads them any more. They're never deleted on their own (they're the user's disk to reclaim, not ours to
+// take): the studio says at start how much they hold, and clearing the cache (Settings → Clear cache) deletes them.
+export function legacyFrames(data) {
+  const dir = join(data, '.studio/frames');
+  const sizeIn = d => {
+    let sum = 0;
+    let entries = [];
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return 0; }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) sum += sizeIn(p);
+      else try { sum += statSync(p).size; } catch {}
+    }
+    return sum;
+  };
+  return { dir, bytes: () => sizeIn(dir), clear: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 export function createCache({ dir, capBytes }) {
   mkdirSync(dir, { recursive: true });
   const indexFile = join(dir, 'cache.json');
