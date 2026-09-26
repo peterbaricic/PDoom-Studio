@@ -13,7 +13,7 @@ import { PRIORITIES } from './pool.js';
 const SWEEP_BATCH = 6;
 
 // dev (the server's --dev): the engine may be edited while the studio runs, so its hash is checked on every use.
-export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500, leaseMs = 45000, dev = false }) {
+export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500, leaseMs = 45000, streamGraceMs = 10000, dev = false }) {
   const engine = () => engineHash(root, { recheck: dev });
   // segment key -> { error, until }: broken for good (until null: the chapter's own error, which only a new key
   // clears) or until then (a timeout, or a snapshot that failed to load).
@@ -165,7 +165,8 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // or when a frame of it can't be painted (broken, superseded, the pool gone); the player re-aims it when it stalls.
   // A sweep is the whole rest of the song (minutes of GPU), so it's held on a lease: each paint-ahead call and each of
   // the version's preview or prefetch frame requests renews it, and it stops once leaseMs passes without either (the
-  // page went away, or stopped wanting it) or when no studio page is left on the event stream.
+  // page went away, or stopped wanting it) or once no studio page has been on the event stream for streamGraceMs (a
+  // page's stream reconnecting after a blip comes back well within that).
   // Progress shows as `frames` events, as for any paint. Returns { from, end }, or null for no such version.
   let sweep = null;   // the running sweep's token: { versionId, from, lease }
   const endSweep = token => { if (token && sweep === token) { clearTimeout(token.lease); sweep = null; } };
@@ -177,7 +178,14 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     token.lease.unref?.();
   };
   const renewSweep = versionId => { if (sweep?.versionId === versionId) renew(sweep); };
-  events?.onStreams?.(n => { if (!n) stopSweep(sweep); });
+  let unwatched = null;
+  events?.onStreams?.(n => {
+    clearTimeout(unwatched);
+    unwatched = null;
+    if (n) return;
+    unwatched = setTimeout(() => stopSweep(sweep), streamGraceMs);
+    unwatched.unref?.();
+  });
   function paintAhead(versionId, from) {
     let cur = current(versionId);
     if (!cur) return null;

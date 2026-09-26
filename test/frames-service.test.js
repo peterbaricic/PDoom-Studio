@@ -650,7 +650,7 @@ slowTest('a request held past the hold time is answered 202, to be asked again',
 }, T);
 
 test('without a painting browser the studio stays up: frame requests fail at once with the reason (503), and /api/health says why', async () => {
-  const down = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1, onPainted() {},
+  const down = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 1, onPainted() {}, find: () => process.execPath,
     launch: () => Promise.reject(new Error('Browser was not found at the configured executablePath (/nope/chrome)')) });
   const svc = createFrameService({ db, cache, pool: down, events, root });
   const app = createApp({ db, root, data, token, events, port, frames: svc });
@@ -824,19 +824,29 @@ test('a paint-ahead sweep goes on while it is renewed, by paint-ahead calls or t
   expect(fake.background()).toEqual([]);
 });
 
-test('a paint-ahead sweep stops when no studio page is left on the event stream', async () => {
+test('a paint-ahead sweep stops once no studio page has been on the event stream for a while, and outlasts a reconnect', async () => {
   fastVersion('lease-3');
   const ev = createEvents(), fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 }), fake = fakePool(fakeCache);
-  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root });
-  const tabs = [new AbortController(), new AbortController()];
-  for (const t of tabs) ev.stream(new Request('http://localhost/api/events', { signal: t.signal }));
+  const svc = createFrameService({ db, cache: fakeCache, pool: fake, events: ev, root, streamGraceMs: 150 });
+  const open = () => { const c = new AbortController(); ev.stream(new Request('http://localhost/api/events', { signal: c.signal })); return c; };
+  const tabs = [open(), open()];
   expect(ev.streamCount()).toBe(2);
   svc.paintAhead('lease-3', 0);
   tabs[0].abort();   // one page left: it goes on
   fake.paint(); await settled();
   expect(fake.background()).toHaveLength(6);
+  // the last page's stream drops and reconnects (a blip): it goes on
   tabs[1].abort();
   expect(ev.streamCount()).toBe(0);
+  await Bun.sleep(50);
+  const again = open();
+  await Bun.sleep(200);
+  expect(fake.background()).toHaveLength(6);
+  // gone for good: it stops once the grace has passed, not before
+  again.abort();
+  await Bun.sleep(50);
+  expect(fake.background()).toHaveLength(6);
+  await Bun.sleep(200);
   expect(fake.background()).toEqual([]);
 });
 
