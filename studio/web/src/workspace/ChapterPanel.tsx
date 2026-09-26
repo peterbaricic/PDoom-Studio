@@ -91,7 +91,7 @@ export function ChapterPanel({ versionId, manifest, jobs, chapter, storyboard, s
           variant="ghost"
           className="text-muted-foreground -ml-2 w-fit"
           disabled={thumbsBusy || refreshThumbs.isPending}
-          title={thumbsBusy ? 'The thumbnails are being painted' : 'Paint every chapter\'s thumbnails again'}
+          title={thumbsBusy ? 'The thumbnails are being painted' : "Paint every chapter's thumbnails again"}
           onClick={() => refreshThumbs.mutate()}
         >
           <RefreshCwIcon aria-hidden className={thumbsBusy ? 'animate-spin' : undefined} />

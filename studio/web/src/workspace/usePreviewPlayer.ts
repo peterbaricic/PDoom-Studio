@@ -38,9 +38,8 @@
 //
 // The server's own troubles: a 503 (no painting browser: none installed, a bad CHROME_PATH) is shown with its reason
 // in place of "Painting…", and until a frame comes again only frames the server has cached are asked for, plus one it
-// would have to paint every CANT_PAINT_RETRY_MS (the first the window lacks), to learn when it can again; a 403 for a
-// stale token (the studio
-// restarted since this page loaded) raises the reload banner (api/client.ts).
+// would have to paint every CANT_PAINT_RETRY_MS (the first the window lacks), to learn when it can again. A 403 for a
+// stale token (the studio restarted since this page loaded) raises the reload banner (api/client.ts).
 //
 // Coverage is the server's whole current cache for the version, so it can shrink (frames evicted to stay under the
 // cap, the cache cleared): frames this page fetched count as cached until then, and not once it has.
