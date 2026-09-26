@@ -1,6 +1,7 @@
 // HealthBanner.tsx: what's wrong with the studio's surroundings, above everything else. First, a server restart
 // since this page loaded (api/client.ts's restartedState, set by a 403 for a stale token): every mutation will fail
-// until the page reloads. Then /api/health: the Claude CLI missing or signed out, or ffmpeg missing.
+// until the page reloads. Then /api/health: the Claude CLI missing or signed out, ffmpeg missing, or no painting
+// browser for the previews (the server's reason: none found, a bad CHROME_PATH).
 import { useSyncExternalStore } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { TriangleAlertIcon } from 'lucide-react';
@@ -28,6 +29,7 @@ export function HealthBanner() {
   const problems = [
     claudeUnavailable(health),
     health && !health.ffmpeg ? 'ffmpeg not found: final renders will fail.' : null,
+    health?.painter && !health.painter.ok ? `Previews can't paint: ${health.painter.reason ?? 'the painting browser did not start'}` : null,
   ].filter((p): p is string => p != null);
 
   if (!restarted && !problems.length) return null;

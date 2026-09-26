@@ -17,7 +17,8 @@
 //     on a lease it lets lapse after about 45 s. Progress arrives as coverage (`frames` events). That's what brings
 //     "safe to play" closer. While playback waits for it (or plays towards frames not painted yet), it's re-aimed when a
 //     broken chapter clears, and when the coverage stops growing (the sweep ended early): after STALL_MS, then twice
-//     as long each time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop.
+//     as long each time, up to STALL_MAX_MS, so a server that can't paint isn't asked in a loop. The wait starts over
+//     at STALL_MS when the coverage grows, and when Play or a seek aims it afresh.
 //   - A seek cancels (AbortController) every request the new position doesn't need, and re-asks for the new playhead
 //     frame as a `preview` if it was on its way as `prefetch`: the server withdraws cancelled requests from its
 //     painting queue (Review Focus 3).
@@ -34,8 +35,16 @@
 // aren't asked for again until the key changes or the server stops reporting it broken, playback stops where it
 // starts, and the error is shown. A 404 (the server has no such chapter) makes the chapter unplayable, with the
 // server's reason, until the keys change.
+//
+// The server's own troubles: a 503 (no painting browser: none installed, a bad CHROME_PATH) is shown with its reason
+// in place of "Painting…", and until a frame comes again only frames the server has cached are asked for, plus the
+// playhead's every CANT_PAINT_RETRY_MS to learn when it can paint again; a 403 for a stale token (the studio
+// restarted since this page loaded) raises the reload banner (api/client.ts).
+//
+// Coverage is the server's whole current cache for the version, so it can shrink (frames evicted to stay under the
+// cap, the cache cleared): frames this page fetched count as cached until then, and not once it has.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, frameHeaders, frameUrl } from '@/api/client';
+import { api, frameHeaders, frameUrl, markRestarted } from '@/api/client';
 import type { Coverage, Song } from '@/api/types';
 
 export type PlayerState = 'paused' | 'waiting' | 'playing';
@@ -71,6 +80,8 @@ export interface PreviewPlayer {
   painting: boolean;
   // "Play now" was pressed and only waits for the playhead's frame (cached on the server) to reach the page.
   starting: boolean;
+  // Why the server can't paint frames right now (its painting browser didn't start), or null.
+  cantPaint: string | null;
   canvasRef: (el: HTMLCanvasElement | null) => void;
 }
 
@@ -85,6 +96,8 @@ const PAINT_AHEAD_DEBOUNCE_MS = 300;
 const STALL_MS = 5_000;
 const STALL_MAX_MS = 60_000;
 const RENEW_MS = 20_000; // well inside the server's ~45 s lease on a paint-ahead sweep
+const CANT_PAINT_RETRY_MS = 5_000; // the server itself tries its painting browser again every 30 s
+const RESTARTED_RETRY_MS = 60_000; // a stale token stays stale: only a reload helps
 
 interface Snapshot {
   state: PlayerState;
@@ -94,6 +107,7 @@ interface Snapshot {
   error: string | null;
   painting: boolean;
   starting: boolean;
+  cantPaint: string | null;
 }
 
 interface InFlight {
@@ -138,6 +152,7 @@ export class PreviewEngine {
   private lastAimAt = -Infinity; // paint-ahead was last sent
   private stallWait = STALL_MS;
   private brokenSig: string | null = null; // the coverage's broken chapters, to tell when they change
+  private cantPaint: string | null = null; // the server's reason, from a 503
   private running = false;
   private last: Snapshot | null = null;
 
@@ -244,11 +259,18 @@ export class PreviewEngine {
   // Whether the broken chapters changed (a chapter broke, or a break cleared).
   private applyCoverage(coverage: Coverage | undefined): boolean {
     if (!coverage) return false;
-    this.covered.fill(0);
+    const before = this.covered;
+    this.covered = new Uint8Array(this.frames);
     let count = 0;
     for (const [a, b] of coverage.ranges) {
       this.covered.fill(1, Math.max(0, a), Math.min(this.frames, b + 1));
       count += b - a + 1;
+    }
+    // Shrunk (frames evicted, the cache cleared): what this page fetched isn't necessarily cached any more either. A
+    // coverage always holds every frame the server had when it was taken, so only one taken before a fetch finished
+    // can miss that frame; the next event after it was painted has it again.
+    if (before.some((c, i) => c === 1 && this.covered[i] === 0)) {
+      for (const i of [...this.local]) if (!this.covered[i]) this.local.delete(i);
     }
     // A chapter the server no longer reports broken (a timeout's break expired, say) may be asked for again; one it
     // newly reports broken isn't waited on any longer.
@@ -385,6 +407,7 @@ export class PreviewEngine {
       error: ready ? this.blockedAt(this.ph) : null,
       painting: !(this.shown === this.ph && this.shownKey != null && this.shownKey === this.keyOf(this.ph)),
       starting: this.mode === 'waiting' && this.nowPending,
+      cantPaint: this.cantPaint,
     };
   }
 
@@ -399,7 +422,8 @@ export class PreviewEngine {
       last.aheadReady === next.aheadReady &&
       last.error === next.error &&
       last.painting === next.painting &&
-      last.starting === next.starting
+      last.starting === next.starting &&
+      last.cantPaint === next.cantPaint
     ) {
       return;
     }
@@ -420,6 +444,8 @@ export class PreviewEngine {
   private wanted(i: number) {
     if (this.inflight.has(i) || this.blockedAt(i) || !this.keyOf(i)) return false;
     if ((this.retryAt.get(i) ?? 0) > Date.now()) return false;
+    // the server can't paint: what it has cached still comes, and the playhead's frame asks whether it can again
+    if (this.cantPaint != null && !this.covered[i] && i !== this.ph) return false;
     const m = this.mismatched.get(i);
     return m === undefined || m !== this.keyOf(i);
   }
@@ -435,8 +461,10 @@ export class PreviewEngine {
   }
 
   // Re-aims the server's paint-ahead sweep at the playhead, once things settle (a scrub sends one, not dozens).
-  private aimPaintAhead() {
+  // `afresh`: Play or a seek aims it, so a stall is timed from the start again (not with the backed-off wait).
+  private aimPaintAhead(afresh = false) {
     if (!this.running || !this.frames || !this.keys) return;
+    if (afresh) this.stallWait = STALL_MS;
     if (this.aheadTimer) clearTimeout(this.aheadTimer);
     this.aheadTimer = setTimeout(() => {
       this.aheadTimer = null;
@@ -467,6 +495,7 @@ export class PreviewEngine {
       if (retryInMs) this.retryAt.set(i, Date.now() + retryInMs);
       return true;
     };
+    const errorOf = (res: Response): Promise<{ error?: string; reason?: string }> => res.json().catch(() => ({}));
     fetch(frameUrl(this.versionId, i, prio), { signal: ctrl.signal, headers: frameHeaders() })
       .then(async res => {
         if (!mine()) return;
@@ -474,6 +503,7 @@ export class PreviewEngine {
           const painted = keyOfEtag(res.headers.get('etag'));
           const blob = await res.blob();
           if (!settle()) return;
+          this.cantPaint = null;
           this.arrived(i, painted, blob);
         } else if (res.status === 409) {
           const error = await res
@@ -492,9 +522,20 @@ export class PreviewEngine {
           if (!settle()) return;
           this.unplayable.set(key, why || `chapter ${this.chapterOf[i]} isn't on the server`);
           this.mismatch(i);
+        } else if (res.status === 503) {
+          // no painting browser: nothing gets painted until the server's next try at starting one
+          const { error, reason } = await errorOf(res);
+          if (!settle(CANT_PAINT_RETRY_MS)) return;
+          this.cantPaint = reason || error || 'the studio cannot paint frames right now';
+        } else if (res.status === 403) {
+          const { error } = await errorOf(res);
+          if (!settle(RESTARTED_RETRY_MS)) return;
+          if (error?.includes('token')) markRestarted();
+        } else if (res.status === 202) {
+          // not painted within the server's hold time (so it can paint again); ask again, as Retry-After says
+          if (settle(1000)) this.cantPaint = null;
         } else {
-          // 202: not painted within the server's hold time; ask again, as Retry-After says
-          settle(res.status === 202 ? 1000 : 2000);
+          settle(2000);
         }
       })
       .catch(() => {
@@ -660,7 +701,7 @@ export class PreviewEngine {
     if (this.blockedAt(this.ph)) return this.notify();
     if (this.safeNow() && this.hasBlob(this.ph)) return this.startAudio();
     this.mode = 'waiting';
-    this.aimPaintAhead();
+    this.aimPaintAhead(true);
     this.pump();
     this.notify();
   };
@@ -702,7 +743,7 @@ export class PreviewEngine {
     // on its way as a prefetch: it's asked for again as a preview, which the server paints first
     for (const [k, f] of [...this.inflight]) if (k < i || k >= i + this.window() || (k === i && f.prio !== 'preview')) this.abort(k);
     this.trim();
-    if (this.wantsPainting()) this.aimPaintAhead();
+    if (this.wantsPainting()) this.aimPaintAhead(true);
     if (this.mode === 'playing') {
       if (this.blockedAt(i)) this.stopAt(i);
       else if (this.hasBlob(i)) this.audio.currentTime = i / this.fps;

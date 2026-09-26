@@ -35,6 +35,19 @@ describe('HealthBanner', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/ffmpeg not found/);
   });
 
+  test('says when previews can\'t be painted, with the server\'s reason', async () => {
+    mockApi({ 'GET /api/health': { ...healthy, painter: { ok: false, reason: 'no Chromium-based browser found (set CHROME_PATH)' } } });
+    renderInRouter(<HealthBanner />);
+    expect(await screen.findByRole('alert')).toHaveTextContent("Previews can't paint: no Chromium-based browser found (set CHROME_PATH)");
+  });
+
+  test('a server with no frame service (painter null) is not a problem', async () => {
+    mockApi({ 'GET /api/health': { ...healthy, painter: null } });
+    const { queryClient } = renderInRouter(<HealthBanner />);
+    await waitFor(() => expect(queryClient.getQueryData(['health'])).toBeDefined());
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   test('asks for a reload once a mutation is refused for a stale token', async () => {
     mockApi({
       'GET /api/health': healthy,

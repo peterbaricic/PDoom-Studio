@@ -18,6 +18,7 @@ function player(overrides: Partial<Player> = {}): Player {
     error: null,
     painting: false,
     starting: false,
+    cantPaint: null,
     canvasRef: vi.fn(),
     ...overrides,
   };
@@ -98,6 +99,14 @@ describe('PreviewPlayer', () => {
   test('shows the error when the playhead\'s chapter is broken', () => {
     render(<PreviewPlayer player={player({ error: 'Chapter 3 failed to paint: boom' })} duration={156.6} />);
     expect(screen.getByRole('alert')).toHaveTextContent('Chapter 3 failed to paint: boom');
+  });
+
+  test('while the playhead\'s frame is on its way it says "Painting…"; when the server can\'t paint, it says why instead', () => {
+    const { rerender } = render(<PreviewPlayer player={player({ painting: true })} duration={156.6} />);
+    expect(screen.getByText('Painting…')).toBeInTheDocument();
+    rerender(<PreviewPlayer player={player({ painting: true, cantPaint: 'no Chromium-based browser found' })} duration={156.6} />);
+    expect(screen.queryByText('Painting…')).toBeNull();
+    expect(screen.getByRole('status')).toHaveTextContent("Can't paint previews: no Chromium-based browser found");
   });
 
   test('full screen uses the Fullscreen API on the player', () => {

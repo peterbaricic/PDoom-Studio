@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { _resetRestartedForTests, restartedState } from '@/api/client';
 import type { Coverage, Song } from '@/api/types';
 import { usePreviewPlayer, type PreviewPlayerOptions } from './usePreviewPlayer';
 
@@ -110,6 +111,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  _resetRestartedForTests();
 });
 
 const flush = async (ms = 0) => {
@@ -295,10 +297,13 @@ describe('scheduling', () => {
     await flush(60_000); // nothing gets painted: re-aimed after about 5 s, then 10 s, then 20 s, and renewed 20 s after that
     expect(paintAhead.length - start).toBe(4);
     expect(paintAhead.slice(start).every(f => f === 0)).toBe(true);
-    // painting resumes: the clock starts again
+    // painting resumes: the wait goes back to 5 s (it had grown to 40 s)
+    await flush(1_000);
     p.update({ coverage: coverage([[0, 200]], keys('a')) });
-    await flush(4_000);
+    await flush(4_500);
     expect(paintAhead.length - start).toBe(4);
+    await flush(1_000);
+    expect(paintAhead.length - start).toBe(5);
     // everything is painted: it plays, and nothing more is asked for
     p.update({ coverage: coverage([[0, N - 1]], keys('a')) });
     await serveAll(keys('a'));
@@ -306,6 +311,26 @@ describe('scheduling', () => {
     const done = paintAhead.length;
     await flush(120_000);
     expect(paintAhead.length).toBe(done);
+  });
+
+  test.each([
+    ['a seek', (p: ReturnType<typeof mount>) => p.result.current.seek(20)],
+    ['Play again', (p: ReturnType<typeof mount>) => (p.result.current.play(), p.result.current.play())],
+  ])('%s re-aims a stalled paint-ahead, and its stall wait starts over at 5 s', async (_, reAim) => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush();
+    await serveAll(keys('a'));
+    act(() => p.result.current.play());
+    await flush(36_000); // aimed, then re-aimed after 5 s, 10 s and 20 s: the next wait would be 40 s
+    const before = paintAhead.length;
+    act(() => reAim(p));
+    expect(p.result.current.state).toBe('waiting');
+    await flush(1_000);
+    expect(paintAhead.length).toBe(before + 1);
+    await flush(3_500);
+    expect(paintAhead.length).toBe(before + 1);
+    await flush(1_500); // 5 s after it was aimed: stalled again
+    expect(paintAhead.length).toBe(before + 2);
   });
 
   test('paused, a stalled paint-ahead is left alone', async () => {
@@ -699,5 +724,65 @@ describe('safe to play', () => {
     await flush();
     // 41 frames still missing (3718..3758) at 2 frames/s
     expect(p.result.current.safeIn).toBeCloseTo(20.5, 1);
+  });
+});
+
+describe('the server\'s coverage shrinking (evicted, cleared)', () => {
+  test('frames fetched here that the server no longer has stop counting as cached, and "safe to play" falls back', async () => {
+    const p = mount({ initialTime: 3700 / 24, coverage: coverage([[3700, N - 1]], keys('a')) });
+    await flush();
+    await serveAll(keys('a')); // the paused window: 3700..3747
+    expect(p.result.current.safeIn).toBe(0);
+    // the cache was cleared (in another tab, say), and only the song's last frames painted again since
+    p.update({ coverage: coverage([[3748, N - 1]], keys('a')) });
+    await flush();
+    expect(p.result.current.safeIn).not.toBe(0);
+    expect(p.result.current.aheadReady).toBe(0);
+    act(() => p.result.current.play());
+    expect(p.result.current.state).toBe('waiting');
+    // painted again: it plays
+    p.update({ coverage: coverage([[3700, N - 1]], keys('a')) });
+    await flush();
+    expect(p.result.current.safeIn).toBe(0);
+    expect(p.result.current.state).toBe('playing');
+  });
+});
+
+describe('the server refusing frames', () => {
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+  test('a 403 for a stale token (the studio restarted) says the page needs a reload', async () => {
+    mount();
+    await flush();
+    answer(open()[0]!, json(403, { error: 'missing or wrong token' }));
+    await flush();
+    expect(restartedState.value).toBe(true);
+  });
+
+  test('a 403 for anything else does not', async () => {
+    mount();
+    await flush();
+    answer(open()[0]!, json(403, { error: 'cross-site requests are not allowed' }));
+    await flush();
+    expect(restartedState.value).toBe(false);
+  });
+
+  test('a 503 (no painting browser) shows the server\'s reason instead of "painting", asks only for the playhead\'s frame now and then, and clears once a frame comes', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    expect(p.result.current.cantPaint).toBeNull();
+    for (const r of open()) answer(r, json(503, { error: 'the studio cannot paint frames right now', reason: 'no Chromium-based browser found' }));
+    await flush();
+    expect(p.result.current.painting).toBe(true);
+    expect(p.result.current.cantPaint).toBe('no Chromium-based browser found');
+    expect(requests).toHaveLength(4); // not the rest of the window, which would only be refused too
+    await flush(4_000);
+    expect(requests).toHaveLength(4);
+    await flush(1_500);
+    expect(framesAsked().slice(4)).toEqual([0]);
+    answerFrame(0, 'a1');
+    await flush();
+    expect(p.result.current.cantPaint).toBeNull();
+    expect(open()).toHaveLength(4); // and the window is asked for again
   });
 });

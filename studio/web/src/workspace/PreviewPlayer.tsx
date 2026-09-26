@@ -35,7 +35,7 @@ const modalOpen = (el: EventTarget | null) =>
 export function PreviewPlayer({ player, duration, loadError }: PreviewPlayerProps) {
   const box = useRef<HTMLDivElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const { state, time, safeIn, aheadReady, painting, play, playNow, canvasRef } = player;
+  const { state, time, safeIn, aheadReady, painting, cantPaint, play, playNow, canvasRef } = player;
   const error = player.error ?? loadError ?? null;
 
   useEffect(() => {
@@ -83,12 +83,21 @@ export function PreviewPlayer({ player, duration, loadError }: PreviewPlayerProp
             <span className="font-mono whitespace-pre-wrap">{error}</span>
           </div>
         ) : (
-          painting && (
+          painting &&
+          (cantPaint ? (
+            // the server has no painting browser: waiting won't bring the frame, so say why instead
+            <div role="status" className="absolute top-3 right-3 left-3 flex items-start justify-end gap-1.5 text-xs">
+              <span className="flex items-start gap-1.5 rounded bg-black/70 px-2 py-1 text-amber-200">
+                <TriangleAlertIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+                {`Can't paint previews: ${cantPaint}`}
+              </span>
+            </div>
+          ) : (
             <div className="absolute top-3 right-3 flex items-center gap-1.5 rounded bg-black/70 px-2 py-1 text-xs text-white/80">
               <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
               Painting…
             </div>
-          )
+          ))
         )}
       </div>
       <div className="flex flex-wrap items-center gap-3 bg-black/90 px-3 py-2 text-sm text-white">
