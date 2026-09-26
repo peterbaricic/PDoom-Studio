@@ -37,10 +37,25 @@ export function limiter(max) {
 
 // One browser shared by the tests of a file that need the same launch flags: launched on first use (so a file whose
 // tests are all skipped never starts it), closed by closeBrowser in the file's afterAll. Tests take fresh pages of
-// it and close them; nothing is kept in a shared page.
+// it and close them; nothing is kept in a shared page. A launch that fails (Chrome under load, say), or a browser that
+// disconnects, is forgotten, so the next get() launches afresh instead of failing every later test of the file.
+// close() closes every browser it launched.
 export function sharedBrowser(launch) {
   let launched = null;
-  return { get: () => (launched ??= launch()), close: () => closeBrowser(launched) };
+  const all = [];
+  const get = () => {
+    if (launched) return launched;
+    const attempt = launched = Promise.resolve().then(launch).then(b => {
+      all.push(b);
+      b.once?.('disconnected', () => { if (launched === attempt) launched = null; });
+      return b;
+    }, e => {
+      if (launched === attempt) launched = null;
+      throw e;
+    });
+    return attempt;
+  };
+  return { get, close: async () => { await launched?.catch(() => null); await Promise.all(all.map(b => closeBrowser(b))); } };
 }
 
 export const goodStoryboard = () => [
