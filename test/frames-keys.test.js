@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { cpSync, mkdirSync, appendFileSync } from 'node:fs';
+import { cpSync, mkdirSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FPS, N, DURATION, frameRange, chapterOfFrame, framesOfChapter, engineHash, segmentKey, segmentKeys, currentShas, depsOf, depsHash } from '../studio/frames/keys.js';
 import { CHAPTER_WINDOWS } from '../studio/storyboard.js';
@@ -147,4 +147,16 @@ test('engineHash covers the engine files, whatever folder they are in, and chang
   const c = copyEngine();
   appendFileSync(join(c, 'assets/fonts/fonts.css'), ' ');
   expect(engineHash(c)).not.toBe(engineHash(a));
+});
+
+test('engineHash is worked out once per folder, unless asked to recheck (the server\'s --dev): then an engine edit changes it', () => {
+  const a = copyEngine(), before = engineHash(a);
+  appendFileSync(join(a, 'src/core.js'), ' ');
+  expect(engineHash(a)).toBe(before);   // memoised: outside --dev the engine doesn't change while the studio runs
+  const edited = engineHash(a, { recheck: true });
+  expect(edited).not.toBe(before);
+  expect(engineHash(a, { recheck: true })).toBe(edited);   // nothing changed since
+  expect(engineHash(a)).toBe(edited);
+  writeFileSync(join(a, 'src/extra.js'), '// a new engine script');
+  expect(engineHash(a, { recheck: true })).not.toBe(edited);
 });

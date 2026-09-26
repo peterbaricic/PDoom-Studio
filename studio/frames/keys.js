@@ -4,7 +4,7 @@
 // The one exception, CAST entries another chapter defined (the Original's curtain call), is tracked per frame as
 // dependencies (depsOf) next to the frame itself — see studio/frames/cache.js.
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { CHAPTER_WINDOWS } from '../storyboard.js';
 import { sha256, canonicalJson } from '../snapshot.js';
@@ -34,20 +34,26 @@ export const framesOfChapter = n => FRAMES_OF[n - 1];
 
 // The files that decide what the painting page draws, besides the version's own code: the page, the engine scripts,
 // the two libraries it loads and the bundled fonts. Hashed by path (relative to root) and content, so the same engine
-// in another folder hashes the same. Memoised per root: the engine doesn't change while the studio runs.
+// in another folder hashes the same. Memoised per root: the engine doesn't change while the studio runs, except
+// under --dev, where someone may be working on it: recheck then looks at the files' sizes and modification times on
+// every call (a stat each, no reading), and hashes them again when any changed, so frames of the old engine and the
+// new one never mix.
 const ENGINE_FILES = root => [
   'studio.html', 'node_modules/p5/lib/p5.min.js', 'node_modules/p5.brush/dist/p5.brush.js',
   ...readdirSync(join(root, 'src')).filter(f => f.endsWith('.js')).map(f => `src/${f}`),
   ...readdirSync(join(root, 'assets/fonts')).map(f => `assets/fonts/${f}`),
 ].sort();
-const engineHashes = new Map();
-export function engineHash(root) {
-  if (!engineHashes.has(root)) {
-    const h = createHash('sha256');
-    for (const p of ENGINE_FILES(root)) h.update(`${p}\0${createHash('sha256').update(readFileSync(join(root, p))).digest('hex')}\n`);
-    engineHashes.set(root, h.digest('hex'));
-  }
-  return engineHashes.get(root);
+const engineHashes = new Map();   // root -> { hash, stamp }
+const stampOf = (root, files) => files.map(p => { const s = statSync(join(root, p)); return `${p}:${s.size}:${s.mtimeMs}`; }).join('|');
+export function engineHash(root, { recheck = false } = {}) {
+  const known = engineHashes.get(root);
+  if (known && !recheck) return known.hash;
+  const files = ENGINE_FILES(root), stamp = stampOf(root, files);
+  if (known && known.stamp === stamp) return known.hash;
+  const h = createHash('sha256');
+  for (const p of files) h.update(`${p}\0${createHash('sha256').update(readFileSync(join(root, p))).digest('hex')}\n`);
+  engineHashes.set(root, { hash: h.digest('hex'), stamp });
+  return engineHashes.get(root).hash;
 }
 
 export const segmentKey = ({ engine, options, sharedSha, chapterSha }) =>

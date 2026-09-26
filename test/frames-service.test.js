@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from 'bun:test';
-import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync, mkdirSync, cpSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from '../studio/db.js';
 import { serve } from '../studio/serve.js';
@@ -716,6 +716,22 @@ test('coverage says when a break that runs out does (until), so the page can ask
   fake.answer(1000, { ok: false, broken: true, error: 'boom' });
   await Promise.all([slow, throws]);
   expect(svc.coverage('breaks').broken).toEqual([{ chapter: 2, error: 'painting frame 600 took over 20 s', until }, { chapter: 3, error: 'boom' }]);
+});
+
+test('under --dev, an engine edit changes every segment key, so frames of the old engine are never shown for the new', () => {
+  fastVersion('engine-dev');
+  const copy = tempDir('engine-');
+  for (const p of ['studio.html', 'src', 'node_modules/p5/lib/p5.min.js', 'node_modules/p5.brush/dist/p5.brush.js', 'assets/fonts']) {
+    mkdirSync(join(copy, p, '..'), { recursive: true });
+    cpSync(join(root, p), join(copy, p), { recursive: true });
+  }
+  const fakeCache = createCache({ dir: join(tempDir(), 'frames'), capBytes: 1e12 });
+  const dev = createFrameService({ db, cache: fakeCache, pool: fakePool(fakeCache), events, root: copy, dev: true });
+  const before = dev.coverage('engine-dev').segments;
+  appendFileSync(join(copy, 'src/timeline.js'), '\n// edited');
+  const after = dev.coverage('engine-dev').segments;
+  for (let n = 1; n <= 9; n++) expect(after[n]).not.toBe(before[n]);
+  // (outside --dev the engine is taken as fixed: see test/frames-keys.test.js)
 });
 
 test('a paint-ahead sweep stops once its lease runs out: nothing more is queued, and what was queued is withdrawn', async () => {

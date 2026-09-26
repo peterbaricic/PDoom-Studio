@@ -84,7 +84,7 @@ if (dev) {
 // Previews and final renders share one frame cache, painted by one sealed browser that talks only to this server.
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
 const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps) });
-const frames = createFrameService({ db, cache, pool, events, root });
+const frames = createFrameService({ db, cache, pool, events, root, dev });
 // STUDIO_TEST_SKIP_CHECK exists only for test/ui.test.js, whose fake Claude writes trivial chapters: its jobs import
 // without render.mjs's check (a Chrome of its own per job), which test/claude-job.test.js runs for real instead.
 const skipCheck = process.env.STUDIO_TEST_SKIP_CHECK ? { validate: async () => [] } : {};

@@ -12,8 +12,9 @@ import { PRIORITIES } from './pool.js';
 // done: the rest of a song is thousands of frames, and they don't all need to sit in the queue.
 const SWEEP_BATCH = 6;
 
-export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500, leaseMs = 45000 }) {
-  const engine = engineHash(root);
+// dev (the server's --dev): the engine may be edited while the studio runs, so its hash is checked on every use.
+export function createFrameService({ db, cache, pool, events, root, publishEveryMs = 500, leaseMs = 45000, dev = false }) {
+  const engine = () => engineHash(root, { recheck: dev });
   // segment key -> { error, until }: broken for good (until null: the chapter's own error, which only a new key
   // clears) or until then (a timeout, or a snapshot that failed to load).
   const broken = new Map();
@@ -43,7 +44,7 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     const snap = snapshotOf(db, versionId);
     if (!snap) return null;
     rememberSnapshot(snap);
-    return { snap, keys: segmentKeys(snap, engine), shas: currentShas(snap) };
+    return { snap, keys: segmentKeys(snap, engine()), shas: currentShas(snap) };
   };
 
   const dirty = new Set();
