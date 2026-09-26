@@ -37,8 +37,9 @@
 // server's reason, until the keys change.
 //
 // The server's own troubles: a 503 (no painting browser: none installed, a bad CHROME_PATH) is shown with its reason
-// in place of "Painting…", and until a frame comes again only frames the server has cached are asked for, plus the
-// playhead's every CANT_PAINT_RETRY_MS to learn when it can paint again; a 403 for a stale token (the studio
+// in place of "Painting…", and until a frame comes again only frames the server has cached are asked for, plus one it
+// would have to paint every CANT_PAINT_RETRY_MS (the first the window lacks), to learn when it can again; a 403 for a
+// stale token (the studio
 // restarted since this page loaded) raises the reload banner (api/client.ts).
 //
 // Coverage is the server's whole current cache for the version, so it can shrink (frames evicted to stay under the
@@ -153,6 +154,7 @@ export class PreviewEngine {
   private stallWait = STALL_MS;
   private brokenSig: string | null = null; // the coverage's broken chapters, to tell when they change
   private cantPaint: string | null = null; // the server's reason, from a 503
+  private nextProbeAt = 0; // while it can't paint: when to ask for a frame it would have to paint again
   private running = false;
   private last: Snapshot | null = null;
 
@@ -444,8 +446,6 @@ export class PreviewEngine {
   private wanted(i: number) {
     if (this.inflight.has(i) || this.blockedAt(i) || !this.keyOf(i)) return false;
     if ((this.retryAt.get(i) ?? 0) > Date.now()) return false;
-    // the server can't paint: what it has cached still comes, and the playhead's frame asks whether it can again
-    if (this.cantPaint != null && !this.covered[i] && i !== this.ph) return false;
     const m = this.mismatched.get(i);
     return m === undefined || m !== this.keyOf(i);
   }
@@ -456,7 +456,13 @@ export class PreviewEngine {
     for (const i of [...this.inflight.keys()]) if (i < this.ph) this.abort(i);
     const windowEnd = Math.min(this.endFrom(this.ph), this.ph + this.window());
     for (let i = this.ph; i < windowEnd && this.inflight.size < MAX_IN_FLIGHT; i++) {
-      if (!this.hasBlob(i) && this.wanted(i)) this.request(i);
+      if (this.hasBlob(i) || !this.wanted(i)) continue;
+      // the server can't paint: what it has cached still comes, and now and then one frame asks whether it can again
+      if (this.cantPaint != null && !this.covered[i]) {
+        if (Date.now() < this.nextProbeAt) continue;
+        this.nextProbeAt = Date.now() + CANT_PAINT_RETRY_MS;
+      }
+      this.request(i);
     }
   }
 
@@ -527,6 +533,7 @@ export class PreviewEngine {
           const { error, reason } = await errorOf(res);
           if (!settle(CANT_PAINT_RETRY_MS)) return;
           this.cantPaint = reason || error || 'the studio cannot paint frames right now';
+          this.nextProbeAt = Date.now() + CANT_PAINT_RETRY_MS;
         } else if (res.status === 403) {
           const { error } = await errorOf(res);
           if (!settle(RESTARTED_RETRY_MS)) return;

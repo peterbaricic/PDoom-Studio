@@ -271,6 +271,20 @@ describe('scheduling', () => {
     expect(paintAhead).toEqual([0, 0, 0]);
   });
 
+  test.each([
+    ['unmounted', (p: ReturnType<typeof mount>) => p.unmount()],
+    ['switched to another version', (p: ReturnType<typeof mount>) => p.update({ versionId: 'other' })],
+  ])('a player %s while waiting stops renewing its paint-ahead (the server lets the sweep lapse)', async (_, leave) => {
+    const p = mount({ initialTime: 0, coverage: coverage([[0, 100]], keys('a')) });
+    await flush();
+    act(() => p.result.current.play());
+    await flush(1_000);
+    expect(paintAhead).toEqual([0]);
+    act(() => leave(p));
+    await flush(120_000);
+    expect(paintAhead).toEqual([0]);
+  });
+
   test('while waiting, paint-ahead is re-aimed when a broken chapter clears', async () => {
     const segments = keys('a');
     const p = mount({ initialTime: 0, segmentKeys: segments, coverage: coverage([[0, 100]], segments, [{ chapter: 2, error: 'timed out' }]) });
@@ -784,5 +798,25 @@ describe('the server refusing frames', () => {
     await flush();
     expect(p.result.current.cantPaint).toBeNull();
     expect(open()).toHaveLength(4); // and the window is asked for again
+  });
+
+  test('with the playhead\'s frame already on screen, it still finds out when the server can paint again', async () => {
+    const p = mount({ initialTime: 0 });
+    await flush();
+    for (const i of [0, 1, 2, 3]) answerFrame(i, 'a1');
+    await flush();
+    expect(p.result.current.painting).toBe(false);
+    for (const r of open()) answer(r, json(503, { error: 'the studio cannot paint frames right now', reason: 'no browser' }));
+    await flush();
+    expect(p.result.current.cantPaint).toBe('no browser');
+    const asked = requests.length;
+    await flush(4_000);
+    expect(requests).toHaveLength(asked);
+    await flush(1_500);
+    expect(requests).toHaveLength(asked + 1); // one frame, to ask
+    answer(open()[0]!, frameResponse(open()[0]!.frame, 'a1'));
+    await flush();
+    expect(p.result.current.cantPaint).toBeNull();
+    expect(open()).toHaveLength(4);
   });
 });
