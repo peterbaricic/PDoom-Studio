@@ -1,6 +1,7 @@
 // app.js: every URL the studio answers. Pages and the shared engine come from the repo (root), version code from the
 // database, work folders and thumbnails from <data>/.studio/, finished videos from <data>/library/ (data defaults to root).
 import { readFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import { join, extname } from 'node:path';
 import { safeJoin, serveFile, json, error, makeGuard } from './http.js';
 import { versionManifest, workManifest } from './versions.js';
@@ -79,6 +80,9 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
   const dirs = { web: join(root, 'studio/web/dist'), work: join(data, '.studio/work'),
     library: join(data, 'library'), thumbs: join(data, '.studio/thumbs') };
   const legacy = legacyFrames(data);
+  // Compared in constant time, so how long a wrong guess takes says nothing about how much of it was right.
+  const secret = Buffer.from(painterSecret);
+  const isPainterSecret = s => { const b = Buffer.from(s ?? ''); return b.length === secret.length && timingSafeEqual(b, secret); };
   const cacheInfo = () => ({ usedBytes: frames.cache.usedBytes(), capBytes: frames.cache.capBytes, legacyBytes: legacy.bytes() });
   // GET /api/song: the engine's fixed timing (studio/frames/keys.js) plus every lyric line, for the timeline and
   // lyrics track. src/lyrics.js is a plain script (no export — it's loaded as a <script> by studio.html/src/timeline.js
@@ -130,7 +134,7 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
     // default, so chapter code never runs in the user's browser), and 404 otherwise, on either kind of host.
     ['GET', /^\/studio\.html$/, req => {
       const { search, searchParams } = new URL(req.url);
-      if (searchParams.has('render') ? searchParams.get('painter') !== painterSecret : !dev) return error(404, 'not found');
+      if (searchParams.has('render') ? !isPainterSecret(searchParams.get('painter')) : !dev) return error(404, 'not found');
       return onRenderer(req) ? file(req, root, 'studio.html', { 'content-security-policy': STUDIO_CSP })
         : Response.redirect(`http://w0.localhost:${app.port}/studio.html${search}`, 302);
     }],
