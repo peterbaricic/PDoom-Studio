@@ -330,7 +330,7 @@ slowTest('a frame drawn by another chapter\'s registration (one reaching past it
   const into3 = 930;   // 38.75 s
   const r = await frameOf('overrun', into3, 'prefetch');
   expect(r.broken).toBe("frame 930 was drawn by ch/c02.js, not by chapter 3: a chapter() window reaches into chapter 3's 38.5–59 s");
-  expect(service.coverage('overrun').broken).toEqual([{ chapter: 3, error: r.broken }]);
+  expect(service.coverage('overrun').broken).toEqual([{ chapter: 3, error: r.broken, until: expect.any(Number) }]);
   expect(existsSync(cache.path(keysOf('overrun')[3], into3))).toBe(false);   // never cached under chapter 3's key
   // chapter 2's own frames are fine; chapter 3's past the overrun too, once the break has run out (4 s here)
   expect((await frameOf('overrun', 600, 'prefetch')).file).toBeDefined();
@@ -382,7 +382,7 @@ slowTest('a chapter that never finishes loading breaks only itself, fails fast a
       expect([i, r.pending, r.broken]).toEqual([i, undefined, 'chapter 3 did not finish loading within 5 s']);
     }
     expect(own.stats().loads).toBe(loads);
-    expect(svc.coverage('hangload').broken).toEqual([{ chapter: 3, error: 'chapter 3 did not finish loading within 5 s' }]);
+    expect(svc.coverage('hangload').broken).toEqual([{ chapter: 3, error: 'chapter 3 did not finish loading within 5 s', until: expect.any(Number) }]);
   } finally { await own.close(); }
 }, T);
 
@@ -392,7 +392,7 @@ slowTest('a version whose page fails to load fails on its own, not other version
   // two aren't)
   expect((await frameOf('sabotaged', 70, 'prefetch')).broken).toBe('sabotaged');
   expect(service.frame('sabotaged', 71).broken).toBe('sabotaged');
-  expect(service.coverage('sabotaged').broken).toEqual([1, 5].map(chapter => ({ chapter, error: 'sabotaged' })));
+  expect(service.coverage('sabotaged').broken).toEqual([1, 5].map(chapter => ({ chapter, error: 'sabotaged', until: expect.any(Number) })));
   expect((await frameOf('sound', 70, 'prefetch')).file).toBeDefined();
   expect(service.coverage('sound').broken).toEqual([]);
   // what's cached for it (painted for the other version) is still served meanwhile
@@ -693,6 +693,7 @@ function fakePool(fakeCache) {
       superseded.push([versionId, prio]);
       for (const p of [...pending]) if ((versionId == null || p.versionId === versionId) && p.prio === prio) settle(p, { ok: false, superseded: true, error: 'superseded' });
     },
+    answer(frame, result) { settle(pending.find(x => x.frame === frame), result); },
     paint() {
       const p = pending.find(x => x.prio === 'background');
       fakeCache.put(p.key, p.frame, Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {});
@@ -705,6 +706,17 @@ const leased = (extra = {}) => {
   return { fake, svc: createFrameService({ db, cache: fakeCache, pool: fake, events, root, ...extra }) };
 };
 const settled = () => Bun.sleep(20);
+
+test('coverage says when a break that runs out does (until), so the page can ask again then; a chapter\'s own error has none', async () => {
+  fastVersion('breaks');
+  const { fake, svc } = leased();
+  const slow = svc.frame('breaks', 600, 'prefetch').pending, throws = svc.frame('breaks', 1000, 'prefetch').pending;
+  const until = Date.now() + 60000;
+  fake.answer(600, { ok: false, broken: true, error: 'painting frame 600 took over 20 s', until });
+  fake.answer(1000, { ok: false, broken: true, error: 'boom' });
+  await Promise.all([slow, throws]);
+  expect(svc.coverage('breaks').broken).toEqual([{ chapter: 2, error: 'painting frame 600 took over 20 s', until }, { chapter: 3, error: 'boom' }]);
+});
 
 test('a paint-ahead sweep stops once its lease runs out: nothing more is queued, and what was queued is withdrawn', async () => {
   fastVersion('lease-1');

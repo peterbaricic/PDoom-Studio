@@ -105,7 +105,9 @@ export interface Render {
 export interface Coverage {
   total: number;
   ranges: Array<[number, number]>;
-  broken: Array<{ chapter: number; error: string }>;
+  // until (ms since the epoch): when a break that runs out (a timeout, a version that didn't load) is over; none for a
+  // chapter's own error, which lasts until its code changes.
+  broken: Array<{ chapter: number; error: string; until?: number }>;
   // Each chapter's (1..9) segment key, or null for a chapter not written yet. A frame's ETag names the key it was
   // painted under, so the player can tell a frame of a chapter's older code from a current one.
   segments: Record<number, string | null>;

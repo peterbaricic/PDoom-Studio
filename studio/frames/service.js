@@ -20,11 +20,12 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
   // snapshot id -> { error, until }: a snapshot whose page didn't load (a load error such as a missing font, shared.js
   // throwing). That's the snapshot's, not any segment's: other versions sharing a segment are unaffected.
   const failedSnapshots = new Map();
-  const live = (map, k) => {
+  const liveEntry = (map, k) => {
     const b = map.get(k);
     if (b && b.until != null && b.until <= Date.now()) { map.delete(k); return null; }
-    return b?.error ?? null;
+    return b || null;
   };
+  const live = (map, k) => liveEntry(map, k)?.error ?? null;
   const brokenOf = key => live(broken, key);
 
   // The cached frame valid for these file hashes, as long as its file is really there: one deleted behind the
@@ -112,15 +113,17 @@ export function createFrameService({ db, cache, pool, events, root, publishEvery
     catch { cache.forget(key, i, found.depsHash); return null; }
   }
 
-  // { total, ranges: [[first, last], ...] cached for the current snapshot, broken: [{ chapter, error }],
-  // segments: { 1..9: segment key, or null for a chapter not written } }, or null. The segment keys let the player
-  // tell when a chapter's frames changed (a frame's ETag names the key it was painted under), so it never shows one
-  // from a chapter's older code.
+  // { total, ranges: [[first, last], ...] cached for the current snapshot, broken: [{ chapter, error, until? }],
+  // segments: { 1..9: segment key, or null for a chapter not written } }, or null. until (ms since the epoch): when a
+  // break that runs out (a timeout, a snapshot that didn't load) does; a chapter's own error has none, and lasts until
+  // its code changes. The segment keys let the player tell when a chapter's frames changed (a frame's ETag names the
+  // key it was painted under), so it never shows one from a chapter's older code.
   function coverage(versionId) {
     const cur = current(versionId);
     if (!cur) return null;
-    const failed = live(failedSnapshots, cur.snap.id);
-    const brokenChapters = Object.entries(cur.keys).filter(([, k]) => k && (failed || brokenOf(k))).map(([n, k]) => ({ chapter: +n, error: failed || brokenOf(k) }));
+    const failed = liveEntry(failedSnapshots, cur.snap.id);
+    const brokenChapters = Object.entries(cur.keys).map(([n, k]) => [+n, k && (failed || liveEntry(broken, k))]).filter(([, b]) => b)
+      .map(([chapter, b]) => ({ chapter, error: b.error, ...(b.until != null && { until: b.until }) }));
     return { total: N, ranges: cache.coverage(cur.keys, cur.shas), broken: brokenChapters, segments: cur.keys };
   }
 
