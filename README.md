@@ -112,8 +112,9 @@ starts), so after a restart an open page asks you to reload it.
 `bun run dev`) serves it: `http://localhost:8080/studio.html?v=<version>` sends you to `w0.localhost`, where a slider
 and Play paint the version live. Unlike everything else in the studio, it runs the version's code in your own browser,
 so only open it on versions you trust. It needs a browser that resolves `*.localhost`, such as Chrome or Firefox.
-Without `--dev`, studio.html is only served as a painting page. For a sealed look at a version outside the studio,
-use `render.mjs --sheet` or `--clip` (below), which paint in their own locked-down headless browser.
+Without `--dev`, studio.html is only served as a painting page, and only to a URL carrying the studio's painter
+secret (new on every start), so no other site can open one in your browser. For a sealed look at a version outside
+the studio, use `render.mjs --sheet` or `--clip` (below), which paint in their own locked-down headless browser.
 
 **Fonts**: the lettering uses [Permanent Marker](https://fonts.google.com/specimen/Permanent+Marker) (Apache License
 2.0) and [Shantell Sans](https://fonts.google.com/specimen/Shantell+Sans) at weight 800 (SIL Open Font License 1.1).
@@ -131,7 +132,8 @@ bun render.mjs --v=<version> --check=1,12,22         # load and paint a few time
 
 `--v=<id>` picks a version from the studio's databases (default: the original). Without `--base=<url>` (a running
 studio), `render.mjs` starts its own server over the same databases, so `STUDIO_DATA`, `USER_DB` and `DEFAULT_DB`
-work here too.
+work here too. With `--base`, it needs that studio's painter secret in `STUDIO_PAINTER_SECRET`, which the studio
+gives its own jobs.
 
 `render.mjs` finds Chrome, Chromium, Edge or Brave on macOS, Windows and Linux, or a headless Chromium from
 `bun run get-browser`. Pass `--chrome=<path>` or set `CHROME_PATH` to choose one, and `--angle=<backend>` to override

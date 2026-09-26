@@ -4,8 +4,8 @@ import { createApp } from './app.js';
 
 export const NO_QUEUE = new Proxy({}, { get: () => () => { throw new Error('jobs are not available here'); } });
 
-export function serve({ db, root, data = root, token, queue = NO_QUEUE, events, port = 8080, frames = null, frameHoldMs, dev = false }) {
-  const app = createApp({ db, root, data, token, queue, events, port, frames, frameHoldMs, dev });
+export function serve({ db, root, data = root, token, queue = NO_QUEUE, events, port = 8080, frames = null, frameHoldMs, dev = false, painterSecret }) {
+  const app = createApp({ db, root, data, token, queue, events, port, frames, frameHoldMs, dev, painterSecret });
   const server = Bun.serve({ hostname: '127.0.0.1', port, fetch: app.fetch, idleTimeout: 0 });
   app.port = server.port;
   let server6 = null;

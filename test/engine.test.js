@@ -6,6 +6,7 @@ import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import puppeteer from 'puppeteer-core';
 import { launchBrowser, findBrowser, browserArgs, gpuArgs, HOST_RESOLVER_RULES } from '../studio/browser.js';
+import { PAINTER_SECRET } from '../studio/frames/page.js';
 import { tempDir, tempDefaultDb, captureHosts, slowTest, sharedBrowser, closeBrowser } from './helpers.js';
 
 const root = process.cwd(), data = tempDir(), T = { timeout: 120000 };
@@ -35,14 +36,14 @@ async function open(query, b) {
   const page = await b.newPage(), errors = [], messages = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('console', m => messages.push(m.text()));
-  await page.goto(`${srv.url}/studio.html?render&${query}`);
+  await page.goto(`${srv.url}/studio.html?render&painter=${PAINTER_SECRET}&${query}`);
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
   return { page, errors, messages };
 }
 
 slowTest('loads the original by default on w0.localhost and renders a frame, within its content security policy', async () => {
   const { page, errors, messages } = await open('');
-  expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?render`);
+  expect(page.url()).toStartWith(`http://w0.localhost:${srv.port}/studio.html?render&painter=${PAINTER_SECRET}`);
   expect(await page.evaluate(() => [CH.length, VERSION.id, ENGINE.wipes])).toEqual([9, 'original', true]);
   expect(await page.evaluate(() => window.renderAt(40, 'image/jpeg', .5).then(u => u.length))).toBeGreaterThan(10000);
   expect(errors).toEqual([]);
@@ -55,7 +56,7 @@ slowTest('loads the original by default on w0.localhost and renders a frame, wit
 slowTest('the bundled fonts load, and studio.html makes no request to any non-loopback host', async () => {
   const page = await (await main.get()).newPage(), requests = [];
   page.on('request', r => requests.push(r.url()));
-  await page.goto(`${srv.url}/studio.html?render`);
+  await page.goto(`${srv.url}/studio.html?render&painter=${PAINTER_SECRET}`);
   await page.waitForFunction('window.ready === true', { timeout: 60000 });
   expect(await page.evaluate(() => window.loadError || null)).toBeNull();
   expect(await page.evaluate(() => [document.fonts.check('100px "Permanent Marker"'), document.fonts.check('800 50px "Shantell Sans"')])).toEqual([true, true]);

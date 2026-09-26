@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path';
 import { readWorkFiles } from './versions.js';
 import { parseStoryboard, CHAPTER_WINDOWS } from './storyboard.js';
 import { taskBrief, renderCommand } from './prompts.js';
+import { PAINTER_SECRET } from './frames/page.js';
 
 export function chapterPath(db, versionId, n) {
   const re = new RegExp(`^ch/c0${n}(_[a-z0-9_]+)?\\.js$`);
@@ -37,7 +38,8 @@ export async function checkWithRenderer({ root, data = root, baseUrl, jobId, kin
   }
   const argv = ['bun', join(root, 'render.mjs'), `--work=${jobId}`, `--check=${times}`, ...(baseUrl ? [`--base=${baseUrl}`] : []),
     ...(thumb ? [`--out=${thumb}`, '--cols=3', '--w=320'] : [])];
-  const p = Bun.spawn(argv, { cwd: root, stdout: 'ignore', stderr: 'pipe' });
+  // (--base: through this studio, whose painter secret it needs; see studio/frames/page.js)
+  const p = Bun.spawn(argv, { cwd: root, env: { ...process.env, STUDIO_PAINTER_SECRET: PAINTER_SECRET }, stdout: 'ignore', stderr: 'pipe' });
   let escalateTimer = null;
   const kill = () => {
     p.kill();
@@ -59,8 +61,9 @@ async function runClaude({ cmd, prompt, dir, settings, root, model, env, ctx, ti
     '--settings', settings, '--setting-sources', 'project', '--strict-mcp-config', '--no-session-persistence',
     '--add-dir', root, ...(model ? ['--model', model] : [])];
   // STUDIO_SANDBOX lets render.mjs restrict itself when Claude's own Bash tool runs it (see render.mjs); this is
-  // the job's work folder, not the project root, so a render call can only touch this job's own files.
-  const proc = Bun.spawn(argv, { cwd: dir, env: { ...process.env, ...env, STUDIO_SANDBOX: dir }, stdout: 'pipe', stderr: 'pipe' });
+  // the job's work folder, not the project root, so a render call can only touch this job's own files. Its render
+  // calls paint through this studio (--base), so they get its painter secret (studio/frames/page.js).
+  const proc = Bun.spawn(argv, { cwd: dir, env: { ...process.env, ...env, STUDIO_SANDBOX: dir, STUDIO_PAINTER_SECRET: PAINTER_SECRET }, stdout: 'pipe', stderr: 'pipe' });
   let timedOut = false, escalateTimer = null;
   const kill = () => {
     proc.kill();

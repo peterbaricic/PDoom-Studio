@@ -7,6 +7,7 @@ import { openDb } from '../studio/db.js';
 import { createApp } from '../studio/app.js';
 import { createEvents } from '../studio/events.js';
 import { serve } from '../studio/serve.js';
+import { PAINTER_SECRET } from '../studio/frames/page.js';
 import { sha256, snapshotOf, rememberSnapshot, getSnapshot, blobBySha } from '../studio/snapshot.js';
 import { tempDir, tempDefaultDb, expectPixelsMatch, slowTest } from './helpers.js';
 
@@ -139,7 +140,8 @@ slowTest('a painting page loaded by snapshot draws the same pixels as loading th
   const snap = rememberSnapshot(snapshotOf(db, 'original'));
   const srv = serve({ db, root, data: tempDir(), token: 't', events: createEvents(), port: 0 });
   const spawnRender = async argv => {
-    const p = Bun.spawn(['bun', 'render.mjs', ...argv], { stdout: 'pipe', stderr: 'pipe' });
+    // (--base: painting through srv, so with this process's painter secret, which srv's app uses)
+    const p = Bun.spawn(['bun', 'render.mjs', ...argv], { env: { ...process.env, STUDIO_PAINTER_SECRET: PAINTER_SECRET }, stdout: 'pipe', stderr: 'pipe' });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     return { out, err, code };
   };

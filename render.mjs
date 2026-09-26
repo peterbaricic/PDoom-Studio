@@ -18,7 +18,7 @@ import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync
 import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { launchBrowser } from './studio/browser.js';
-import { openSealedPage } from './studio/frames/page.js';
+import { openSealedPage, PAINTER_SECRET } from './studio/frames/page.js';
 import { frameRange } from './studio/frames/keys.js';
 import { chapterWindowErrors } from './studio/storyboard.js';
 
@@ -118,8 +118,15 @@ if (!base) {
   base = local.url;
 }
 // Version code runs only on a renderer origin (w0.localhost), never on the studio's own, which serves the token page.
+// A painting page needs the server's painter secret (see studio/frames/page.js): our own server's, or the running
+// studio's, which it hands its jobs in STUDIO_PAINTER_SECRET.
+const painter = local ? PAINTER_SECRET : process.env.STUDIO_PAINTER_SECRET;
+if (!painter) {
+  console.error((args.check ? 'CHECK FAILED\n' : '') + '--base needs the studio\'s painter secret in STUDIO_PAINTER_SECRET (the studio sets it for its own jobs)');
+  process.exit(1);
+}
 const pageOrigin = new URL(base); pageOrigin.hostname = 'w0.localhost';
-const PAGE = `${pageOrigin.origin}/studio.html?render&`
+const PAGE = `${pageOrigin.origin}/studio.html?render&painter=${painter}&`
   + (args.snapshot ? `snapshot=${args.snapshot}` : args.work ? `work=${args.work}` : `v=${args.v || 'original'}`);
 
 // Underneath everything here, the browser itself can reach no host but the studio's port (see launchBrowser in

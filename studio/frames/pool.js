@@ -28,7 +28,7 @@
 // (and, for a hanging chapter, holding) a page of their own.
 import { launchBrowser } from '../browser.js';
 import { getSnapshot, rememberSnapshot, sha256, canonicalJson } from '../snapshot.js';
-import { openSealedPage } from './page.js';
+import { openSealedPage, PAINTER_SECRET } from './page.js';
 import { FPS, chapterOfFrame, chapterPaths, depsOf, depsHash } from './keys.js';
 import { CHAPTER_WINDOWS } from '../storyboard.js';
 
@@ -51,9 +51,9 @@ const within = (promise, ms, error) => {
 };
 
 export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeoutMs = 20000, loadTimeoutMs = 60000,
-  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000 }) {
+  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
-  const pageUrl = snapshotId => `${origin.origin}/studio.html?render&record-cast&snapshot=${snapshotId}`;
+  const pageUrl = snapshotId => `${origin.origin}/studio.html?render&painter=${painterSecret}&record-cast&snapshot=${snapshotId}`;
   const emptySlot = () => ({ page: null, snapshotId: null, without: '', chapterErrors: {}, loadReads: {} });
   const slots = Array.from({ length: painters }, () => ({ ...emptySlot(), busy: false, used: 0 }));
   const jobs = new Map();            // `${key}:${frame}` -> { id, key, frame, waiters, state: 'queued' | 'painting', seq }

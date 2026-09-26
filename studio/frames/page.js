@@ -13,6 +13,15 @@
 // pool can tell which chapter's script threw while the page loaded.
 // Resolves once window.ready is true; the caller checks window.loadError. Every step is bounded by readyTimeout, and
 // on any failure the page is closed before the error is passed on.
+import { randomBytes } from 'node:crypto';
+
+// This process's painter secret: a painting page's URL (studio.html?render&painter=<secret>) needs it, so a page on
+// another site can't open ?render (chapter code) in the user's own browser, outside the sealed painting browser. New
+// on every start. The studio's app (studio/app.js) and pool (studio/frames/pool.js) use it by default, and so does
+// render.mjs for its own in-process server; render.mjs --base, painting through a running studio, is given that
+// studio's in STUDIO_PAINTER_SECRET (studio/claude-job.js passes it to the check and to Claude's own render runs).
+export const PAINTER_SECRET = randomBytes(16).toString('hex');
+
 export async function openSealedPage(browser, url, { onConsole, onPageError, onRequest, waitUntil = 'networkidle0', readyTimeout = 60000, recordScriptErrors = false } = {}) {
   const allowedOrigin = new URL(url).origin;
   const bounded = (promise, what) => {

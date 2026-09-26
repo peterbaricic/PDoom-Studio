@@ -7,6 +7,7 @@ import { permissionSettings } from '../studio/claude-job.js';
 import { serve } from '../studio/serve.js';
 import { createEvents } from '../studio/events.js';
 import { findBrowser, gpuArgs } from '../studio/browser.js';
+import { PAINTER_SECRET } from '../studio/frames/page.js';
 import puppeteer from 'puppeteer-core';
 import { isolatedEnv, tempDir, tempDefaultDb, captureHosts, expectPixelsMatch, slowTest } from './helpers.js';
 
@@ -77,9 +78,16 @@ slowTest.concurrent('check fails for a missing version', async () => {
 }, T);
 
 slowTest.concurrent('check fails cleanly instead of crashing when the page cannot be reached', async () => {
-  const r = await run('--check=5', '--base=http://127.0.0.1:1');
+  const r = await spawn(['bun', 'render.mjs', '--check=5', '--base=http://127.0.0.1:1'], { env: isolatedEnv(undefined, { STUDIO_PAINTER_SECRET: 'abc' }) });
   expect(r.code).toBe(1);
   expect(r.err).toContain('CHECK FAILED');
+  expect(r.err).not.toContain('painter secret');
+}, T);
+
+test.concurrent('--base without the studio\'s painter secret is refused before any browser starts', async () => {
+  const r = await spawnNow(['bun', 'render.mjs', '--check=5', '--base=http://127.0.0.1:1'], { env: isolatedEnv() });
+  expect(r.code).toBe(1);
+  expect(r.err.trim().split('\n')).toEqual(['CHECK FAILED', "--base needs the studio's painter secret in STUDIO_PAINTER_SECRET (the studio sets it for its own jobs)"]);
 }, T);
 
 test.concurrent('a browser that will not start fails the check in one clear line, not a crash', async () => {
@@ -153,7 +161,7 @@ slowTest.concurrent('the network lockdown leaves the picture as it was: stills m
   const plain = await puppeteer.launch({ executablePath: findBrowser(), headless: true, args: gpuArgs() });
   try {
     const page = await plain.newPage();
-    await page.goto(`${srv.url}/studio.html?render&v=original`);
+    await page.goto(`${srv.url}/studio.html?render&painter=${PAINTER_SECRET}&v=original`);
     await page.waitForFunction('window.ready === true', { timeout: 60000 });
     for (const t of times) {
       const url = await page.evaluate(t => window.renderAt(t, 'image/png'), t);
