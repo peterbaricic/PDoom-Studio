@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { launchBrowser, rendererOf } from './studio/browser.js';
+import { launchPaintingBrowser, rendererOf } from './studio/browser.js';
 import { openSealedPage, PAINTER_SECRET } from './studio/frames/page.js';
 import { frameRange } from './studio/frames/keys.js';
 import { chapterWindowErrors } from './studio/storyboard.js';
@@ -133,7 +133,7 @@ const PAGE = `${pageOrigin.origin}/studio.html?render&painter=${painter}&`
 // studio/browser.js); openSealedPage (studio/frames/page.js) adds the page-level guards on top: only the page's own
 // origin loads, and no popup or navigation away gets anywhere.
 // No browser to launch (or one that won't start): said in one line, and for --check the way its caller reads failures.
-try { browser = await launchBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 }); }
+try { browser = await launchPaintingBrowser({ chrome: args.chrome, angle: args.angle, fromEnv: !SANDBOX, port: Number(new URL(PAGE).port) || 80 }); }
 catch (e) {
   console.error((args.check ? 'CHECK FAILED\n' : '') + String(e?.message || e).trim().split('\n')[0]);
   local?.stop();

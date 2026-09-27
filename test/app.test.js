@@ -155,6 +155,13 @@ test('the token page and the UI are served on the studio hosts only, never where
   }
 });
 
+test('a favicon request gets an empty answer, not a 404, so painting pages log no failed load', async () => {
+  for (const host of ['localhost:8080', 'w0.localhost:8080']) {
+    const res = await getOn(host, '/favicon.ico');
+    expect([host, res.status, await res.text()]).toEqual([host, 204, '']);
+  }
+});
+
 test('the studio.html scrubber (studio.html without ?render) is served only with --dev: it runs version code in your browser', async () => {
   // Without --dev: nothing but a painting page, on either kind of host.
   for (const host of ['localhost:8080', '127.0.0.1:8080', 'w0.localhost:8080', 'w2.localhost:8080']) {

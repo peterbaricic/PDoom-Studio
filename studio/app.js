@@ -139,6 +139,8 @@ export function createApp({ db, root, data = root, token, queue, events, port = 
       return onRenderer(req) ? file(req, root, 'studio.html', { 'content-security-policy': STUDIO_CSP })
         : Response.redirect(`http://w0.localhost:${app.port}/studio.html${search}`, 302);
     }],
+    // Chrome asks every page for one; an empty answer instead of a 404 keeps painting pages' consoles quiet.
+    ['GET', /^\/favicon\.ico$/, () => new Response(null, { status: 204 })],
     ['GET', /^\/v\/([a-z0-9-]+)\/(.+)$/, (req, [, id, p]) => {
       const f = isValidPath(p) && db.getFile(id, p);
       return f ? new Response(f.content, { headers: { 'content-type': TYPES[extname(p)], ...NO_STORE } }) : error(404, 'not found');

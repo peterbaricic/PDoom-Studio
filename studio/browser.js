@@ -42,25 +42,27 @@ export function findBrowser(explicit, { fromEnv = true, installed = INSTALLED, c
 
 // GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere. STUDIO_ANGLE picks another
 // (on Linux, `vulkan` or `gl-egl` may reach a GPU that the default leaves to software rendering).
-export const ANGLE = process.env.STUDIO_ANGLE || { darwin: 'metal', win32: 'd3d11' }[process.platform];
+const platformAngle = platform => ({ darwin: 'metal', win32: 'd3d11' })[platform];
+export const ANGLE = process.env.STUDIO_ANGLE || platformAngle(process.platform);
 
 // Whether a WebGL renderer string (window.gpuInfo()) is a software one: WebGL drawn on the CPU, as headless Chrome on
 // Linux does when it can't reach a GPU. Frames then take many times longer to paint.
 export const isSoftwareRenderer = renderer => /SwiftShader|llvmpipe|softpipe|Software Rasterizer|Basic Render Driver/i.test(String(renderer || ''));
 
 // The launched browser's WebGL renderer, { renderer, software }, asked on a blank page of its own, where no version
-// code runs to answer for it. null if it can't be told (then callers change nothing).
+// code runs to answer for it. null if it can't be told, or the browser has no WebGL at all (then callers change
+// nothing, and launchPaintingBrowser never takes such a browser for one on the GPU).
 export async function rendererOf(browser) {
   let page;
   try {
     page = await browser.newPage();
     const renderer = await Promise.race([page.evaluate(() => {
       const gl = document.createElement('canvas').getContext('webgl');
-      if (!gl) return 'no WebGL';
+      if (!gl) return null;
       const e = gl.getExtension('WEBGL_debug_renderer_info');
       return String(e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
     }), Bun.sleep(10000).then(() => { throw new Error('no answer'); })]);
-    return { renderer, software: isSoftwareRenderer(renderer) };
+    return renderer == null ? null : { renderer, software: isSoftwareRenderer(renderer) };
   } catch { return null; }
   finally { page?.close().catch(() => {}); }
 }
@@ -108,4 +110,36 @@ export const browserArgs = ({ angle = ANGLE, port }) => [...gpuArgs(angle), ...i
 // outlives its studio, render.mjs or test.
 export async function launchBrowser({ chrome, angle = ANGLE, fromEnv = true, port } = {}) {
   return puppeteer.launch({ executablePath: findBrowser(chrome, { fromEnv }), headless: true, pipe: true, protocolTimeout: 0, args: browserArgs({ angle, port }) });
+}
+
+// Graphics backends to try, in order, when Linux's default draws WebGL in software: headless Chrome there often
+// doesn't reach the GPU on its own, and one of these usually does (on an AMD card with Mesa, `vulkan` came up as
+// radeonsi through OpenGL ES; `gl-egl` asks for that directly).
+export const LINUX_GPU_BACKENDS = ['vulkan', 'gl-egl'];
+
+// A browser for painting, on the GPU where one can be reached. With a backend chosen (angle, or STUDIO_ANGLE), or
+// off Linux, it's launchBrowser's. On Linux with neither, when the default draws in software, each backend in
+// `backends` is tried in turn and the first that reaches a GPU is kept (and said once, through log); if none does,
+// the default browser is kept. launch and probe are there for tests.
+export async function launchPaintingBrowser({ angle, platform = process.platform, env = process.env, backends = LINUX_GPU_BACKENDS,
+  launch = launchBrowser, probe = rendererOf, log = console.log, ...options } = {}) {
+  const chosen = angle ?? env.STUDIO_ANGLE;
+  const first = await launch({ ...options, angle: chosen ?? platformAngle(platform) });
+  if (chosen || platform !== 'linux') return first;
+  const found = await probe(first);
+  if (!found?.software) return first;
+  for (const backend of backends) {
+    let other;
+    try {
+      other = await launch({ ...options, angle: backend });
+      const gpu = await probe(other);
+      if (gpu && !gpu.software) {
+        log(`Painting on the GPU with --use-angle=${backend} (${gpu.renderer}); Chrome's default drew in software (${found.renderer}).`);
+        await first.close().catch(() => {});
+        return other;
+      }
+    } catch {}
+    await other?.close().catch(() => {});
+  }
+  return first;
 }

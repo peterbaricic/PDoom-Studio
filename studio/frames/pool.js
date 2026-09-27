@@ -33,7 +33,7 @@
 // A snapshot's first load runs alone: until one page has loaded it, its other requests wait instead of each taking
 // (and, for a hanging chapter, holding) a page of their own.
 import { existsSync } from 'node:fs';
-import { launchBrowser, findBrowser, rendererOf } from '../browser.js';
+import { launchPaintingBrowser, findBrowser, rendererOf } from '../browser.js';
 import { getSnapshot, rememberSnapshot, sha256, canonicalJson } from '../snapshot.js';
 import { openSealedPage, PAINTER_SECRET } from './page.js';
 import { FPS, chapterOfFrame, chapterPaths, depsOf, depsHash } from './keys.js';
@@ -62,7 +62,7 @@ const within = (promise, ms, error) => {
 // would load the engine files as they are now, and the frame be kept under the old engine's key (mislabelled), and a
 // page would reload for each engine in turn.
 export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeoutMs = 20000, loadTimeoutMs = 60000,
-  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET,
+  brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchPaintingBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET,
   find = findBrowser, currentEngine = null, softwarePaintTimeoutMs = 180000, softwarePainters = 1, paintersChosen = false }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
   const pageUrl = snapshotId => `${origin.origin}/studio.html?render&painter=${painterSecret}&record-cast&snapshot=${snapshotId}`;
