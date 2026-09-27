@@ -30,6 +30,9 @@ export function HealthBanner() {
     claudeUnavailable(health),
     health && !health.ffmpeg ? 'ffmpeg not found: final renders will fail.' : null,
     health?.painter && !health.painter.ok ? `Previews can't paint: ${health.painter.reason ?? 'the painting browser did not start'}` : null,
+    health?.painter?.ok && health.painter.software
+      ? `Frames paint without a GPU (${health.painter.gpu}), so previews and renders are slow. See Troubleshooting in the README.`
+      : null,
   ].filter((p): p is string => p != null);
 
   if (!restarted && !problems.length) return null;

@@ -124,8 +124,9 @@ export interface Health {
   ffmpeg: boolean;
   // Whether the studio can paint frames: ok false (with the reason) once its painting browser failed to start (no
   // Chromium-based browser found, a bad CHROME_PATH); it tries again every 30 s. null when the server has no frame
-  // service.
-  painter: { ok: boolean; reason: string | null } | null;
+  // service. gpu: the WebGL renderer its browser got, once it has started (null before); software: that renderer draws
+  // on the CPU (no GPU reached), so frames paint slowly.
+  painter: { ok: boolean; reason: string | null; gpu?: string | null; software?: boolean } | null;
 }
 
 // GET /api/song: the engine's fixed timing plus the lyrics, for the timeline and lyrics track.

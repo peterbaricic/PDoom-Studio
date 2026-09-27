@@ -40,8 +40,30 @@ export function findBrowser(explicit, { fromEnv = true, installed = INSTALLED, c
     'into .browsers/, ~100 MB, no Chrome install needed) or point CHROME_PATH (or render.mjs\'s --chrome=) at a Chrome, Edge, Brave or Chromium binary.');
 }
 
-// GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere.
-export const ANGLE = { darwin: 'metal', win32: 'd3d11' }[process.platform];
+// GPU backend for WebGL: Metal on macOS, D3D11 on Windows, the platform default elsewhere. STUDIO_ANGLE picks another
+// (on Linux, `vulkan` or `gl-egl` may reach a GPU that the default leaves to software rendering).
+export const ANGLE = process.env.STUDIO_ANGLE || { darwin: 'metal', win32: 'd3d11' }[process.platform];
+
+// Whether a WebGL renderer string (window.gpuInfo()) is a software one: WebGL drawn on the CPU, as headless Chrome on
+// Linux does when it can't reach a GPU. Frames then take many times longer to paint.
+export const isSoftwareRenderer = renderer => /SwiftShader|llvmpipe|softpipe|Software Rasterizer|Basic Render Driver/i.test(String(renderer || ''));
+
+// The launched browser's WebGL renderer, { renderer, software }, asked on a blank page of its own, where no version
+// code runs to answer for it. null if it can't be told (then callers change nothing).
+export async function rendererOf(browser) {
+  let page;
+  try {
+    page = await browser.newPage();
+    const renderer = await Promise.race([page.evaluate(() => {
+      const gl = document.createElement('canvas').getContext('webgl');
+      if (!gl) return 'no WebGL';
+      const e = gl.getExtension('WEBGL_debug_renderer_info');
+      return String(e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    }), Bun.sleep(10000).then(() => { throw new Error('no answer'); })]);
+    return { renderer, software: isSoftwareRenderer(renderer) };
+  } catch { return null; }
+  finally { page?.close().catch(() => {}); }
+}
 
 // What painting needs: WebGL on the GPU, a 1080p window, and no throttling of a page nobody is looking at.
 export const gpuArgs = (angle = ANGLE) => ['--ignore-gpu-blocklist', ...(angle ? ['--use-angle=' + angle] : []), '--enable-gpu-rasterization',

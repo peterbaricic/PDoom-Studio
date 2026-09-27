@@ -25,10 +25,15 @@
 //   after it at once, with the reason (unavailable: true), until launchRetryMs has passed: then the next request tries
 //   to launch it again, so installing a browser (or fixing CHROME_PATH and restarting) recovers. health() says so,
 //   from the start when there's plainly no browser to launch (looked for when the pool is made; nothing launched).
+// Software rendering: when the browser draws WebGL on the CPU (headless Chrome on Linux without a GPU it can reach),
+// a frame takes many times longer, and pages painting side by side only slow each other down. Once the browser has
+// started, a blank page of its own (no version code in it) asks which renderer it got; for a software one, a frame
+// (and a page's load) may take up to softwarePaintTimeoutMs before it counts as stuck, and at most softwarePainters
+// pages paint at once (unless the painter count was chosen explicitly: paintersChosen). health() reports the renderer.
 // A snapshot's first load runs alone: until one page has loaded it, its other requests wait instead of each taking
 // (and, for a hanging chapter, holding) a page of their own.
 import { existsSync } from 'node:fs';
-import { launchBrowser, findBrowser } from '../browser.js';
+import { launchBrowser, findBrowser, rendererOf } from '../browser.js';
 import { getSnapshot, rememberSnapshot, sha256, canonicalJson } from '../snapshot.js';
 import { openSealedPage, PAINTER_SECRET } from './page.js';
 import { FPS, chapterOfFrame, chapterPaths, depsOf, depsHash } from './keys.js';
@@ -58,7 +63,7 @@ const within = (promise, ms, error) => {
 // page would reload for each engine in turn.
 export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeoutMs = 20000, loadTimeoutMs = 60000,
   brokenTtlMs = 60000, snapshotFailureTtlMs = 30000, launch = launchBrowser, launchRetryMs = 30000, painterSecret = PAINTER_SECRET,
-  find = findBrowser, currentEngine = null }) {
+  find = findBrowser, currentEngine = null, softwarePaintTimeoutMs = 180000, softwarePainters = 1, paintersChosen = false }) {
   const origin = new URL(baseUrl); origin.hostname = 'w0.localhost';
   const pageUrl = snapshotId => `${origin.origin}/studio.html?render&painter=${painterSecret}&record-cast&snapshot=${snapshotId}`;
   // engine: the engine hash the page's snapshot was requested under. Under --dev the engine may change while a page is
@@ -73,6 +78,11 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   const counts = { painted: 0, loads: 0, failures: 0 };
   let browser = null, seq = 0, closed = false;
   let launchFailure = null;          // { error, at }: the last launch failed, and none has succeeded since
+  let gpu = null;                    // { renderer, software } of the browser, once it has started
+  const software = () => !!gpu?.software;
+  const paintLimit = () => (software() ? softwarePaintTimeoutMs : paintTimeoutMs);
+  const loadLimit = () => (software() ? Math.max(loadTimeoutMs, softwarePaintTimeoutMs) : loadTimeoutMs);
+  const pagesAtOnce = () => (software() && !paintersChosen ? Math.min(painters, softwarePainters) : painters);
   const painterDown = () => launchFailure && Date.now() - launchFailure.at < launchRetryMs ? launchFailure.error : null;
   // No browser found, or none where CHROME_PATH points: said at once (at: -Infinity, so the first paint still tries).
   try {
@@ -167,7 +177,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   function pump() {
     while (!closed) {
       const free = slots.filter(s => !s.busy);
-      const job = free.length && nextJob();
+      const job = free.length && slots.length - free.length < pagesAtOnce() && nextJob();
       if (!job) return;
       const w = leadOf(job);
       const engineNow = currentEngine?.();
@@ -200,7 +210,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     // isn't any segment's fault: it's remembered, and nothing is tried again for launchRetryMs.
     const down = painterDown();
     if (down) throw new Unavailable(down);
-    const launching = browser ??= launch({ port }).then(b => {
+    const launching = browser ??= launch({ port }).then(async b => {
+      if (!gpu) gpu = await rendererOf(b);
       b.once('disconnected', () => {
         if (browser !== launching) return;
         browser = null;
@@ -245,12 +256,12 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
     let lastBlob = null, page;
     try {
       page = await openSealedPage(b, pageUrl(pageSnapshot), {
-        readyTimeout: loadTimeoutMs, recordScriptErrors: true,
+        readyTimeout: loadLimit(), recordScriptErrors: true,
         onRequest: r => { const m = /\/api\/blob\/([0-9a-f]{64})$/.exec(r.url()); if (m) lastBlob = m[1]; },
       });
       const state = await within(page.evaluate(() => ({
         loadError: window.loadError || null, scriptErrors: window.scriptErrors || [], loadReads: window.castRecorder?.loadReads() || {},
-      })), paintTimeoutMs, () => new Error('the painting page stopped responding after it loaded'));
+      })), paintLimit(), () => new Error('the painting page stopped responding after it loaded'));
       if (state.loadError) throw new Error(state.loadError);
       // An error while a chapter's own script ran breaks that chapter only; one from anywhere else (shared.js, the
       // engine) breaks every chapter.
@@ -270,7 +281,7 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
       if (closed || !b.connected) throw new Error(e.message);
       if (e.notReady) {
         const chapters = chaptersWithSha(snap, lastBlob).filter(n => !without.has(n));
-        if (chapters.length) throw new Hung(`chapter ${chapters[0]} did not finish loading within ${loadTimeoutMs / 1000} s`, chapters[0]);
+        if (chapters.length) throw new Hung(`chapter ${chapters[0]} did not finish loading within ${loadLimit() / 1000} s`, chapters[0]);
       }
       const until = Date.now() + snapshotFailureTtlMs;
       failedSnapshots.set(snapshotId, { error: e.message, until });
@@ -304,7 +315,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
         out = await within(page.evaluate(async t => {
           const r = await window.paintAt(t);
           return { url: document.getElementById('out').toDataURL('image/jpeg', .94), castReads: r?.castReads || [], drawnBy: r?.drawnBy ?? null };
-        }, frame / FPS), paintTimeoutMs, () => new Broken(`painting frame ${frame} took over ${paintTimeoutMs / 1000} s`, Date.now() + brokenTtlMs));
+        }, frame / FPS), paintLimit(), () => new Broken(`painting frame ${frame} took over ${paintLimit() / 1000} s`
+          + (software() ? ' (this browser paints without a GPU)' : ''), Date.now() + brokenTtlMs));
       } catch (e) {
         // Stuck: the page goes, and the slot gets a fresh one next time. The break's time counts from now, once the
         // page is closed (that can take seconds), so it's never handed over already partly or wholly used up.
@@ -384,7 +396,8 @@ export function createPool({ port, baseUrl, painters = 3, onPainted, paintTimeou
   });
 
   // Whether frames can be painted: { ok: false, reason } once the painting browser failed to start, until it starts.
-  const health = () => ({ ok: !launchFailure, reason: launchFailure?.error ?? null });
+  // gpu: the WebGL renderer it got and whether that's software rendering (null until the browser has started).
+  const health = () => ({ ok: !launchFailure, reason: launchFailure?.error ?? null, gpu: gpu?.renderer ?? null, software: software() });
 
   async function close() {
     closed = true;

@@ -1,10 +1,21 @@
 import { test, expect } from 'bun:test';
 import { PRIORITIES, createPool } from '../studio/frames/pool.js';
-import { findBrowser } from '../studio/browser.js';
+import { findBrowser, isSoftwareRenderer } from '../studio/browser.js';
 
 // The painting order itself (with a real painting browser) is tested in frames-service.test.js; here, what needs none.
 test('background is the lowest priority, after thumbs', () => {
   expect(PRIORITIES).toEqual(['preview', 'prefetch', 'render', 'thumbs', 'background']);
+});
+
+test('software WebGL renderers are told from GPU ones', () => {
+  for (const r of ['ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 16.0.0) (0x0000C0DE)), SwiftShader driver)',
+    'llvmpipe (LLVM 15.0.7, 256 bits)', 'Google SwiftShader', 'ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11)']) {
+    expect(isSoftwareRenderer(r)).toBe(true);
+  }
+  for (const r of ['ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)', 'ANGLE (NVIDIA, Vulkan 1.3.277 (NVIDIA GeForce RTX 3070))',
+    'Mesa Intel(R) UHD Graphics 620 (KBL GT2)', 'AMD Radeon RX 6800 (radeonsi, navi21, LLVM 15.0.7, DRM 3.54)', '', null]) {
+    expect(isSoftwareRenderer(r)).toBe(false);
+  }
 });
 
 test('a request at background priority is accepted; an unknown priority is refused', async () => {
@@ -27,12 +38,12 @@ test('a painting browser that will not start fails every request at once with th
   const ask = frame => pool.request({ versionId: 'v', snapshotId: 's', key: 'k', frame, prio: 'prefetch' });
   const reason = 'the painting browser did not start: No Chromium-based browser found. more detail';
   try {
-    expect(pool.health()).toEqual({ ok: true, reason: null });   // not known before the first launch
+    expect(pool.health()).toEqual({ ok: true, reason: null, gpu: null, software: false });   // not known before the first launch
     // several requests at once (more than there are painters): one launch, and every one of them answered
     const first = await Promise.all([0, 1, 2, 3, 4].map(ask));
     expect(first).toEqual(Array(5).fill({ ok: false, unavailable: true, error: reason }));
     expect(launches).toBe(1);
-    expect(pool.health()).toEqual({ ok: false, reason });
+    expect(pool.health()).toEqual({ ok: false, reason, gpu: null, software: false });
     // from then on, answered there and then, with no launch, until launchRetryMs has passed
     expect(await ask(5)).toEqual({ ok: false, unavailable: true, error: reason });
     expect(launches).toBe(1);
@@ -50,9 +61,10 @@ test('with plainly no browser to launch, health says so from the start, and the 
   const badPath = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launch, find: () => '/nope/chrome' });
   const found = createPool({ port: 1, baseUrl: 'http://localhost:1', onPainted() {}, launch, find: () => process.execPath });
   try {
-    expect(none.health()).toEqual({ ok: false, reason: expect.stringMatching(/^the painting browser did not start: No Chromium-based browser found/) });
-    expect(badPath.health()).toEqual({ ok: false, reason: 'the painting browser did not start: there is no browser at /nope/chrome' });
-    expect(found.health()).toEqual({ ok: true, reason: null });
+    const unknownGpu = { gpu: null, software: false };   // told only once a browser has started
+    expect(none.health()).toEqual({ ok: false, reason: expect.stringMatching(/^the painting browser did not start: No Chromium-based browser found/), ...unknownGpu });
+    expect(badPath.health()).toEqual({ ok: false, reason: 'the painting browser did not start: there is no browser at /nope/chrome', ...unknownGpu });
+    expect(found.health()).toEqual({ ok: true, reason: null, ...unknownGpu });
     expect(launches).toBe(0);   // looked for, not launched
     expect(await none.request({ versionId: 'v', snapshotId: 's', key: 'k', frame: 0 })).toMatchObject({ unavailable: true, error: 'the painting browser did not start: nope' });
     expect(launches).toBe(1);

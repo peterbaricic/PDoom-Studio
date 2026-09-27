@@ -154,6 +154,7 @@ Original is dropped, since that now comes from `studio/default.db`; if you had e
 | `STUDIO_CACHE_GB` | The frame cache's size limit, in GB | `5` |
 | `STUDIO_PAINTERS` | How many pages paint frames at once (1 to 8) | `3` |
 | `CHROME_PATH` | The browser that paints frames | found automatically |
+| `STUDIO_ANGLE` | The browser's graphics backend (`metal`, `d3d11`, `vulkan`, `gl-egl`, `swiftshader`, …) | Metal on macOS, D3D11 on Windows, Chrome's choice on Linux |
 | `CLAUDE_BIN` | The Claude Code command | `claude` |
 
 ### Safety
@@ -172,6 +173,12 @@ the network:
 
 - **"Previews can't paint: …"** (a banner at the top): the studio can't find or start its painting browser. Install Chrome or Chromium, run
   `bun run get-browser`, or set `CHROME_PATH`. It tries again every 30 seconds.
+- **"Frames paint without a GPU"** (a banner at the top): the painting browser draws on the CPU (software
+  rendering), which headless Chrome on Linux often does when it can't reach the graphics card. Frames then take
+  several seconds each, so the studio waits up to 3 minutes for a frame before calling its chapter stuck, and paints
+  one frame at a time (set `STUDIO_PAINTERS` to paint more at once anyway). Previews still work, only slowly, and a
+  full render can take hours. To use the GPU, make sure its drivers work outside Chrome (for Vulkan, `vulkaninfo`),
+  then start the studio with `STUDIO_ANGLE=vulkan` or `STUDIO_ANGLE=gl-egl` and check whether the banner goes away.
 - **Claude's buttons are disabled**: Claude Code is missing or signed out. Run `claude auth login`.
 - **"The studio server restarted — reload this page"**: the server was restarted since the page loaded.
 - **"ffmpeg not found"**: install ffmpeg; previews work without it, final renders and thumbnails don't.

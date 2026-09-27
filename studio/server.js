@@ -89,7 +89,7 @@ if (dev) {
 const legacy = legacyFrames(data), legacyBytes = legacy.bytes();
 if (legacyBytes) console.log(`${(legacyBytes / 1e9).toFixed(2)} GB of frames from old renders in ${legacy.dir} (unused now; Settings → Clear cache deletes them).`);
 const cache = createCache({ dir: join(data, '.studio/cache/frames'), capBytes: cacheGb * 1e9 });
-const pool = createPool({ port, baseUrl, painters, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps),
+const pool = createPool({ port, baseUrl, painters, paintersChosen: process.env.STUDIO_PAINTERS != null, onPainted: ({ key, frame, jpeg, deps }) => cache.put(key, frame, jpeg, deps),
   currentEngine: () => engineHash(root, { recheck: dev }) });
 const frames = createFrameService({ db, cache, pool, events, root, dev });
 // STUDIO_TEST_SKIP_CHECK exists only for test/ui.test.js, whose fake Claude writes trivial chapters: its jobs import

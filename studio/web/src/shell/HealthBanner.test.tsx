@@ -41,6 +41,19 @@ describe('HealthBanner', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("Previews can't paint: no Chromium-based browser found (set CHROME_PATH)");
   });
 
+  test('says when frames paint without a GPU, naming the renderer', async () => {
+    mockApi({ 'GET /api/health': { ...healthy, painter: { ok: true, reason: null, gpu: 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))', software: true } } });
+    renderInRouter(<HealthBanner />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Frames paint without a GPU (ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))), so previews and renders are slow.');
+  });
+
+  test('a GPU renderer is not a problem', async () => {
+    mockApi({ 'GET /api/health': { ...healthy, painter: { ok: true, reason: null, gpu: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro)', software: false } } });
+    const { queryClient } = renderInRouter(<HealthBanner />);
+    await waitFor(() => expect(queryClient.getQueryData(['health'])).toBeDefined());
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   test('a server with no frame service (painter null) is not a problem', async () => {
     mockApi({ 'GET /api/health': { ...healthy, painter: null } });
     const { queryClient } = renderInRouter(<HealthBanner />);

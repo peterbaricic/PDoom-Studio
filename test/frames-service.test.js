@@ -658,7 +658,7 @@ test('without a painting browser the studio stays up: frame requests fail at onc
   fastVersion('no-browser', { wipes: false });   // keys of its own: nothing of it is cached
   const reason = 'the painting browser did not start: Browser was not found at the configured executablePath (/nope/chrome)';
   try {
-    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: true, reason: null });
+    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: true, reason: null, gpu: null, software: false });
     const res = await get('/api/frames/no-browser/100.jpg');
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'the studio cannot paint frames right now', reason });
@@ -666,7 +666,7 @@ test('without a painting browser the studio stays up: frame requests fail at onc
     const t0 = Date.now();
     expect((await get('/api/frames/no-browser/101.jpg?prio=prefetch')).status).toBe(503);
     expect(Date.now() - t0).toBeLessThan(1000);
-    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: false, reason });
+    expect((await (await get('/api/health')).json()).painter).toEqual({ ok: false, reason, gpu: null, software: false });
     // a render can't be filled either, and says why
     await expect(svc.fillForRender('no-browser', null, { from: 100, to: 102 })).rejects.toThrow(reason);
   } finally { await down.close(); }
@@ -686,7 +686,8 @@ slowTest('a bad CHROME_PATH fixed while the studio runs: painting recovers once 
     expect(await get(101)).toMatchObject({ unavailable: expect.any(String) });   // not tried again yet
     await Bun.sleep(600);
     expect((await get(102)).file).toBeDefined();
-    expect(svc.painter()).toEqual({ ok: true, reason: null });
+    // started: it also says which renderer it got (a GPU here)
+    expect(svc.painter()).toEqual({ ok: true, reason: null, gpu: expect.any(String), software: false });
   } finally { await pool2.close(); }
 }, T);
 
@@ -955,3 +956,30 @@ slowTest('clearing the cache needs the token', async () => {
   expect(await res.json()).toEqual({ usedBytes: 0, capBytes: 1e12, legacyBytes: 0 });
   expect(service.coverage('tiny').ranges).toEqual([]);
 }, T);
+
+// Headless Chrome on Linux without a GPU it can reach paints WebGL in software (SwiftShader), many times slower: a
+// frame that would count as stuck with a GPU is only slow then, and pages painting side by side just slow each other
+// down. The same software renderer is forced here with --use-angle=swiftshader.
+slowTest('without a GPU, a slow frame is waited for instead of breaking its chapter, and one page paints at a time', async () => {
+  db.createVersion({ id: 'nogpu' });
+  db.writeFiles('nogpu', [{ path: 'ch/c01.js', content: fastChapter(1, 'const end = performance.now() + 3000; while (performance.now() < end) {}') },
+    ...[2, 3, 4].map(n => ({ path: `ch/c0${n}.js`, content: fastChapter(n) }))], { source: 'manual' });
+  const own = createCache({ dir: join(data, '.studio/cache/nogpu'), capBytes: 1e12 });
+  const soft = createPool({ port, baseUrl: `http://localhost:${port}`, painters: 3, paintTimeoutMs: 2000, softwarePaintTimeoutMs: 20000,
+    onPainted: p => own.put(p.key, p.frame, p.jpeg, p.deps), launch: opts => launchBrowser({ ...opts, angle: 'swiftshader' }) });
+  const svc = createFrameService({ db, cache: own, pool: soft, events, root });
+  let most = 0;
+  const watch = setInterval(() => { most = Math.max(most, soft.stats().painting); }, 20);
+  try {
+    // 3 s of chapter 1 is over the 2 s a GPU gets: in software it paints, and the chapter isn't broken
+    // (at render priority: a new preview request replaces the version's earlier one)
+    const ask = i => { const r = svc.frame('nogpu', i, 'render'); return r.pending ?? r; };
+    const slow = await ask(48);
+    expect(slow.file).toBeDefined();
+    expect(soft.health()).toMatchObject({ ok: true, software: true, gpu: expect.stringMatching(/SwiftShader/) });
+    // three chapters asked for at once are painted one after another
+    const three = await Promise.all([600, 1000, 1500].map(ask));
+    expect(three.every(r => r.file)).toBe(true);
+    expect(most).toBe(1);
+  } finally { clearInterval(watch); await soft.close(); }
+}, { timeout: 240000 });

@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, resolve, sep, basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { launchBrowser } from './studio/browser.js';
+import { launchBrowser, rendererOf } from './studio/browser.js';
 import { openSealedPage, PAINTER_SECRET } from './studio/frames/page.js';
 import { frameRange } from './studio/frames/keys.js';
 import { chapterWindowErrors } from './studio/storyboard.js';
@@ -178,9 +178,13 @@ const writeSheet = async (page, ts, out) => {
 if (args.check) {
   // Validation for studio jobs: the version must load without errors, the job's own file's chapter() registrations must
   // lie inside its chapter's window (--target=<n> or --target=shared names it; without one, every file is held to it:
-  // see chapterWindowErrors), and each time must be covered by a chapter and paint within 20 s without throwing.
+  // see chapterWindowErrors), and each time must be covered by a chapter and paint within 20 s (180 s without a GPU)
+  // without throwing.
   // --check=load only loads the version (used for shared.js, which covers no time of its own).
   const errors = [], ts = times(args.check).filter(Number.isFinite);
+  // Without a GPU (software WebGL, as headless Chrome on Linux often gets), painting is many times slower: the same
+  // 180 s the studio's painting pool allows then.
+  const limit = (await rendererOf(browser))?.software ? 180000 : 20000;
   const page = await openPage('', errors).catch(e => { errors.push(e.message); return null; });
   if (page && !errors.length) {
     const registrations = await page.evaluate(() => CH.map(c => ({ owner: typeof c.owner === 'string' ? c.owner : null,
@@ -193,7 +197,7 @@ if (args.check) {
     const covered = await page.evaluate(t => !!chapterAt(t), t).catch(e => { errors.push(e.message); return null; });
     if (covered === null) continue;
     if (!covered) { errors.push(`no chapter covers t=${t}`); continue; }
-    const slow = new Promise((_, bad) => setTimeout(() => bad(new Error(`painting t=${t} took over 20 s`)), 20000));
+    const slow = new Promise((_, bad) => setTimeout(() => bad(new Error(`painting t=${t} took over ${limit / 1000} s`)), limit));
     await Promise.race([page.evaluate(t => window.paintAt(t), t), slow]).catch(e => errors.push(e.message));
   }
   if (page && !errors.length && args.out) await writeSheet(page, ts, outPath('sheet.jpg'));
